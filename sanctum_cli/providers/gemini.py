@@ -47,9 +47,15 @@ class GeminiProvider(Provider):
         return ("\n\n".join(system_parts) or None), chat_msgs
 
     def _to_contents(self, messages: list[Message]) -> list[dict[str, Any]]:
-        return [
-            {"role": self._gemini_role(m.role), "parts": [{"text": m.content}]} for m in messages
-        ]
+        out: list[dict[str, Any]] = []
+        for m in messages:
+            parts: list[dict[str, Any]] = [{"text": m.content}] if m.content else []
+            for att in m.attachments:
+                parts.append(
+                    {"inline_data": {"mime_type": att.mime_type, "data": att.read_bytes()}}
+                )
+            out.append({"role": self._gemini_role(m.role), "parts": parts})
+        return out
 
     def _build_config(self, system: str | None, opts: ChatOpts) -> dict[str, Any]:
         cfg: dict[str, Any] = {}

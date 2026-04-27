@@ -12,13 +12,14 @@ the v1.0 roadmap once the surface is stable.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Flag, auto
 from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
     from decimal import Decimal
+    from pathlib import Path
 
 
 class Capability(Flag):
@@ -51,13 +52,33 @@ class Usage:
 
 
 @dataclass(frozen=True, slots=True)
+class Attachment:
+    """A file attached to a multimodal Message. ``data`` overrides ``path``
+    if both are set (used by tests + memory-resident inputs)."""
+
+    kind: Literal["image", "video", "file"]
+    path: Path
+    mime_type: str = "application/octet-stream"
+    data: bytes | None = None
+
+    def read_bytes(self) -> bytes:
+        if self.data is not None:
+            return self.data
+        return self.path.read_bytes()
+
+
+@dataclass(frozen=True, slots=True)
 class Message:
-    """One turn in a chat. v0.2 keeps the structure even though we only
-    send single-turn requests — multi-turn lands in v0.3 without changing
-    the interface."""
+    """One turn in a chat.
+
+    ``attachments`` is the multimodal channel — providers that support
+    VISION inline the bytes; providers that don't either ignore or error
+    via capability gating.
+    """
 
     role: Literal["user", "assistant", "system"]
     content: str
+    attachments: tuple[Attachment, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True, slots=True)

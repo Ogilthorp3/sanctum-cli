@@ -17,11 +17,15 @@ import typer
 from rich.console import Console
 
 from sanctum_cli import __version__
+from sanctum_cli.commands import agent as agent_cmd
 from sanctum_cli.commands import backup as backup_cmd
 from sanctum_cli.commands import chat as chat_cmd
 from sanctum_cli.commands import cloud as cloud_cmd
 from sanctum_cli.commands import code as code_cmd
 from sanctum_cli.commands import config_cmd, doctor, status
+from sanctum_cli.commands import keychain_cmd as keychain_command
+from sanctum_cli.commands import proxy as proxy_cmd
+from sanctum_cli.commands import vision as vision_cmd
 from sanctum_cli.errors import ExitCode, SanctumError
 
 app = typer.Typer(
@@ -259,10 +263,10 @@ cloud_app = typer.Typer(help="Cloud-backup configuration wizards.")
 app.add_typer(cloud_app, name="cloud")
 
 
-@cloud_app.command("setup", help="Guided wizard to wire a cloud backup target.")
+@cloud_app.command("setup", help="Guided wizard to wire a cloud backup target (b2 | gdrive).")
 def cloud_setup_top(
     backend: Annotated[
-        str, typer.Option("--backend", help="Backend: b2 (gdrive in v0.4).")
+        str, typer.Option("--backend", help="Backend: b2 (recommended) | gdrive.")
     ] = "b2",
     no_open: Annotated[bool, typer.Option("--no-open", help="Don't auto-open browser tabs.")] = False,
     no_persist: Annotated[
@@ -272,6 +276,196 @@ def cloud_setup_top(
 ) -> None:
     try:
         cloud_cmd.cloud_setup_command(backend=backend, no_open=no_open, no_persist=no_persist)
+    except SanctumError as exc:
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code)) from exc
+
+
+# ─── vision (multimodal Gemini) ─────────────────────────────────────
+
+
+@app.command("vision", help="Send an image / video to Gemini with a prompt.")
+def vision_top(
+    file: Annotated[Path, typer.Argument(exists=True, dir_okay=False, readable=True)],
+    prompt: Annotated[
+        str | None,
+        typer.Argument(help="Prompt text. Defaults to 'Describe this in detail.' if omitted."),
+    ] = None,
+    no_stream: Annotated[
+        bool, typer.Option("--no-stream", help="Wait for full response before printing.")
+    ] = False,
+    max_tokens: Annotated[
+        int | None,
+        typer.Option("--max-tokens", "-t", help="Cap response length.", min=1),
+    ] = None,
+    temperature: Annotated[
+        float | None,
+        typer.Option("--temperature", help="Sampling temperature 0.0..2.0.", min=0.0, max=2.0),
+    ] = None,
+) -> None:
+    try:
+        vision_cmd.vision_command(
+            file=file,
+            prompt=prompt,
+            no_stream=no_stream,
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
+    except SanctumError as exc:
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code)) from exc
+
+
+# ─── agent subcommands ─────────────────────────────────────────────
+
+agent_app = typer.Typer(help="LaunchAgent management for com.sanctum.* labels.")
+app.add_typer(agent_app, name="agent")
+
+
+@agent_app.command("list", help="List loaded com.sanctum.* LaunchAgents.")
+def agent_list_top(
+    json_output: Annotated[bool, typer.Option("--json", help="Emit JSON.")] = False,
+) -> None:
+    try:
+        agent_cmd.agent_list(json_output=json_output)
+    except SanctumError as exc:
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code)) from exc
+
+
+@agent_app.command("status", help="Status for one LaunchAgent.")
+def agent_status_top(
+    label: Annotated[str, typer.Argument(help="Label, e.g. com.sanctum.proxy.")],
+) -> None:
+    try:
+        agent_cmd.agent_status(label)
+    except SanctumError as exc:
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code)) from exc
+
+
+@agent_app.command("start", help="Bootstrap (load) a LaunchAgent.")
+def agent_start_top(label: Annotated[str, typer.Argument()]) -> None:
+    try:
+        agent_cmd.agent_start(label)
+    except SanctumError as exc:
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code)) from exc
+
+
+@agent_app.command("stop", help="Bootout (unload) a LaunchAgent.")
+def agent_stop_top(label: Annotated[str, typer.Argument()]) -> None:
+    try:
+        agent_cmd.agent_stop(label)
+    except SanctumError as exc:
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code)) from exc
+
+
+@agent_app.command("restart", help="Bootout + bootstrap a LaunchAgent.")
+def agent_restart_top(label: Annotated[str, typer.Argument()]) -> None:
+    try:
+        agent_cmd.agent_restart(label)
+    except SanctumError as exc:
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code)) from exc
+
+
+@agent_app.command("logs", help="Tail StandardOutPath/ErrorPath from the plist.")
+def agent_logs_top(
+    label: Annotated[str, typer.Argument()],
+    follow: Annotated[bool, typer.Option("--follow", "-f")] = False,
+    lines: Annotated[int, typer.Option("--lines", "-n", min=0, max=10_000)] = 50,
+) -> None:
+    try:
+        agent_cmd.agent_logs(label, follow=follow, lines=lines)
+    except SanctumError as exc:
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code)) from exc
+
+
+# ─── proxy subcommands ─────────────────────────────────────────────
+
+proxy_app = typer.Typer(help="Manage local provider proxies (claude-cli-proxy / sanctum-server / lmstudio).")
+app.add_typer(proxy_app, name="proxy")
+
+
+@proxy_app.command("status", help="LaunchAgent + HTTP /v1/models probe.")
+def proxy_status_top(
+    target: Annotated[str, typer.Argument()] = "all",
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    try:
+        proxy_cmd.proxy_status(target=target, json_output=json_output)
+    except SanctumError as exc:
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code)) from exc
+
+
+@proxy_app.command("restart", help="Restart one proxy LaunchAgent.")
+def proxy_restart_top(target: Annotated[str, typer.Argument()]) -> None:
+    try:
+        proxy_cmd.proxy_restart(target=target)
+    except SanctumError as exc:
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code)) from exc
+
+
+@proxy_app.command("logs", help="Tail proxy logs.")
+def proxy_logs_top(
+    target: Annotated[str, typer.Argument()],
+    follow: Annotated[bool, typer.Option("--follow", "-f")] = False,
+    lines: Annotated[int, typer.Option("--lines", "-n", min=0)] = 50,
+) -> None:
+    try:
+        proxy_cmd.proxy_logs(target=target, follow=follow, lines=lines)
+    except SanctumError as exc:
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code)) from exc
+
+
+# ─── keychain subcommands ──────────────────────────────────────────
+
+keychain_app = typer.Typer(help="Inspect and rotate sanctum-managed Keychain entries.")
+app.add_typer(keychain_app, name="keychain")
+
+
+@keychain_app.command("list", help="List managed entries (values never printed).")
+def keychain_list_top(
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    try:
+        keychain_command.keychain_list(json_output=json_output)
+    except SanctumError as exc:
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code)) from exc
+
+
+@keychain_app.command("test", help="Read every managed entry to confirm Keychain access.")
+def keychain_test_top() -> None:
+    try:
+        keychain_command.keychain_test()
+    except SanctumError as exc:
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code)) from exc
+
+
+@keychain_app.command("rotate", help="Replace a Keychain entry with a fresh value.")
+def keychain_rotate_top(
+    service: Annotated[str, typer.Argument()],
+    account: Annotated[
+        str | None, typer.Option("--account", "-a", help="Account (default: sanctum).")
+    ] = None,
+    value: Annotated[
+        str | None,
+        typer.Option("--value", help="Provide value. Omit to auto-generate 64 hex chars."),
+    ] = None,
+    yes: Annotated[bool, typer.Option("--yes", "-y")] = False,
+) -> None:
+    try:
+        keychain_command.keychain_rotate(
+            service=service, account=account, new_value=value, yes=yes
+        )
     except SanctumError as exc:
         _report(exc)
         raise typer.Exit(code=int(exc.exit_code)) from exc

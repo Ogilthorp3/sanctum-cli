@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from sanctum_cli.providers.base import (
+    Attachment,
     Capability,
     ChatOpts,
     HealthSnapshot,
@@ -13,6 +14,7 @@ from sanctum_cli.providers.base import (
 from sanctum_cli.providers.registry import make_provider
 
 __all__ = [
+    "Attachment",
     "Capability",
     "ChatOpts",
     "HealthSnapshot",

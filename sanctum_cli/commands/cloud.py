@@ -10,7 +10,7 @@ from typing import Annotated
 
 import typer
 
-from sanctum_cli.backends import b2
+from sanctum_cli.backends import b2, gdrive
 from sanctum_cli.errors import UserError
 
 
@@ -19,7 +19,7 @@ def cloud_setup_command(
         str,
         typer.Option(
             "--backend",
-            help="Backend to configure: b2 (default; gdrive lands in v0.4).",
+            help="Backend to configure: b2 (recommended) | gdrive.",
         ),
     ] = "b2",
     no_open: Annotated[
@@ -36,13 +36,7 @@ def cloud_setup_command(
         b2.run_wizard(auto_open=not no_open, persist=not no_persist)
         return
     if backend == "gdrive":
-        msg = "gdrive wizard ships in v0.4"
-        raise UserError(
-            msg,
-            fix=(
-                "until then, run the manual flow we documented in "
-                "~/Backups/RCLONE_SETUP.md or sanctum-docs/operations/backup-restore.mdx"
-            ),
-        )
-    msg = f"unknown backend: {backend!r} (expected: b2)"
+        gdrive.run_wizard(auto_open=not no_open, persist=not no_persist)
+        return
+    msg = f"unknown backend: {backend!r} (expected: b2 | gdrive)"
     raise UserError(msg)

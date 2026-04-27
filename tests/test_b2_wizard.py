@@ -200,11 +200,11 @@ def test_wizard_unknown_backend_rejected(
     assert "unknown backend" in combined.lower()
 
 
-def test_wizard_gdrive_returns_helpful_error(
+def test_wizard_gdrive_dispatches_to_gdrive_module(
     minimal_instance_yaml: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """As of v0.4, gdrive backend has its own wizard; verify cloud cmd dispatches."""
     monkeypatch.setenv("SANCTUM_INSTANCE_FILE", str(minimal_instance_yaml))
-    result = runner.invoke(app, ["cloud", "setup", "--backend", "gdrive"])
-    assert result.exit_code == 1
-    combined = result.stdout + (result.stderr or "")
-    assert "v0.4" in combined or "RCLONE_SETUP" in combined
+    with patch("sanctum_cli.commands.cloud.gdrive.run_wizard") as mocked:
+        runner.invoke(app, ["cloud", "setup", "--backend", "gdrive", "--no-open", "--no-persist"])
+    mocked.assert_called_once()
