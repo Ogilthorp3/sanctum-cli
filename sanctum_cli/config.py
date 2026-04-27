@@ -1,0 +1,216 @@
+"""Configuration schema for sanctum-cli.
+
+The CLI reads ``~/.sanctum/instance.yaml`` (or ``$SANCTUM_INSTANCE_FILE``)
+and pulls out the ``cli:`` block. The block is optional — a fresh
+install runs with sensible defaults; users add a ``cli:`` block when
+they want to customize routing, providers, or telemetry.
+
+Validation is via pydantic v2 with ``model_config = ConfigDict(extra="forbid")``
+so typos in keys fail loudly with a precise pointer.
+"""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+from typing import Any, Literal
+
+import yaml
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+
+from sanctum_cli.errors import ConfigError
+
+DEFAULT_INSTANCE_FILE = Path("~/.sanctum/instance.yaml").expanduser()
+ENV_INSTANCE_FILE = "SANCTUM_INSTANCE_FILE"
+
+
+# ─── Model fragments ────────────────────────────────────────────────
+
+
+class StrictModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class KeychainRef(StrictModel):
+    """Pointer to a Keychain generic-password entry."""
+
+    service: str
+    account: str
+
+
+class ClaudeProvider(StrictModel):
+    via: Literal["proxy", "direct"] = "proxy"
+    proxy_endpoint: str = "http://127.0.0.1:1234"
+    model: str = "claude-opus-4-7"
+    keychain: KeychainRef | None = None
+    timeout_s: int = Field(default=120, ge=1, le=600)
+    max_retries: int = Field(default=2, ge=0, le=10)
+
+
+class GeminiProvider(StrictModel):
+    api_endpoint: str = "https://generativelanguage.googleapis.com/v1beta"
+    model: str = "gemini-2.5-pro"
+    keychain: KeychainRef | None = None
+    timeout_s: int = Field(default=120, ge=1, le=600)
+    max_retries: int = Field(default=2, ge=0, le=10)
+
+
+class MlxLocalProvider(StrictModel):
+    endpoint: str = "http://127.0.0.1:8900"
+    model: str = "Qwen3.5-27B-4bit"
+    timeout_s: int = Field(default=60, ge=1, le=600)
+    always_available: bool = True
+
+
+class Providers(StrictModel):
+    claude: ClaudeProvider = Field(default_factory=ClaudeProvider)
+    gemini: GeminiProvider = Field(default_factory=GeminiProvider)
+    mlx_local: MlxLocalProvider = Field(default_factory=MlxLocalProvider)
+
+
+# ─── Routing ────────────────────────────────────────────────────────
+
+
+class RoutingRule(StrictModel):
+    """A single routing rule — `when` matched, dispatch to `then`."""
+
+    when: dict[str, Any]
+    then: Literal["claude", "gemini", "mlx_local"]
+
+
+class Routing(StrictModel):
+    rules: list[RoutingRule] = Field(default_factory=list)
+    fallback: Literal["claude", "gemini", "mlx_local"] = "claude"
+
+
+# ─── Telemetry ──────────────────────────────────────────────────────
+
+
+class Telemetry(StrictModel):
+    enabled: bool = True
+    path: Path = Path("~/.sanctum/telemetry/cli.jsonl")
+    redact_prompts: bool = True
+    aggregate_window_days: int = Field(default=7, ge=1, le=365)
+
+    @field_validator("path", mode="before")
+    @classmethod
+    def expand_user(cls, v: object) -> object:
+        if isinstance(v, str):
+            return Path(v).expanduser()
+        if isinstance(v, Path):
+            return v.expanduser()
+        return v
+
+
+# ─── Cloud backup pointers ──────────────────────────────────────────
+
+
+class CloudBackupRepo(StrictModel):
+    kind: Literal["restic", "borg", "kopia"] = "restic"
+    repo: str
+    keychain: KeychainRef
+
+
+class CloudBackupRetention(StrictModel):
+    keep_daily: int = Field(default=7, ge=1)
+    keep_weekly: int = Field(default=4, ge=0)
+    keep_monthly: int = Field(default=12, ge=0)
+
+
+class CloudBackup(StrictModel):
+    primary: CloudBackupRepo | None = None
+    secondary: CloudBackupRepo | None = None
+    retention: CloudBackupRetention = Field(default_factory=CloudBackupRetention)
+
+
+# ─── UI ──────────────────────────────────────────────────────────────
+
+
+class UISettings(StrictModel):
+    color: Literal["auto", "always", "never"] = "auto"
+    progress: Literal["auto", "rich", "none"] = "auto"
+    json_default: bool = False
+
+
+# ─── Top-level CLI section ──────────────────────────────────────────
+
+
+class CliConfig(StrictModel):
+    """The ``cli:`` block in instance.yaml."""
+
+    default_provider: Literal["claude", "gemini", "mlx_local"] = "claude"
+    routing: Routing = Field(default_factory=Routing)
+    providers: Providers = Field(default_factory=Providers)
+    telemetry: Telemetry = Field(default_factory=Telemetry)
+    cloud_backup: CloudBackup | None = None
+    ui: UISettings = Field(default_factory=UISettings)
+
+
+class InstanceMetadata(StrictModel):
+    """Subset of ``instance:`` block we actually read."""
+
+    name: str
+    slug: str
+    timezone: str | None = None
+
+
+class Config(StrictModel):
+    """Composite of instance metadata + cli section.
+
+    Other top-level keys in instance.yaml (services, paths, network, …)
+    are deliberately not modeled here — they belong to other tools.
+    """
+
+    instance: InstanceMetadata
+    cli: CliConfig = Field(default_factory=CliConfig)
+
+
+# ─── Loader ──────────────────────────────────────────────────────────
+
+
+def instance_path() -> Path:
+    override = os.environ.get(ENV_INSTANCE_FILE)
+    return Path(override).expanduser() if override else DEFAULT_INSTANCE_FILE
+
+
+def load(path: Path | None = None) -> Config:
+    """Read and validate the instance config.
+
+    Raises ``ConfigError`` for any read or schema failure with a precise
+    pointer to the offending key.
+    """
+    target = path or instance_path()
+    if not target.exists():
+        msg = f"instance config not found: {target}"
+        raise ConfigError(
+            msg,
+            fix=(
+                f"create {target} with at minimum:\n"
+                "  instance:\n    name: My Sanctum\n    slug: my-sanctum\n"
+            ),
+        )
+
+    try:
+        raw = yaml.safe_load(target.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError as exc:
+        msg = f"YAML parse error in {target}: {exc}"
+        raise ConfigError(msg, fix="fix the YAML syntax error noted above") from exc
+
+    if not isinstance(raw, dict):
+        msg = f"top-level YAML must be a mapping in {target}, got {type(raw).__name__}"
+        raise ConfigError(msg)
+
+    relevant = {k: raw[k] for k in ("instance", "cli") if k in raw}
+    try:
+        return Config.model_validate(relevant)
+    except ValidationError as exc:
+        msg = _format_validation_error(exc, target)
+        raise ConfigError(msg) from exc
+
+
+def _format_validation_error(exc: ValidationError, target: Path) -> str:
+    lines = [f"schema violation in {target}:"]
+    for err in exc.errors():
+        loc = ".".join(str(p) for p in err["loc"])
+        lines.append(f"  {loc}: {err['msg']}")
+    return "\n".join(lines)
