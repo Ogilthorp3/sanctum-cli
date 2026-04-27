@@ -4,9 +4,9 @@ A Provider is a pluggable model backend. The router picks one per
 request based on intent, attachments, and config; the chosen Provider
 handles the actual chat/vision/code call.
 
-v0.1 ships the ABC + Capability enum only — no concrete implementations
-yet. The shape is fixed here so v0.2 implementations and the router
-share a stable interface.
+The interface is **synchronous and generator-based** in v0.2 — each
+``chat()`` returns an iterator of text chunks. Async streaming is on
+the v1.0 roadmap once the surface is stable.
 """
 
 from __future__ import annotations
@@ -14,9 +14,10 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Flag, auto
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from decimal import Decimal
 
 
@@ -43,8 +44,29 @@ class HealthSnapshot:
 
 @dataclass(frozen=True, slots=True)
 class Usage:
+    """Token counts for a single completed request."""
+
     tokens_in: int
     tokens_out: int
+
+
+@dataclass(frozen=True, slots=True)
+class Message:
+    """One turn in a chat. v0.2 keeps the structure even though we only
+    send single-turn requests — multi-turn lands in v0.3 without changing
+    the interface."""
+
+    role: Literal["user", "assistant", "system"]
+    content: str
+
+
+@dataclass(frozen=True, slots=True)
+class ChatOpts:
+    """Per-call dispatch options."""
+
+    stream: bool = True
+    max_tokens: int | None = None
+    temperature: float | None = None
 
 
 class Provider(ABC):
@@ -59,8 +81,16 @@ class Provider(ABC):
     capabilities: Capability
 
     @abstractmethod
-    async def health(self) -> HealthSnapshot:
-        """Single round-trip probe. Bounded by the provider's timeout config."""
+    def chat(self, messages: list[Message], opts: ChatOpts) -> Iterator[str]:
+        """Yield response text chunks. Returns immediately if ``opts.stream``
+        is False — yields a single full chunk in that case so callers don't
+        branch on streaming mode."""
+
+    @abstractmethod
+    def health(self) -> HealthSnapshot:
+        """Single round-trip probe. Bounded by the provider's timeout config.
+
+        Must never raise — failures populate ``ok=False`` with a ``detail``."""
 
     @abstractmethod
     def cost(self, usage: Usage) -> Decimal:

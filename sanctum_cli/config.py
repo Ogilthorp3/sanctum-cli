@@ -39,25 +39,30 @@ class KeychainRef(StrictModel):
 
 
 class ClaudeProvider(StrictModel):
-    via: Literal["proxy", "direct"] = "proxy"
-    proxy_endpoint: str = "http://127.0.0.1:1234"
+    via: Literal["direct", "proxy"] = "direct"
+    endpoint: str = "https://api.anthropic.com"
     model: str = "claude-opus-4-7"
-    keychain: KeychainRef | None = None
+    keychain: KeychainRef = Field(
+        default_factory=lambda: KeychainRef(service="anthropic-api-key", account="sanctum")
+    )
     timeout_s: int = Field(default=120, ge=1, le=600)
     max_retries: int = Field(default=2, ge=0, le=10)
+    max_tokens: int = Field(default=4096, ge=1, le=200_000)
 
 
 class GeminiProvider(StrictModel):
-    api_endpoint: str = "https://generativelanguage.googleapis.com/v1beta"
+    endpoint: str = "https://generativelanguage.googleapis.com"
     model: str = "gemini-2.5-pro"
-    keychain: KeychainRef | None = None
+    keychain: KeychainRef = Field(
+        default_factory=lambda: KeychainRef(service="google-ai-api-key", account="sanctum")
+    )
     timeout_s: int = Field(default=120, ge=1, le=600)
     max_retries: int = Field(default=2, ge=0, le=10)
 
 
 class MlxLocalProvider(StrictModel):
     endpoint: str = "http://127.0.0.1:8900"
-    model: str = "Qwen3.5-27B-4bit"
+    model: str = "council-secure"
     timeout_s: int = Field(default=60, ge=1, le=600)
     always_available: bool = True
 

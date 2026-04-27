@@ -46,8 +46,8 @@ cli:
     fallback: claude
   providers:
     claude:
-      via: proxy
-      proxy_endpoint: http://127.0.0.1:1234
+      via: direct
+      endpoint: https://api.anthropic.com
       model: claude-opus-4-7
     gemini:
       model: gemini-2.5-pro
