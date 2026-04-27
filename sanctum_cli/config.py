@@ -39,13 +39,21 @@ class KeychainRef(StrictModel):
 
 
 class ClaudeProvider(StrictModel):
-    via: Literal["direct", "proxy"] = "direct"
-    endpoint: str = "https://api.anthropic.com"
+    """Claude routing config.
+
+    ``via=proxy`` (default) talks to a local OpenAI-compatible proxy that
+    shells out to the ``claude`` CLI — billing happens against the user's
+    Max subscription, not the API. ``via=direct`` uses the official
+    Anthropic SDK and bills against the API key in Keychain.
+    """
+
+    via: Literal["proxy", "direct"] = "proxy"
+    endpoint: str = "http://127.0.0.1:2001"
     model: str = "claude-opus-4-7"
     keychain: KeychainRef = Field(
         default_factory=lambda: KeychainRef(service="anthropic-api-key", account="sanctum")
     )
-    timeout_s: int = Field(default=120, ge=1, le=600)
+    timeout_s: int = Field(default=300, ge=1, le=900)
     max_retries: int = Field(default=2, ge=0, le=10)
     max_tokens: int = Field(default=4096, ge=1, le=200_000)
 

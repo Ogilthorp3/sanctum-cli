@@ -23,6 +23,9 @@ def make_provider(name: str, cfg: Providers) -> Provider:
     not three hops deep inside a streaming generator.
     """
     if name == "claude":
+        if cfg.claude.via == "proxy":
+            # Max subscription via local claude-cli-proxy — no API key needed
+            return ClaudeProvider(cfg.claude, api_key=None)
         api_key = keychain.read(
             account=cfg.claude.keychain.account,
             service=cfg.claude.keychain.service,

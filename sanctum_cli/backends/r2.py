@@ -90,19 +90,24 @@ class _SetupResult:
 # ─── Pre-flight ─────────────────────────────────────────────────────
 
 
-def _preflight(cfg: config.Config) -> None:
+def _preflight(cfg: config.Config) -> str:
+    """Return the slot to populate: ``primary`` or ``secondary``."""
     if not shutil.which("restic"):
         msg = "restic not installed"
         raise UserError(msg, fix="brew install restic && re-run `sanctum cloud setup`")
-    if cfg.cli.cloud_backup is not None and cfg.cli.cloud_backup.primary is not None:
-        msg = "cloud_backup.primary already configured"
-        raise UserError(
-            msg,
-            fix=(
-                "to add a second target, edit ~/.sanctum/instance.yaml manually for now "
-                "(replace flow lands in v0.6)"
-            ),
-        )
+    cb = cfg.cli.cloud_backup
+    if cb is None or cb.primary is None:
+        return "primary"
+    if cb.secondary is None:
+        return "secondary"
+    msg = "both cloud_backup.primary and .secondary already configured"
+    raise UserError(
+        msg,
+        fix=(
+            "free a slot by editing ~/.sanctum/instance.yaml directly, then re-run; "
+            "atomic-replace flow lands in v0.7"
+        ),
+    )
 
 
 # ─── SigV4 signing ──────────────────────────────────────────────────
@@ -311,6 +316,7 @@ def _round_trip(repo: str, env: dict[str, str]) -> None:
 def _persist(
     instance_path: Path,
     *,
+    slot: str,
     repo: str,
     keychain_service_restic: str,
     keychain_account: str,
@@ -321,7 +327,7 @@ def _persist(
         raise LocalError(msg)
     cli_block = raw.setdefault("cli", {}) or {}
     cb_block = cli_block.setdefault("cloud_backup", {}) or {}
-    cb_block["primary"] = {
+    cb_block[slot] = {
         "kind": "restic",
         "repo": repo,
         "keychain": {"service": keychain_service_restic, "account": keychain_account},
@@ -347,17 +353,17 @@ def _persist(
 
 def run_wizard(*, auto_open: bool = True, persist: bool = True) -> _SetupResult:
     cfg = config.load()
-    _preflight(cfg)
+    target_slot = _preflight(cfg)
 
     console.print(
         Panel.fit(
-            "[bold]Sanctum cloud-setup wizard — Cloudflare R2[/]\n\n"
-            "R2 is the recommended default: 10 GB storage + 1 M Class A + 10 M Class B "
-            "free monthly, and [bold]no egress charges, ever[/]. Restore drills cost $0.\n\n"
-            "Three values to paste: Cloudflare account ID, R2 access key ID, R2 secret "
-            "access key. The wizard verifies them against R2, creates a private bucket, "
-            "initializes restic, runs a round-trip canary, and updates "
-            "[cyan]~/.sanctum/instance.yaml[/].",
+            f"[bold]Sanctum cloud-setup wizard — Cloudflare R2[/]\n\n"
+            f"R2 is the recommended default: 10 GB storage + 1 M Class A + 10 M Class B "
+            f"free monthly, and [bold]no egress charges, ever[/]. Restore drills cost $0.\n\n"
+            f"Three values to paste: Cloudflare account ID, R2 access key ID, R2 secret "
+            f"access key. The wizard verifies them against R2, creates a private bucket, "
+            f"initializes restic, runs a round-trip canary, and writes "
+            f"[cyan]cli.cloud_backup.{target_slot}[/] in [cyan]~/.sanctum/instance.yaml[/].",
             border_style="cyan",
         )
     )
@@ -442,14 +448,15 @@ def run_wizard(*, auto_open: bool = True, persist: bool = True) -> _SetupResult:
 
     # 8. Persist
     if persist:
-        console.print("\n[bold]Step 7.[/] Updating ~/.sanctum/instance.yaml …")
+        console.print(f"\n[bold]Step 7.[/] Updating ~/.sanctum/instance.yaml ({target_slot}) …")
         _persist(
             config.instance_path(),
+            slot=target_slot,
             repo=repo,
             keychain_service_restic=KEYCHAIN_SERVICE_RESTIC,
             keychain_account=KEYCHAIN_ACCOUNT_RESTIC,
         )
-        console.print("  [green]✓[/] cli.cloud_backup.primary set; .bak file written")
+        console.print(f"  [green]✓[/] cli.cloud_backup.{target_slot} set; .bak file written")
     else:
         console.print(
             "\n[bold]Step 7.[/] [yellow]Skipped persistence (--no-persist).[/] To wire this manually:"
@@ -463,6 +470,7 @@ def run_wizard(*, auto_open: bool = True, persist: bool = True) -> _SetupResult:
     summary = Table.grid(padding=(0, 2))
     summary.add_column(style="bold cyan")
     summary.add_column()
+    summary.add_row("slot", target_slot)
     summary.add_row("account", creds.account_id)
     summary.add_row("bucket", bucket)
     summary.add_row("repo", repo)

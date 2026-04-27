@@ -148,6 +148,7 @@ def test_persist_to_instance_yaml_writes_repo_and_bak(tmp_path: Path) -> None:
     repo = "s3:https://abc.r2.cloudflarestorage.com/sanctum-restic-host-1234"
     r2._persist(
         target,
+        slot="primary",
         repo=repo,
         keychain_service_restic="sanctum-backup-key",
         keychain_account="sanctum-backup",
@@ -162,6 +163,31 @@ def test_persist_to_instance_yaml_writes_repo_and_bak(tmp_path: Path) -> None:
     )
     bak_files = list(tmp_path.glob("instance.yaml.bak.*"))
     assert len(bak_files) == 1
+
+
+def test_persist_writes_secondary_slot(tmp_path: Path) -> None:
+    target = tmp_path / "instance.yaml"
+    target.write_text(
+        "instance:\n  name: T\n  slug: t\n"
+        "cli:\n  cloud_backup:\n    primary:\n      kind: restic\n"
+        "      repo: /Volumes/T9/sanctum-restic\n"
+        "      keychain: { service: sanctum-backup-key, account: sanctum-backup }\n",
+        encoding="utf-8",
+    )
+    repo = "s3:https://abc.r2.cloudflarestorage.com/another"
+    r2._persist(
+        target,
+        slot="secondary",
+        repo=repo,
+        keychain_service_restic="sanctum-backup-key",
+        keychain_account="sanctum-backup",
+    )
+    import yaml as _yaml
+
+    parsed = _yaml.safe_load(target.read_text())
+    # primary preserved, secondary added
+    assert parsed["cli"]["cloud_backup"]["primary"]["repo"] == "/Volumes/T9/sanctum-restic"
+    assert parsed["cli"]["cloud_backup"]["secondary"]["repo"] == repo
 
 
 # ─── Full wizard happy path ─────────────────────────────────────────
@@ -225,15 +251,16 @@ def test_full_wizard_happy_path(
     assert "r2.cloudflarestorage.com" in result.stdout
 
 
-def test_wizard_rejects_when_already_configured(
+def test_wizard_rejects_when_both_slots_full(
     full_instance_yaml: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """full_instance_yaml has both primary + secondary configured."""
     monkeypatch.setenv("SANCTUM_INSTANCE_FILE", str(full_instance_yaml))
     with patch("sanctum_cli.backends.r2.shutil.which", return_value="/x"):
         result = runner.invoke(app, ["cloud", "setup", "--no-open", "--no-persist"])
     assert result.exit_code == 1
     combined = result.stdout + (result.stderr or "")
-    assert "already configured" in combined.lower()
+    assert "primary" in combined.lower() and "secondary" in combined.lower()
 
 
 def test_wizard_unknown_backend_rejected(
