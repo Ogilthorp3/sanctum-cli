@@ -148,6 +148,23 @@ class UISettings(StrictModel):
 # ─── Top-level CLI section ──────────────────────────────────────────
 
 
+class Recipe(StrictModel):
+    """A backup recipe — a named bundle of sources/excludes for an audience.
+
+    Recipes solve the ``what do I back up?`` question. ``family`` covers the
+    crucial-but-small data a typical household cares about (documents,
+    secrets) and is sized to fit the R2 free tier with dedup. ``operator``
+    is the Sanctum-host configuration recipe used by the original bash
+    script. Users can override built-ins or add new ones via ``instance.yaml``.
+    """
+
+    description: str = ""
+    sources: list[str] = Field(default_factory=list)
+    excludes: list[str] = Field(default_factory=list)
+    target: Literal["primary", "secondary"] = "primary"
+    auto_exclude_icloud_photos: bool = True
+
+
 class CliConfig(StrictModel):
     """The ``cli:`` block in instance.yaml."""
 
@@ -157,6 +174,8 @@ class CliConfig(StrictModel):
     telemetry: Telemetry = Field(default_factory=Telemetry)
     cloud_backup: CloudBackup | None = None
     ui: UISettings = Field(default_factory=UISettings)
+    recipes: dict[str, Recipe] = Field(default_factory=dict)
+    default_recipe: str | None = None
 
 
 class InstanceMetadata(StrictModel):

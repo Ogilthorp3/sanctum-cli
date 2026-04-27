@@ -196,20 +196,56 @@ backup_app = typer.Typer(help="Backup commands — run, list snapshots, verify, 
 app.add_typer(backup_app, name="backup")
 
 
-@backup_app.command("run", help="Run the configured sanctum-backup.sh script.")
+@backup_app.command(
+    "run",
+    help="Run a backup. With --recipe, drives restic from a recipe; otherwise runs the legacy script.",
+)
 def backup_run_top(
-    script: Annotated[
-        Path | None,
+    recipe: Annotated[
+        str | None,
         typer.Option(
-            "--script",
-            help="Path to backup script.",
-            exists=True,
-            dir_okay=False,
+            "--recipe",
+            "-r",
+            help="Recipe name (family | operator | code | <user-defined>).",
         ),
     ] = None,
+    script: Annotated[
+        Path | None,
+        typer.Option("--script", help="Path to backup script.", exists=True, dir_okay=False),
+    ] = None,
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Show what would be backed up; write nothing."),
+    ] = False,
 ) -> None:
     try:
-        backup_cmd.backup_run(script=script)
+        backup_cmd.backup_run(recipe=recipe, script=script, dry_run=dry_run)
+    except SanctumError as exc:
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code)) from exc
+
+
+@backup_app.command("recipes", help="List available backup recipes (built-in + user-defined).")
+def backup_recipes_top(
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    try:
+        backup_cmd.backup_recipes(json_output=json_output)
+    except SanctumError as exc:
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code)) from exc
+
+
+@backup_app.command(
+    "estimate",
+    help="Estimate raw size for a recipe before running it. Compares against R2 free tier.",
+)
+def backup_estimate_top(
+    recipe: Annotated[str, typer.Argument()],
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    try:
+        backup_cmd.backup_estimate(recipe=recipe, json_output=json_output)
     except SanctumError as exc:
         _report(exc)
         raise typer.Exit(code=int(exc.exit_code)) from exc

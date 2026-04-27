@@ -20,7 +20,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from sanctum_cli import config, keychain
+from sanctum_cli import config, keychain, recipes
 from sanctum_cli.errors import LocalError, UserError
 
 console = Console()
@@ -29,6 +29,9 @@ err = Console(stderr=True)
 DEFAULT_BACKUP_SCRIPT = Path("~/Backups/sanctum-backup.sh").expanduser()
 RESTIC_TIMEOUT_S = 30
 SNAPSHOTS_TIMEOUT_S = 15
+BACKUP_TIMEOUT_S = 60 * 60  # 1h cap on a recipe-driven backup
+ESTIMATE_TIMEOUT_S = 60
+R2_FREE_TIER_GB = 10
 
 RepoFilter = Literal["primary", "secondary", "all"]
 
@@ -37,6 +40,22 @@ RepoFilter = Literal["primary", "secondary", "all"]
 class _Repo:
     label: str
     path: str
+
+
+def _resolve_recipe_target(cfg: config.Config, recipe: config.Recipe) -> _Repo:
+    """Return the cloud_backup repo the recipe targets."""
+    cb = cfg.cli.cloud_backup
+    if cb is None:
+        msg = "no cloud_backup configured in instance.yaml"
+        raise UserError(
+            msg, fix="run `sanctum cloud setup` to configure a backup target"
+        )
+    slot = recipe.target
+    repo_cfg = cb.primary if slot == "primary" else cb.secondary
+    if repo_cfg is None:
+        msg = f"recipe targets cloud_backup.{slot}, but it's not configured"
+        raise UserError(msg, fix=f"run `sanctum cloud setup` to populate the {slot} slot")
+    return _Repo(label=slot, path=repo_cfg.path if False else repo_cfg.repo)
 
 
 def _resolve_repos(cfg: config.Config, repo_filter: RepoFilter) -> list[_Repo]:
@@ -72,17 +91,35 @@ def _load_password(cfg: config.Config) -> str:
 
 
 def backup_run(
+    recipe: Annotated[
+        str | None,
+        typer.Option(
+            "--recipe",
+            "-r",
+            help="Backup recipe (family | operator | code | <user-defined>). "
+            "If omitted, runs the legacy ~/Backups/sanctum-backup.sh.",
+        ),
+    ] = None,
     script: Annotated[
         Path | None,
         typer.Option(
             "--script",
-            help=f"Path to backup script. Default: {DEFAULT_BACKUP_SCRIPT}",
+            help=f"Path to backup script. Default: {DEFAULT_BACKUP_SCRIPT}.",
             exists=True,
             dir_okay=False,
         ),
     ] = None,
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Show what would be backed up without writing."),
+    ] = False,
 ) -> None:
-    """Invoke the configured backup script and stream its output."""
+    """Run a backup. With --recipe, drives restic directly from a recipe;
+    otherwise invokes the legacy bash script for backwards compatibility."""
+    if recipe is not None:
+        _backup_recipe(recipe, dry_run=dry_run)
+        return
+
     target = script or DEFAULT_BACKUP_SCRIPT
     if not target.exists():
         msg = f"backup script not found: {target}"
@@ -103,6 +140,224 @@ def backup_run(
     if rc != 0:
         msg = f"backup script exited with code {rc}"
         raise LocalError(msg)
+
+
+def _backup_recipe(name: str, *, dry_run: bool) -> None:
+    """Run an in-CLI restic backup driven by a recipe."""
+    cfg = config.load()
+    recipe = recipes.resolve(name, cfg.cli)
+    repo = _resolve_recipe_target(cfg, recipe)
+    sources = recipes.expand_sources(recipe)
+    if not sources:
+        msg = f"recipe {name!r} has no resolvable sources on this host"
+        raise UserError(
+            msg,
+            fix="check the recipe's `sources:` paths exist (or add them to instance.yaml)",
+        )
+    excludes = recipes.effective_excludes(recipe)
+
+    if not shutil.which("restic"):
+        msg = "restic not installed"
+        raise LocalError(msg, fix="brew install restic")
+
+    env = dict(os.environ)
+    env["RESTIC_PASSWORD"] = _load_password(cfg)
+
+    # Write excludes to a temp file (restic --exclude-file)
+    import tempfile
+
+    with tempfile.NamedTemporaryFile(
+        "w", prefix="sanctum-excludes-", suffix=".txt", delete=False, encoding="utf-8"
+    ) as fh:
+        for pattern in excludes:
+            fh.write(pattern + "\n")
+        excludes_path = Path(fh.name)
+
+    try:
+        cmd = ["restic", "-r", repo.path, "backup"]
+        if dry_run:
+            cmd.append("--dry-run")
+        cmd.extend(["--tag", "daily", "--tag", recipe_tag(name)])
+        cmd.extend(["--exclude-file", str(excludes_path), "--exclude-caches"])
+        cmd.extend(str(s) for s in sources)
+
+        console.print(
+            f"[bold]recipe[/] [cyan]{name}[/] · "
+            f"target={repo.label} ({repo.path}) · "
+            f"sources={len(sources)} · excludes={len(excludes)}"
+            + (" · [yellow]DRY RUN[/]" if dry_run else "")
+        )
+        for s in sources:
+            console.print(f"  [dim]+[/] {s}")
+
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env
+        )
+        if proc.stdout is None:  # pragma: no cover
+            msg = "restic stdout pipe missing"
+            raise LocalError(msg)
+        for line in proc.stdout:
+            console.print(line.rstrip())
+        rc = proc.wait(timeout=BACKUP_TIMEOUT_S)
+        if rc != 0:
+            msg = f"restic backup failed with rc={rc}"
+            raise LocalError(msg)
+        console.print(
+            f"[green]✓[/] recipe {name!r} backup complete"
+            + (" (dry run — nothing written)" if dry_run else "")
+        )
+    finally:
+        excludes_path.unlink(missing_ok=True)
+
+
+def recipe_tag(name: str) -> str:
+    """Stable restic tag for the recipe — for `restic snapshots --tag`."""
+    return f"recipe:{name}"
+
+
+# ─── recipes (list) ──────────────────────────────────────────────────
+
+
+def backup_recipes(
+    json_output: Annotated[bool, typer.Option("--json", help="Emit JSON.")] = False,
+) -> None:
+    """List available backup recipes (built-in + user-defined)."""
+    cfg = config.load()
+    rows = recipes.list_all(cfg.cli)
+    overridden = set(cfg.cli.recipes.keys())
+
+    if json_output:
+        print(
+            json.dumps(
+                {
+                    name: {
+                        "description": r.description,
+                        "sources": r.sources,
+                        "excludes_count": len(r.excludes),
+                        "target": r.target,
+                        "auto_exclude_icloud_photos": r.auto_exclude_icloud_photos,
+                        "user_override": name in overridden,
+                    }
+                    for name, r in rows.items()
+                },
+                indent=2,
+            )
+        )
+        return
+
+    t = Table(title="backup recipes", show_header=True, header_style="bold")
+    t.add_column("name")
+    t.add_column("origin", justify="right")
+    t.add_column("target", justify="right")
+    t.add_column("sources", justify="right")
+    t.add_column("description")
+    for name, r in rows.items():
+        origin = "[yellow]override[/]" if name in overridden else "[dim]built-in[/]"
+        t.add_row(name, origin, r.target, str(len(r.sources)), r.description)
+    console.print(t)
+    default = recipes.default_name(cfg.cli)
+    console.print(f"\n[dim]default recipe:[/] [bold]{default}[/]")
+
+
+# ─── estimate ────────────────────────────────────────────────────────
+
+
+def backup_estimate(
+    recipe: Annotated[
+        str,
+        typer.Argument(help="Recipe name (family | operator | code | <user>)."),
+    ],
+    json_output: Annotated[bool, typer.Option("--json", help="Emit JSON.")] = False,
+) -> None:
+    """Estimate the on-disk size a recipe would back up before dedup.
+
+    Uses ``du`` per-source — fast, doesn't read pack-level data. Doesn't
+    account for restic dedup, so the number is an upper bound. After the
+    first snapshot exists, dedup typically gives a 30-70% reduction on
+    subsequent backups.
+    """
+    cfg = config.load()
+    rcp = recipes.resolve(recipe, cfg.cli)
+    sources = recipes.expand_sources(rcp)
+    excludes = recipes.effective_excludes(rcp)
+
+    if not sources:
+        msg = f"recipe {recipe!r} has no resolvable sources on this host"
+        raise UserError(msg)
+
+    if not shutil.which("du"):
+        msg = "du not installed"
+        raise LocalError(msg)
+
+    per_source: list[dict[str, object]] = []
+    total_kb = 0
+    for src in sources:
+        # `du -sk` returns size in KB. Excludes via -I requires GNU du; macOS
+        # du doesn't support it. We approximate by post-filtering find output.
+        try:
+            out = subprocess.run(
+                ["du", "-sk", str(src)],
+                capture_output=True,
+                text=True,
+                timeout=ESTIMATE_TIMEOUT_S,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            per_source.append({"path": str(src), "size_kb": None, "note": "timeout"})
+            continue
+        if out.returncode != 0:
+            per_source.append(
+                {"path": str(src), "size_kb": None, "note": out.stderr.strip()[:80]}
+            )
+            continue
+        kb = int(out.stdout.split("\t", 1)[0])
+        total_kb += kb
+        per_source.append({"path": str(src), "size_kb": kb})
+
+    total_gb = total_kb / 1024 / 1024
+    fits_free_tier = total_gb < R2_FREE_TIER_GB
+
+    if json_output:
+        print(
+            json.dumps(
+                {
+                    "recipe": recipe,
+                    "target": rcp.target,
+                    "total_kb": total_kb,
+                    "total_gb": round(total_gb, 2),
+                    "fits_r2_free_tier": fits_free_tier,
+                    "free_tier_gb": R2_FREE_TIER_GB,
+                    "sources": per_source,
+                    "excludes_count": len(excludes),
+                    "note": "raw size pre-dedup; first snapshot ~= this, subsequent typically 30-70% smaller",
+                },
+                indent=2,
+            )
+        )
+        return
+
+    t = Table(title=f"estimate · recipe={recipe}", show_header=True, header_style="bold")
+    t.add_column("source")
+    t.add_column("size", justify="right")
+    t.add_column("note")
+    for s in per_source:
+        size = (
+            f"{s['size_kb'] / 1024 / 1024:.2f} GB"
+            if isinstance(s["size_kb"], int)
+            else "?"
+        )
+        t.add_row(str(s["path"]), size, str(s.get("note", "")))
+    console.print(t)
+    console.print()
+    color = "green" if fits_free_tier else "yellow"
+    console.print(
+        f"[bold]total raw[/]   {total_gb:.2f} GB pre-dedup\n"
+        f"[bold]R2 free[/]    {R2_FREE_TIER_GB} GB · "
+        f"[{color}]{'fits' if fits_free_tier else 'EXCEEDS'}[/] free tier"
+    )
+    console.print(
+        "[dim]first snapshot ~= raw size; subsequent backups typically 30-70% smaller after dedup.[/]"
+    )
 
 
 # ─── snapshots ──────────────────────────────────────────────────────
