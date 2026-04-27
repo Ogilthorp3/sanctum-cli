@@ -11,6 +11,7 @@ from typing import Annotated
 import typer
 
 from sanctum_cli.backends import b2, gdrive, r2
+from sanctum_cli.backends import github as gh_backend
 from sanctum_cli.errors import UserError
 
 
@@ -41,5 +42,8 @@ def cloud_setup_command(
     if backend == "gdrive":
         gdrive.run_wizard(auto_open=not no_open, persist=not no_persist)
         return
-    msg = f"unknown backend: {backend!r} (expected: r2 | b2 | gdrive)"
+    if backend == "github":
+        gh_backend.run_wizard(persist=not no_persist)
+        return
+    msg = f"unknown backend: {backend!r} (expected: r2 | b2 | gdrive | github)"
     raise UserError(msg)

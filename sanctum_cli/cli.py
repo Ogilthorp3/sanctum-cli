@@ -24,6 +24,7 @@ from sanctum_cli.commands import cloud as cloud_cmd
 from sanctum_cli.commands import code as code_cmd
 from sanctum_cli.commands import config_cmd, doctor, status
 from sanctum_cli.commands import keychain_cmd as keychain_command
+from sanctum_cli.commands import onboard as onboard_cmd
 from sanctum_cli.commands import proxy as proxy_cmd
 from sanctum_cli.commands import vision as vision_cmd
 from sanctum_cli.errors import ExitCode, SanctumError
@@ -301,14 +302,14 @@ app.add_typer(cloud_app, name="cloud")
 
 @cloud_app.command(
     "setup",
-    help="Guided wizard to wire a cloud backup target (r2 | b2 | gdrive).",
+    help="Guided wizard to wire a backup target (r2 | b2 | gdrive | github Tier 0).",
 )
 def cloud_setup_top(
     backend: Annotated[
         str,
         typer.Option(
             "--backend",
-            help="Backend: r2 (recommended, egress-free) | b2 | gdrive.",
+            help="Backend: r2 (egress-free, recommended) | b2 | gdrive | github (Tier 0).",
         ),
     ] = "r2",
     no_open: Annotated[bool, typer.Option("--no-open", help="Don't auto-open browser tabs.")] = False,
@@ -325,6 +326,29 @@ def cloud_setup_top(
 
 
 # ─── vision (multimodal Gemini) ─────────────────────────────────────
+
+
+@app.command(
+    "onboard",
+    help="One-shot first-run: recipe → cloud setup → first backup → canary.",
+)
+def onboard_top(
+    recipe: Annotated[
+        str, typer.Option("--recipe", "-r", help="Recipe (family | operator | code).")
+    ] = "family",
+    backend: Annotated[
+        str, typer.Option("--backend", help="Cloud backend (r2 | b2 | gdrive).")
+    ] = "r2",
+    no_open: Annotated[bool, typer.Option("--no-open")] = False,
+    yes: Annotated[bool, typer.Option("--yes", "-y")] = False,
+) -> None:
+    try:
+        onboard_cmd.onboard_command(
+            recipe=recipe, backend=backend, no_open=no_open, yes=yes
+        )
+    except SanctumError as exc:
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code)) from exc
 
 
 @app.command("vision", help="Send an image / video to Gemini with a prompt.")
