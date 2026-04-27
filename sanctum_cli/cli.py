@@ -17,7 +17,10 @@ import typer
 from rich.console import Console
 
 from sanctum_cli import __version__
+from sanctum_cli.commands import backup as backup_cmd
 from sanctum_cli.commands import chat as chat_cmd
+from sanctum_cli.commands import cloud as cloud_cmd
+from sanctum_cli.commands import code as code_cmd
 from sanctum_cli.commands import config_cmd, doctor, status
 from sanctum_cli.errors import ExitCode, SanctumError
 
@@ -146,6 +149,129 @@ def doctor_top(
 ) -> None:
     try:
         doctor.doctor_command(full=full, json_output=json_output)
+    except SanctumError as exc:
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code)) from exc
+
+
+@app.command("code", help="Forced Claude routing — coding-oriented prompt.")
+def code_top(
+    prompt: Annotated[
+        str | None, typer.Argument(help="Prompt text. Omit to read from stdin.")
+    ] = None,
+    file: Annotated[
+        Path | None, typer.Option("--file", "-f", help="Read prompt from a file.")
+    ] = None,
+    no_stream: Annotated[
+        bool, typer.Option("--no-stream", help="Wait for full response before printing.")
+    ] = False,
+    max_tokens: Annotated[
+        int | None, typer.Option("--max-tokens", "-t", help="Cap response length.", min=1)
+    ] = None,
+    temperature: Annotated[
+        float | None,
+        typer.Option("--temperature", help="Sampling temperature 0.0..2.0.", min=0.0, max=2.0),
+    ] = None,
+) -> None:
+    try:
+        code_cmd.code_command(
+            prompt=prompt,
+            file=file,
+            no_stream=no_stream,
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
+    except SanctumError as exc:
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code)) from exc
+
+
+# ─── backup subcommands ─────────────────────────────────────────────
+
+backup_app = typer.Typer(help="Backup commands — run, list snapshots, verify, restore.")
+app.add_typer(backup_app, name="backup")
+
+
+@backup_app.command("run", help="Run the configured sanctum-backup.sh script.")
+def backup_run_top(
+    script: Annotated[
+        Path | None,
+        typer.Option(
+            "--script",
+            help="Path to backup script.",
+            exists=True,
+            dir_okay=False,
+        ),
+    ] = None,
+) -> None:
+    try:
+        backup_cmd.backup_run(script=script)
+    except SanctumError as exc:
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code)) from exc
+
+
+@backup_app.command("snapshots", help="List restic snapshots from configured repos.")
+def backup_snapshots_top(
+    repo: Annotated[
+        str, typer.Option("--repo", help="primary | secondary | all.")
+    ] = "all",
+    json_output: Annotated[bool, typer.Option("--json", help="Emit JSON.")] = False,
+) -> None:
+    try:
+        backup_cmd.backup_snapshots(repo=repo, json_output=json_output)
+    except SanctumError as exc:
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code)) from exc
+
+
+@backup_app.command("verify", help="restic check on configured repos.")
+def backup_verify_top(
+    repo: Annotated[
+        str, typer.Option("--repo", help="primary | secondary | all.")
+    ] = "all",
+) -> None:
+    try:
+        backup_cmd.backup_verify(repo=repo)
+    except SanctumError as exc:
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code)) from exc
+
+
+@backup_app.command("restore", help="Restore a snapshot to a target directory.")
+def backup_restore_top(
+    snapshot: Annotated[str, typer.Argument(help="Snapshot id (short or full).")],
+    target: Annotated[Path, typer.Argument(help="Directory to restore into.")],
+    repo: Annotated[
+        str, typer.Option("--repo", help="primary | secondary.")
+    ] = "primary",
+) -> None:
+    try:
+        backup_cmd.backup_restore(snapshot=snapshot, target=target, repo=repo)
+    except SanctumError as exc:
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code)) from exc
+
+
+# ─── cloud subcommands ──────────────────────────────────────────────
+
+cloud_app = typer.Typer(help="Cloud-backup configuration wizards.")
+app.add_typer(cloud_app, name="cloud")
+
+
+@cloud_app.command("setup", help="Guided wizard to wire a cloud backup target.")
+def cloud_setup_top(
+    backend: Annotated[
+        str, typer.Option("--backend", help="Backend: b2 (gdrive in v0.4).")
+    ] = "b2",
+    no_open: Annotated[bool, typer.Option("--no-open", help="Don't auto-open browser tabs.")] = False,
+    no_persist: Annotated[
+        bool,
+        typer.Option("--no-persist", help="Print YAML instead of editing instance.yaml."),
+    ] = False,
+) -> None:
+    try:
+        cloud_cmd.cloud_setup_command(backend=backend, no_open=no_open, no_persist=no_persist)
     except SanctumError as exc:
         _report(exc)
         raise typer.Exit(code=int(exc.exit_code)) from exc
