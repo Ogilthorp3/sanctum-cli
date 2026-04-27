@@ -10,7 +10,7 @@ from typing import Annotated
 
 import typer
 
-from sanctum_cli.backends import b2, gdrive
+from sanctum_cli.backends import b2, gdrive, r2
 from sanctum_cli.errors import UserError
 
 
@@ -19,9 +19,9 @@ def cloud_setup_command(
         str,
         typer.Option(
             "--backend",
-            help="Backend to configure: b2 (recommended) | gdrive.",
+            help="Backend to configure: r2 (recommended — egress-free) | b2 | gdrive.",
         ),
-    ] = "b2",
+    ] = "r2",
     no_open: Annotated[
         bool,
         typer.Option("--no-open", help="Do not auto-open browser tabs."),
@@ -32,11 +32,14 @@ def cloud_setup_command(
     ] = False,
 ) -> None:
     """Walk through cloud backup configuration."""
+    if backend == "r2":
+        r2.run_wizard(auto_open=not no_open, persist=not no_persist)
+        return
     if backend == "b2":
         b2.run_wizard(auto_open=not no_open, persist=not no_persist)
         return
     if backend == "gdrive":
         gdrive.run_wizard(auto_open=not no_open, persist=not no_persist)
         return
-    msg = f"unknown backend: {backend!r} (expected: b2 | gdrive)"
+    msg = f"unknown backend: {backend!r} (expected: r2 | b2 | gdrive)"
     raise UserError(msg)

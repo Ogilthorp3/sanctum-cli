@@ -180,7 +180,9 @@ def test_full_wizard_happy_path(
         patch("sanctum_cli.backends.b2._prompt_validated", side_effect=fake_prompt),
         patch("sanctum_cli.backends.b2.Confirm.ask", return_value=True),
     ):
-        result = runner.invoke(app, ["cloud", "setup", "--no-open", "--no-persist"])
+        result = runner.invoke(
+            app, ["cloud", "setup", "--backend", "b2", "--no-open", "--no-persist"]
+        )
 
     assert result.exit_code == 0, result.stdout + (result.stderr or "")
     assert "done" in result.stdout.lower() or "cloud_backup" in result.stdout.lower()

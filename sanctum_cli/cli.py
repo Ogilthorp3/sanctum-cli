@@ -263,11 +263,18 @@ cloud_app = typer.Typer(help="Cloud-backup configuration wizards.")
 app.add_typer(cloud_app, name="cloud")
 
 
-@cloud_app.command("setup", help="Guided wizard to wire a cloud backup target (b2 | gdrive).")
+@cloud_app.command(
+    "setup",
+    help="Guided wizard to wire a cloud backup target (r2 | b2 | gdrive).",
+)
 def cloud_setup_top(
     backend: Annotated[
-        str, typer.Option("--backend", help="Backend: b2 (recommended) | gdrive.")
-    ] = "b2",
+        str,
+        typer.Option(
+            "--backend",
+            help="Backend: r2 (recommended, egress-free) | b2 | gdrive.",
+        ),
+    ] = "r2",
     no_open: Annotated[bool, typer.Option("--no-open", help="Don't auto-open browser tabs.")] = False,
     no_persist: Annotated[
         bool,
