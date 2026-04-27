@@ -55,7 +55,11 @@ BUCKET_NAME_MAX = 50
 KEYCHAIN_SERVICE_KEY_ID = "b2-account-id"
 KEYCHAIN_SERVICE_APP_KEY = "b2-application-key"
 KEYCHAIN_SERVICE_RESTIC = "sanctum-backup-key"
-KEYCHAIN_ACCOUNT = "sanctum"
+KEYCHAIN_ACCOUNT = "sanctum"  # for new B2 credentials
+# Restic passphrase keeps the legacy account name from the bash-era backup
+# script so existing installs find the entry without rotation. New installs
+# get the same account so behaviour is consistent.
+KEYCHAIN_ACCOUNT_RESTIC = "sanctum-backup"
 
 B2_AUTH_URL = "https://api.backblazeb2.com/b2api/v3/b2_authorize_account"
 B2_HTTP_TIMEOUT_S = 10
@@ -395,12 +399,14 @@ def run_wizard(
     _ensure_keychain_entry(
         KEYCHAIN_SERVICE_APP_KEY, KEYCHAIN_ACCOUNT, app_key, replace=replace
     )
-    if not keychain.exists(KEYCHAIN_ACCOUNT, KEYCHAIN_SERVICE_RESTIC):
+    if not keychain.exists(KEYCHAIN_ACCOUNT_RESTIC, KEYCHAIN_SERVICE_RESTIC):
         _ensure_keychain_entry(
-            KEYCHAIN_SERVICE_RESTIC, KEYCHAIN_ACCOUNT, passphrase, replace=False
+            KEYCHAIN_SERVICE_RESTIC, KEYCHAIN_ACCOUNT_RESTIC, passphrase, replace=False
         )
     else:
-        passphrase = keychain.read(account=KEYCHAIN_ACCOUNT, service=KEYCHAIN_SERVICE_RESTIC)
+        passphrase = keychain.read(
+            account=KEYCHAIN_ACCOUNT_RESTIC, service=KEYCHAIN_SERVICE_RESTIC
+        )
         console.print("  [dim]reusing existing sanctum-backup-key from Keychain[/]")
 
     # 6. restic init
@@ -422,7 +428,7 @@ def run_wizard(
             config.instance_path(),
             bucket=bucket,
             keychain_service_restic=KEYCHAIN_SERVICE_RESTIC,
-            keychain_account=KEYCHAIN_ACCOUNT,
+            keychain_account=KEYCHAIN_ACCOUNT_RESTIC,
         )
         console.print("  [green]✓[/] cli.cloud_backup.primary set; .bak file written")
     else:
@@ -433,7 +439,7 @@ def run_wizard(
         console.print(
             f"  cli:\n    cloud_backup:\n      primary:\n        kind: restic\n"
             f"        repo: b2:{bucket}\n        keychain:\n"
-            f"          service: {KEYCHAIN_SERVICE_RESTIC}\n          account: {KEYCHAIN_ACCOUNT}"
+            f"          service: {KEYCHAIN_SERVICE_RESTIC}\n          account: {KEYCHAIN_ACCOUNT_RESTIC}"
         )
 
     summary = Table.grid(padding=(0, 2))
@@ -443,7 +449,7 @@ def run_wizard(
     summary.add_row("repo", f"b2:{bucket}")
     summary.add_row("keychain (b2 keyID)", f"{KEYCHAIN_SERVICE_KEY_ID} / {KEYCHAIN_ACCOUNT}")
     summary.add_row("keychain (b2 appKey)", f"{KEYCHAIN_SERVICE_APP_KEY} / {KEYCHAIN_ACCOUNT}")
-    summary.add_row("keychain (restic)", f"{KEYCHAIN_SERVICE_RESTIC} / {KEYCHAIN_ACCOUNT}")
+    summary.add_row("keychain (restic)", f"{KEYCHAIN_SERVICE_RESTIC} / {KEYCHAIN_ACCOUNT_RESTIC}")
     console.print()
     console.print(Panel.fit(summary, title="[bold green]done[/]", border_style="green"))
 
@@ -452,7 +458,7 @@ def run_wizard(
         keychain_service_key_id=KEYCHAIN_SERVICE_KEY_ID,
         keychain_service_app_key=KEYCHAIN_SERVICE_APP_KEY,
         keychain_service_restic=KEYCHAIN_SERVICE_RESTIC,
-        keychain_account=KEYCHAIN_ACCOUNT,
+        keychain_account=KEYCHAIN_ACCOUNT_RESTIC,
     )
 
 

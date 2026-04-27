@@ -34,7 +34,7 @@ from rich.prompt import Confirm
 
 from sanctum_cli import config, keychain
 from sanctum_cli.backends.b2 import (  # reuse helpers
-    KEYCHAIN_ACCOUNT,
+    KEYCHAIN_ACCOUNT_RESTIC,
     KEYCHAIN_SERVICE_RESTIC,
     _ensure_keychain_entry,
     _gen_passphrase,
@@ -293,13 +293,13 @@ def run_wizard(*, auto_open: bool = True, persist: bool = True) -> _SetupResult:
 
     # 5. Keychain — restic passphrase. Reuse existing or generate.
     passphrase: str
-    if keychain.exists(account=KEYCHAIN_ACCOUNT, service=KEYCHAIN_SERVICE_RESTIC):
-        passphrase = keychain.read(account=KEYCHAIN_ACCOUNT, service=KEYCHAIN_SERVICE_RESTIC)
+    if keychain.exists(account=KEYCHAIN_ACCOUNT_RESTIC, service=KEYCHAIN_SERVICE_RESTIC):
+        passphrase = keychain.read(account=KEYCHAIN_ACCOUNT_RESTIC, service=KEYCHAIN_SERVICE_RESTIC)
         console.print("\n[bold]Reusing existing[/] sanctum-backup-key from Keychain.")
     else:
         passphrase = _gen_passphrase()
         _ensure_keychain_entry(
-            KEYCHAIN_SERVICE_RESTIC, KEYCHAIN_ACCOUNT, passphrase, replace=False
+            KEYCHAIN_SERVICE_RESTIC, KEYCHAIN_ACCOUNT_RESTIC, passphrase, replace=False
         )
         console.print("\n[bold]Created[/] sanctum-backup-key in Keychain.")
 
@@ -326,7 +326,7 @@ def run_wizard(*, auto_open: bool = True, persist: bool = True) -> _SetupResult:
             instance_path=config.instance_path(),
             repo=repo,
             keychain_service_restic=KEYCHAIN_SERVICE_RESTIC,
-            keychain_account=KEYCHAIN_ACCOUNT,
+            keychain_account=KEYCHAIN_ACCOUNT_RESTIC,
         )
         console.print(f"  [green]✓[/] cli.cloud_backup.{target_slot} set; .bak file written")
     else:
@@ -334,7 +334,7 @@ def run_wizard(*, auto_open: bool = True, persist: bool = True) -> _SetupResult:
             f"\n[bold]Persistence skipped (--no-persist).[/] To wire manually:\n"
             f"  cli:\n    cloud_backup:\n      {target_slot}:\n        kind: restic\n"
             f"        repo: {repo}\n        keychain:\n"
-            f"          service: {KEYCHAIN_SERVICE_RESTIC}\n          account: {KEYCHAIN_ACCOUNT}"
+            f"          service: {KEYCHAIN_SERVICE_RESTIC}\n          account: {KEYCHAIN_ACCOUNT_RESTIC}"
         )
 
     console.print()

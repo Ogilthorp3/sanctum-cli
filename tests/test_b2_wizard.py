@@ -48,6 +48,15 @@ def test_b2_key_id_regex() -> None:
     assert not b2.B2_KEY_ID_RE.match("not hex zzzzzzzzzzzzzzzzzz")
 
 
+def test_keychain_account_restic_pins_legacy_value() -> None:
+    """Regression: the restic passphrase Keychain entry is at account
+    'sanctum-backup', not 'sanctum'. Bash-era backup script created it that
+    way; renaming would orphan every existing install. Live-discovered
+    2026-04-27 — never let this drift again."""
+    assert b2.KEYCHAIN_ACCOUNT_RESTIC == "sanctum-backup"
+    assert b2.KEYCHAIN_SERVICE_RESTIC == "sanctum-backup-key"
+
+
 def test_b2_app_key_regex() -> None:
     assert b2.B2_APP_KEY_RE.match("K003" + "a" * 50)
     assert not b2.B2_APP_KEY_RE.match("X003" + "a" * 50)
