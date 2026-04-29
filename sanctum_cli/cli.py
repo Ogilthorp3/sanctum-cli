@@ -19,6 +19,7 @@ from rich.console import Console
 from sanctum_cli import __version__
 from sanctum_cli.commands import agent as agent_cmd
 from sanctum_cli.commands import backup as backup_cmd
+from sanctum_cli.commands import bridge as bridge_cmd
 from sanctum_cli.commands import chat as chat_cmd
 from sanctum_cli.commands import cloud as cloud_cmd
 from sanctum_cli.commands import code as code_cmd
@@ -532,6 +533,100 @@ def keychain_rotate_top(
     try:
         keychain_command.keychain_rotate(
             service=service, account=account, new_value=value, yes=yes
+        )
+    except SanctumError as exc:
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code)) from exc
+
+
+# ─── bridge subcommands ────────────────────────────────────────────
+
+bridge_app = typer.Typer(
+    help="Talk to the Sanctum Bridge gateway (CF Access + HMAC + SharePoint)."
+)
+app.add_typer(bridge_app, name="bridge")
+
+
+@bridge_app.command("health", help="Liveness check on the bridge.")
+def bridge_health_top(
+    json_output: Annotated[bool, typer.Option("--json", help="Emit JSON.")] = False,
+) -> None:
+    try:
+        bridge_cmd.health_command(json_output=json_output)
+    except SanctumError as exc:
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code)) from exc
+
+
+@bridge_app.command("whoami", help="Show effective bridge config (host + Keychain creds, redacted).")
+def bridge_whoami_top() -> None:
+    try:
+        bridge_cmd.whoami_command()
+    except SanctumError as exc:
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code)) from exc
+
+
+@bridge_app.command("manifest", help="List modules + actions exposed by the bridge.")
+def bridge_manifest_top(
+    json_output: Annotated[bool, typer.Option("--json", help="Emit JSON.")] = False,
+) -> None:
+    try:
+        bridge_cmd.manifest_command(json_output=json_output)
+    except SanctumError as exc:
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code)) from exc
+
+
+@bridge_app.command("folder", help="Look up a SharePoint folder by tenant-relative path.")
+def bridge_folder_top(
+    path: Annotated[str, typer.Argument(help="e.g. Deals/Calder/Memos")],
+    json_output: Annotated[bool, typer.Option("--json", help="Emit JSON.")] = False,
+) -> None:
+    try:
+        bridge_cmd.folder_command(path=path, json_output=json_output)
+    except SanctumError as exc:
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code)) from exc
+
+
+@bridge_app.command("upload", help="Upload a file to a SharePoint folder via the bridge.")
+def bridge_upload_top(
+    file: Annotated[Path, typer.Argument(exists=True, dir_okay=False, readable=True)],
+    folder: Annotated[str, typer.Argument(help="Tenant-relative path, e.g. Deals/Calder/Memos")],
+    if_exists: Annotated[
+        str,
+        typer.Option(
+            "--if-exists",
+            help="version | overwrite | rename | fail (default: version).",
+        ),
+    ] = "version",
+    doc_type: Annotated[
+        str | None,
+        typer.Option("--doc-type", help="Convenience for --metadata doc_type=<value>."),
+    ] = None,
+    metadata: Annotated[
+        list[str] | None,
+        typer.Option("--metadata", "-m", help="Metadata as key=value (repeatable)."),
+    ] = None,
+    no_create_folders: Annotated[
+        bool,
+        typer.Option(
+            "--no-create-folders",
+            help="Fail rather than create missing intermediate folders.",
+        ),
+    ] = False,
+    json_output: Annotated[bool, typer.Option("--json", help="Emit JSON.")] = False,
+) -> None:
+    try:
+        bridge_cmd.upload_command(
+            file=file,
+            folder=folder,
+            if_exists=if_exists,
+            doc_type=doc_type,
+            metadata=metadata,
+            no_create_folders=no_create_folders,
+            json_output=json_output,
         )
     except SanctumError as exc:
         _report(exc)
