@@ -167,6 +167,9 @@ class BridgeClient:
     def manifest(self) -> dict[str, Any]:
         return self._request("GET", "/_manifest")
 
+    def diagnostic(self) -> dict[str, Any]:
+        return self._request("GET", "/_diagnostic")
+
     def folder(self, path: str) -> dict[str, Any]:
         body = json.dumps({"path": path}, separators=(",", ":")).encode()
         return self._request("POST", "/sharepoint/folder", body=body)

@@ -590,6 +590,20 @@ def bridge_folder_top(
         raise typer.Exit(code=int(exc.exit_code)) from exc
 
 
+@bridge_app.command(
+    "doctor",
+    help="Diagnose the bridge end-to-end: keychain, daemon, CF Access, rotator, allowlist.",
+)
+def bridge_doctor_top(
+    json_output: Annotated[bool, typer.Option("--json", help="Emit JSON.")] = False,
+) -> None:
+    try:
+        bridge_cmd.doctor_command(json_output=json_output)
+    except SanctumError as exc:
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code)) from exc
+
+
 @bridge_app.command("upload", help="Upload a file to a SharePoint folder via the bridge.")
 def bridge_upload_top(
     file: Annotated[Path, typer.Argument(exists=True, dir_okay=False, readable=True)],
