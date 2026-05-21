@@ -20,10 +20,14 @@ from __future__ import annotations
 
 from typing import Annotated
 
+import os
+
 import typer
-from rich.console import Console
+from rich.align import Align
+from rich.console import Console, Group
 from rich.panel import Panel
 from rich.prompt import Confirm
+from rich.text import Text
 
 from sanctum_cli import config, recipes
 from sanctum_cli.backends import b2, gdrive, r2
@@ -31,6 +35,39 @@ from sanctum_cli.commands import backup as backup_cmd
 from sanctum_cli.errors import UserError
 
 console = Console()
+
+# ── Surface polish ────────────────────────────────────────────────────
+# The onboarding flow is the first time a new operator (or a friend of the
+# operator) meets Sanctum. Apple-like principles: the splash celebrates,
+# the completion thanks, the prompts are friendly. Functional content is
+# unchanged; only the framing has personality.
+
+_SANCTUM_SPLASH = """
+   ╭─────────────────────────────────────────╮
+   │        S   A   N   C   T   U   M        │
+   ╰─────────────────────────────────────────╯
+        your haus, your hardware, your AI
+"""
+
+
+def _print_splash() -> None:
+    """Print the Sanctum welcome splash. Centered, cyan, terse."""
+    splash = Text(_SANCTUM_SPLASH, style="bold cyan")
+    console.print(Align.center(splash))
+    try:
+        who = os.getlogin()
+    except OSError:
+        who = os.environ.get("USER", "friend")
+    console.print(
+        Align.center(
+            Text.assemble(
+                ("Welcome, ", "dim"),
+                (who, "bold"),
+                (". Let's wake up your Sanctum.", "dim"),
+            )
+        )
+    )
+    console.print()
 
 
 PHOTOS_SCOPE_NOTICE = (
@@ -67,6 +104,8 @@ def onboard_command(
     """One-shot first-run: recipe → cloud setup → first backup → canary."""
     cfg = config.load()
     rcp = recipes.resolve(recipe, cfg.cli)
+
+    _print_splash()
 
     console.print(
         Panel.fit(
@@ -122,15 +161,39 @@ def onboard_command(
     _run_canary()
 
     console.print()
+    try:
+        who = os.getlogin()
+    except OSError:
+        who = os.environ.get("USER", "friend")
+
+    body = Group(
+        Text.from_markup(
+            f"[bold green]Your Sanctum is alive, {who}.[/]\n"
+        ),
+        Text.from_markup(
+            "It just ran its first backup and verified the restore by round-"
+            "tripping a known file through your cloud bucket. From here, "
+            "Sanctum keeps running in the background — daily backups, drift "
+            "heals, audit trails — without asking you to do anything. The "
+            "next time you'll hear from it is when something interesting "
+            "happens.\n"
+        ),
+        Text.from_markup("[dim]A few things to try when you're curious:[/]"),
+        Text.from_markup(
+            "  [cyan]sanctum status[/]            the whole haus at a glance\n"
+            "  [cyan]sanctum doctor[/]            deep health check\n"
+            "  [cyan]sanctum backup snapshots[/]  list your backup history\n"
+            "  [cyan]sanctum chat[/]              talk to your local agents\n"
+        ),
+        Text.from_markup("[dim italic]Welcome to your haus.[/]"),
+    )
+
     console.print(
-        Panel.fit(
-            "[bold green]Onboarding complete[/]\n\n"
-            "Daily backups will run automatically if your `com.sanctum.backup` "
-            "LaunchAgent is loaded. Verify with:\n\n"
-            "  [cyan]sanctum backup snapshots[/]\n"
-            "  [cyan]sanctum backup verify[/]\n"
-            "  [cyan]sanctum doctor[/]",
+        Panel(
+            body,
+            title="[bold green]onboarding complete[/]",
             border_style="green",
+            padding=(1, 2),
         )
     )
 
