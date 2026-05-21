@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "sanctum-cli"
-version = "0.1.0a1"
+version = "0.8.0"
 description = "Unified terminal binary for Sanctum hosts — router, wizard, doctor."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -12,7 +12,7 @@ license = { text = "Proprietary — see SPEC.md" }
 authors = [{ name = "Bertrand Nepveu" }]
 keywords = ["sanctum", "cli", "backup", "claude", "gemini"]
 classifiers = [
-  "Development Status :: 2 - Pre-Alpha",
+  "Development Status :: 4 - Beta",
   "Environment :: Console",
   "Operating System :: MacOS",
   "Programming Language :: Python :: 3.11",
