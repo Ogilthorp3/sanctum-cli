@@ -60,7 +60,9 @@ def test_all_pass_exits_zero(runner, all_pass_probes):
 
 def test_all_pass_panel_says_healthy(runner, all_pass_probes):
     result = runner.invoke(app, ["self-test"])
-    assert "Sanctum is healthy" in result.output
+    # Headline is tier-aware: "Sanctum CLI is healthy" or "Sanctum haus is healthy".
+    # Either form indicates a passing run.
+    assert "is healthy" in result.output
     assert "3/3" in result.output
 
 
@@ -111,6 +113,33 @@ def test_only_filter_matches_nothing(runner, all_pass_probes):
     result = runner.invoke(app, ["self-test", "--only", "no-such-probe"])
     # Zero matches → zero probes → still exits 0 (vacuously true).
     assert result.exit_code == 0
+
+
+def test_haus_only_probe_returns_na_on_cli_only_install(runner, monkeypatch, tmp_path):
+    """Verify that the _haus_only wrapper short-circuits to n/a when no
+    haus-tier artifacts exist on disk. Simulates the friend's fresh
+    Mac that ran `brew install sanctum-cli + sanctum onboard --recipe
+    family` without ever deploying cathedrals/proxyd/R2D2."""
+
+    # Point _haus_tier_installed at a fresh-fake home with no haus markers.
+    monkeypatch.setattr(
+        st, "_haus_tier_installed",
+        lambda: False,
+    )
+
+    inner_called = {"value": False}
+
+    def expensive_probe() -> st.ProbeResult:
+        inner_called["value"] = True
+        return st.ProbeResult(False, "should never run on cli-only")
+
+    fake_probe = st._haus_only("test-probe", expensive_probe)
+    result = fake_probe()
+
+    assert result.not_applicable is True
+    assert result.passed is True   # n/a counts as passing for exit-code purposes
+    assert inner_called["value"] is False, "inner probe must NOT run when n/a"
+    assert "CLI-only" in result.reason
 
 
 def test_probe_that_raises_is_caught_as_fail(runner, monkeypatch):

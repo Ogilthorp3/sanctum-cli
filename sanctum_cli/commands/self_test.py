@@ -44,6 +44,15 @@ console = Console()
 class ProbeResult:
     passed: bool
     detail: str = ""
+    # Three-state status: a probe can also report "not applicable" when its
+    # service isn't expected on this install tier. A fresh CLI-only install
+    # (brew install sanctum-cli + sanctum onboard --recipe family) does not
+    # bring up the cathedrals, proxyd, Force Flow, chitti, or R2D2 — those
+    # are operator-grade services that run on a dedicated Mac Mini. On the
+    # CLI-only tier, those probes return n/a, not fail. n/a does not count
+    # toward the exit code.
+    not_applicable: bool = False
+    reason: str = ""  # explanation for n/a state
 
 
 @dataclass
@@ -53,6 +62,36 @@ class Probe:
 
 
 # ── Probe implementations ─────────────────────────────────────────────
+
+
+def _haus_tier_installed() -> bool:
+    """Detect whether this is a haus-operator install (cathedrals + proxyd +
+    Force Flow + chitti + R2D2) vs a CLI-only install (just sanctum-cli +
+    backup recipe). Returns True only if at least one haus-tier artifact is
+    present on disk — cathedral manifests, proxyd config, or the R2D2
+    classifier source. A friend's fresh install has none of these."""
+    haus_markers = [
+        Path.home() / ".sanctum/manifests",          # cathedral model manifests
+        Path.home() / ".sanctum/sanctum-proxy",      # proxyd config dir
+        Path.home() / ".sanctum/r2d2",               # R2D2 classifier source
+        Path("/Library/LaunchDaemons/com.sanctum.proxyd.plist"),
+    ]
+    return any(p.exists() for p in haus_markers)
+
+
+def _haus_only(name: str, check_fn: Callable[[], ProbeResult]) -> Callable[[], ProbeResult]:
+    """Decorator-like wrapper: skip a haus-tier probe with n/a when this is
+    a CLI-only install. The wrapped function is only invoked on haus
+    installs."""
+    def wrapped() -> ProbeResult:
+        if not _haus_tier_installed():
+            return ProbeResult(
+                passed=True,
+                not_applicable=True,
+                reason="CLI-only install (no haus services configured)",
+            )
+        return check_fn()
+    return wrapped
 
 
 def _tcp_reachable(host: str, port: int, timeout_s: float = 2.0) -> bool:
@@ -231,18 +270,22 @@ def probe_backup_recent() -> ProbeResult:
 
 
 PROBES: list[Probe] = [
+    # CLI-tier — every install needs these.
     Probe("network reachability",         probe_network),
     Probe("node binary identity",         probe_node_identity),
-    Probe("Yoda cathedral (:1337)",       probe_yoda_cathedral),
-    Probe("Coder cathedral (:1338)",      probe_coder_cathedral),
-    Probe("proxyd routing (:4040)",       probe_proxyd),
-    Probe("Force Flow (:4077)",           probe_force_flow),
-    Probe("chitti samskara (:2188)",      probe_chitti_samskara),
-    Probe("TCC grants",                   probe_tcc_grants),
-    Probe("R2D2 supervisor heartbeat",    probe_r2d2_heartbeat),
-    Probe("audit log within budget",      probe_audit_log_bounded),
     Probe("sanctum config valid",         probe_config_valid),
     Probe("recent backup snapshot",       probe_backup_recent),
+
+    # Haus-tier — only meaningful when the haus services are installed.
+    # Each is wrapped to return n/a on CLI-only installs.
+    Probe("Yoda cathedral (:1337)",       _haus_only("yoda", probe_yoda_cathedral)),
+    Probe("Coder cathedral (:1338)",      _haus_only("coder", probe_coder_cathedral)),
+    Probe("proxyd routing (:4040)",       _haus_only("proxyd", probe_proxyd)),
+    Probe("Force Flow (:4077)",           _haus_only("force-flow", probe_force_flow)),
+    Probe("chitti samskara (:2188)",      _haus_only("chitti", probe_chitti_samskara)),
+    Probe("TCC grants",                   _haus_only("tcc", probe_tcc_grants)),
+    Probe("R2D2 supervisor heartbeat",    _haus_only("r2d2", probe_r2d2_heartbeat)),
+    Probe("audit log within budget",      _haus_only("audit", probe_audit_log_bounded)),
 ]
 
 
@@ -310,32 +353,42 @@ def self_test_command(
         results.append((probe, res, elapsed_ms))
 
         if not json_output:
-            mark = (
-                Text(" pass ", style="bold green")
-                if res.passed
-                else Text(" fail ", style="bold red")
-            )
+            if res.not_applicable:
+                mark = Text(" n/a  ", style="bold yellow")
+                trailing = res.reason or "not applicable on this install"
+            elif res.passed:
+                mark = Text(" pass ", style="bold green")
+                trailing = res.detail
+            else:
+                mark = Text(" fail ", style="bold red")
+                trailing = res.detail
             line = Text.assemble(
                 Text(f"  [{i:2d}/{len(selected):2d}] ", style="dim"),
                 Text(f"{probe.name:<{width}}", style="white"),
                 Text("·" * 4, style="dim"),
                 mark,
-                Text(f"  {res.detail}", style="dim"),
+                Text(f"  {trailing}", style="dim"),
             )
             console.print(line)
 
     total_ms = (time.time() - start) * 1000
-    passed = sum(1 for _, r, _ in results if r.passed)
-    failed = len(results) - passed
+    na = sum(1 for _, r, _ in results if r.not_applicable)
+    passed = sum(1 for _, r, _ in results if r.passed and not r.not_applicable)
+    failed = sum(1 for _, r, _ in results if not r.passed)
+
+    tier = "haus" if _haus_tier_installed() else "CLI"
 
     if json_output:
         payload = {
+            "tier": tier,
             "total": len(results),
             "passed": passed,
             "failed": failed,
+            "not_applicable": na,
             "duration_ms": round(total_ms, 1),
             "probes": [
-                {"name": p.name, "passed": r.passed, "detail": r.detail,
+                {"name": p.name, "passed": r.passed, "not_applicable": r.not_applicable,
+                 "detail": r.detail, "reason": r.reason,
                  "duration_ms": round(ms, 1)}
                 for p, r, ms in results
             ],
@@ -344,11 +397,15 @@ def self_test_command(
     else:
         console.print()
         if failed == 0:
+            headline = f"Sanctum {tier} is healthy."
+            counts = f"  {passed}/{len(results)} probes passed in {total_ms:.0f} ms"
+            if na:
+                counts += f"  ·  {na} n/a on this install tier"
             console.print(
                 Panel(
                     Text.assemble(
-                        Text("Sanctum is healthy.", style="bold green"),
-                        Text(f"  {passed}/{len(results)} probes passed in {total_ms:.0f} ms.", style="dim"),
+                        Text(headline, style="bold green"),
+                        Text(counts, style="dim"),
                     ),
                     border_style="green",
                     padding=(0, 2),
@@ -360,7 +417,8 @@ def self_test_command(
                     Text.assemble(
                         Text(f"{failed} probe(s) failed.", style="bold red"),
                         Text(
-                            f"  {passed}/{len(results)} passed in {total_ms:.0f} ms.\n  Each red line above has the actionable detail.",
+                            f"  {passed}/{len(results) - na} applicable probes passed in {total_ms:.0f} ms."
+                            f" Each red line above has the actionable detail.",
                             style="dim",
                         ),
                     ),
