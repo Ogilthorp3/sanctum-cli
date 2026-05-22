@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Quick Start
+    url: https://sanctum.run/getting-started/quick-start/
+    about: 30-second install + the friendly version of "how do I get started?"
+  - name: Troubleshooting
+    url: https://sanctum.run/operations/troubleshooting/
+    about: The top 10 issues with copy-pastable fixes — check here before filing.
+  - name: Architecture
+    url: https://sanctum.run/architecture/
+    about: How Sanctum is built (cathedrals, R2D2, two-anchor TCC, the whole stack).

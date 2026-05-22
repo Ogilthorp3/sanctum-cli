@@ -1,0 +1,31 @@
+name: Feature request
+description: Something Sanctum doesn't do yet, but you wish it did.
+title: "[feature] "
+labels: ["enhancement", "beta-feedback"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What you want
+      description: One paragraph. Concrete > vague. What command/flag/page/behavior.
+    validations:
+      required: true
+
+  - type: textarea
+    id: why
+    attributes:
+      label: Why
+      description: |
+        What problem does this solve for you? Sanctum aims to be opinionated;
+        we'll happily say no to features that don't fit, but we always want
+        to understand the underlying need first.
+    validations:
+      required: true
+
+  - type: textarea
+    id: workaround
+    attributes:
+      label: Current workaround
+      description: How are you solving this today without the feature? "I can't, that's why I'm filing" is a valid answer.
+    validations:
+      required: false

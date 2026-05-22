@@ -1,0 +1,82 @@
+name: Bug report
+description: Something installed but doesn't work the way the docs say it should.
+title: "[bug] "
+labels: ["bug", "beta-feedback"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. The fastest way to a fix is the most concrete description you can manage — what you ran, what you expected, what actually happened.
+
+        Before filing, the cheapest 30 seconds: run `sanctum doctor` and `sanctum self-test`. Both print actionable output. If either points at the actual fix, you may not need to file an issue.
+
+  - type: input
+    id: sanctum-version
+    attributes:
+      label: sanctum-cli version
+      description: Run `sanctum --version`.
+      placeholder: "v0.8.0"
+    validations:
+      required: true
+
+  - type: input
+    id: macos-version
+    attributes:
+      label: macOS version + chip
+      description: e.g. "macOS 15.1 / M4 Pro / 64 GB"
+      placeholder: "macOS 15.1 / M4 Pro / 64 GB"
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: One paragraph. Concrete > vague.
+      placeholder: "I ran `sanctum onboard --recipe family` expecting … but it … "
+    validations:
+      required: true
+
+  - type: textarea
+    id: doctor-output
+    attributes:
+      label: sanctum doctor output
+      description: Paste the full output. Block-quote it in a code fence.
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: self-test-output
+    attributes:
+      label: sanctum self-test output
+      description: Paste the full output.
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log excerpts
+      description: |
+        Useful service log paths:
+
+          sanctum logs r2d2 --once --lines 100
+          sanctum logs self-test --once --lines 50
+          sanctum logs backup --once --lines 100
+
+        Paste only the relevant excerpt, not the whole file.
+      render: shell
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: Pre-submit
+      options:
+        - label: I checked the [Troubleshooting page](https://sanctum.run/operations/troubleshooting/) and the symptom isn't already there
+          required: false
+        - label: I have NOT pasted credentials (API keys, passphrases, R2 bucket URLs). When in doubt, redact.
+          required: true
