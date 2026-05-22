@@ -27,6 +27,7 @@ from sanctum_cli.commands import config_cmd, doctor, status
 from sanctum_cli.commands import keychain_cmd as keychain_command
 from sanctum_cli.commands import onboard as onboard_cmd
 from sanctum_cli.commands import proxy as proxy_cmd
+from sanctum_cli.commands import self_test as self_test_cmd
 from sanctum_cli.commands import vision as vision_cmd
 from sanctum_cli.errors import ExitCode, SanctumError
 
@@ -158,6 +159,22 @@ def doctor_top(
     except SanctumError as exc:
         _report(exc)
         raise typer.Exit(code=int(exc.exit_code)) from exc
+
+
+@app.command(
+    "self-test",
+    help="Canonical health probes — one command to verify the install is still good.",
+)
+def self_test_top(
+    json_output: Annotated[
+        bool, typer.Option("--json", help="Emit JSON instead of the panel.")
+    ] = False,
+    only: Annotated[
+        str | None,
+        typer.Option("--only", help="Substring filter: run only matching probes."),
+    ] = None,
+) -> None:
+    self_test_cmd.self_test_command(json_output=json_output, only=only)
 
 
 @app.command("code", help="Forced Claude routing — coding-oriented prompt.")
