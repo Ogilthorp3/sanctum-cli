@@ -25,9 +25,15 @@ from sanctum_cli.commands import cloud as cloud_cmd
 from sanctum_cli.commands import code as code_cmd
 from sanctum_cli.commands import config_cmd, doctor, status
 from sanctum_cli.commands import keychain_cmd as keychain_command
+from sanctum_cli.commands import devices as devices_cmd
+from sanctum_cli.commands import keys_backup as keys_backup_cmd
+from sanctum_cli.commands import logs as logs_cmd
 from sanctum_cli.commands import onboard as onboard_cmd
 from sanctum_cli.commands import proxy as proxy_cmd
+from sanctum_cli.commands import schedule as schedule_cmd
 from sanctum_cli.commands import self_test as self_test_cmd
+from sanctum_cli.commands import uninstall as uninstall_cmd
+from sanctum_cli.commands import update as update_cmd
 from sanctum_cli.commands import vision as vision_cmd
 from sanctum_cli.errors import ExitCode, SanctumError
 
@@ -175,6 +181,57 @@ def self_test_top(
     ] = None,
 ) -> None:
     self_test_cmd.self_test_command(json_output=json_output, only=only)
+
+
+@app.command("update", help="brew upgrade sanctum-cli + run self-test as the gate.")
+def update_top(
+    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+    skip_self_test: Annotated[bool, typer.Option("--skip-self-test")] = False,
+) -> None:
+    update_cmd.update_command(dry_run=dry_run, skip_self_test=skip_self_test)
+
+
+@app.command("uninstall", help="Remove sanctum from this machine. Preserves data by default.")
+def uninstall_top(
+    purge: Annotated[bool, typer.Option("--purge")] = False,
+    yes: Annotated[bool, typer.Option("--yes", "-y")] = False,
+    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+) -> None:
+    uninstall_cmd.uninstall_command(purge=purge, yes=yes, dry_run=dry_run)
+
+
+@app.command("logs", help="Tail the log file for a sanctum service.")
+def logs_top(
+    service: Annotated[
+        str, typer.Argument(help="Service name. Use 'list' to see what's known.")
+    ],
+    follow: Annotated[bool, typer.Option("--follow/--once", "-f")] = True,
+    lines: Annotated[int, typer.Option("--lines", "-n")] = 50,
+    list_services: Annotated[bool, typer.Option("--list")] = False,
+) -> None:
+    logs_cmd.logs_command(service=service, follow=follow, lines=lines, list_services=list_services)
+
+
+@app.command("devices", help="List the haushold device inventory.")
+def devices_top() -> None:
+    devices_cmd.devices_command()
+
+
+@app.command("schedule", help="Show the haushold curfew schedule.")
+def schedule_top() -> None:
+    schedule_cmd.schedule_command()
+
+
+keys_app = typer.Typer(help="Keychain-backed credential helpers.")
+app.add_typer(keys_app, name="keys")
+
+
+@keys_app.command("backup", help="Export sanctum Keychain entries to an encrypted bundle.")
+def keys_backup_top(
+    out: Annotated[Path, typer.Argument(help="Where to write the encrypted bundle.")],
+    yes: Annotated[bool, typer.Option("--yes", "-y")] = False,
+) -> None:
+    keys_backup_cmd.keys_backup_command(out=out, yes=yes)
 
 
 @app.command("code", help="Forced Claude routing — coding-oriented prompt.")
