@@ -140,6 +140,90 @@ def folder_command(path: str, json_output: bool = False) -> None:
     console.print(f"  web_url       : [link]{data['web_url']}[/link]")
 
 
+def children_command(path: str, json_output: bool = False) -> None:
+    with _client() as c:
+        data = c.children(path)
+    if json_output:
+        console.print_json(data=data)
+        return
+    children = data.get("children", [])
+    console.print(f"[bold]{path}[/bold]  ({len(children)} item(s))")
+    table = Table(show_header=True, header_style="bold cyan", box=None, padding=(0, 2))
+    table.add_column("type")
+    table.add_column("name", overflow="fold")
+    table.add_column("size", justify="right")
+    table.add_column("modified")
+    for entry in children:
+        is_folder = entry.get("is_folder")
+        kind = "[blue]dir[/blue]" if is_folder else "file"
+        size = (
+            f"{entry.get('child_count', 0)} child"
+            if is_folder
+            else _humanize_bytes(int(entry.get("size", 0)))
+        )
+        table.add_row(
+            kind,
+            entry.get("name", ""),
+            size,
+            str(entry.get("last_modified", "")),
+        )
+    console.print(table)
+    if data.get("truncated"):
+        err_console.print(
+            "[yellow]warning[/yellow]: listing was truncated at the bridge cap "
+            "(1000 items) — some children are not shown."
+        )
+
+
+def download_command(
+    path: str,
+    *,
+    out: Path | None = None,
+    extract_text: bool = False,
+    json_output: bool = False,
+) -> None:
+    with _client() as c:
+        data = c.download(path, extract_text=extract_text)
+
+    if json_output:
+        console.print_json(data=data)
+        return
+
+    import base64
+
+    raw = base64.b64decode(data["content_b64"])
+    if out is not None:
+        out.write_bytes(raw)
+        console.print(f"[green]downloaded[/green]  {path} → {out} ({data.get('size', len(raw))} bytes)")
+    else:
+        console.print(
+            f"[green]downloaded[/green]  {path}  "
+            f"({data.get('size', len(raw))} bytes, {data.get('content_type', '?')})"
+        )
+        if not extract_text:
+            console.print(
+                "[dim]pass --out <path> to save bytes, or --extract-text for plain text[/dim]"
+            )
+
+    if extract_text:
+        if data.get("extracted"):
+            console.print(data.get("text") or "")
+        else:
+            err_console.print(
+                "[yellow]warning[/yellow]: text extraction was not available for "
+                "this file (unsupported type or unreadable) — only bytes were returned."
+            )
+
+
+def _humanize_bytes(n: int) -> str:
+    size = float(n)
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if size < 1024 or unit == "GiB":
+            return f"{size:.0f}{unit}" if unit == "B" else f"{size:.1f}{unit}"
+        size /= 1024
+    return f"{n}B"
+
+
 def upload_command(
     file: Path,
     folder: str,

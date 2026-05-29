@@ -224,6 +224,158 @@ def test_bridge_upload_warns_when_metadata_not_applied(tmp_path):
     assert "metadata patch" in r.output or "metadata patch" in (r.stderr or "")
 
 
+def test_bridge_children_lists_entries():
+    patches = _patches()
+    _enter_all(patches)
+    try:
+        with respx.mock(assert_all_called=False) as rx:
+            rx.post("https://bridge.test/sharepoint/children").mock(
+                return_value=httpx.Response(
+                    200,
+                    json={
+                        "children": [
+                            {
+                                "name": "Memos",
+                                "drive_item_id": "F1",
+                                "is_folder": True,
+                                "is_file": False,
+                                "size": 0,
+                                "web_url": "https://sp/Memos",
+                                "last_modified": "2026-05-01T00:00:00Z",
+                                "child_count": 4,
+                            },
+                            {
+                                "name": "term-sheet.pdf",
+                                "drive_item_id": "D1",
+                                "is_folder": False,
+                                "is_file": True,
+                                "size": 2048,
+                                "web_url": "https://sp/ts.pdf",
+                                "last_modified": "2026-05-02T00:00:00Z",
+                                "child_count": None,
+                            },
+                        ],
+                        "truncated": False,
+                    },
+                )
+            )
+            r = runner.invoke(app, ["bridge", "children", "Deals/Calder"])
+    finally:
+        _exit_all(patches)
+    assert r.exit_code == 0, r.output
+    assert "Memos" in r.output
+    assert "term-sheet.pdf" in r.output
+
+
+def test_bridge_children_json():
+    patches = _patches()
+    _enter_all(patches)
+    try:
+        with respx.mock(assert_all_called=False) as rx:
+            rx.post("https://bridge.test/sharepoint/children").mock(
+                return_value=httpx.Response(
+                    200, json={"children": [], "truncated": True}
+                )
+            )
+            r = runner.invoke(app, ["bridge", "children", "Deals", "--json"])
+    finally:
+        _exit_all(patches)
+    assert r.exit_code == 0, r.output
+    assert '"truncated"' in r.output
+
+
+def test_bridge_children_warns_when_truncated():
+    patches = _patches()
+    _enter_all(patches)
+    try:
+        with respx.mock(assert_all_called=False) as rx:
+            rx.post("https://bridge.test/sharepoint/children").mock(
+                return_value=httpx.Response(
+                    200,
+                    json={
+                        "children": [
+                            {
+                                "name": "x.txt",
+                                "drive_item_id": "D",
+                                "is_folder": False,
+                                "is_file": True,
+                                "size": 1,
+                                "web_url": "https://sp/x",
+                                "last_modified": "",
+                                "child_count": None,
+                            }
+                        ],
+                        "truncated": True,
+                    },
+                )
+            )
+            r = runner.invoke(app, ["bridge", "children", "Big"])
+    finally:
+        _exit_all(patches)
+    assert r.exit_code == 0, r.output
+    assert "truncated" in r.output.lower()
+
+
+def test_bridge_download_writes_bytes_to_out(tmp_path):
+    out = tmp_path / "got.txt"
+    patches = _patches()
+    _enter_all(patches)
+    try:
+        with respx.mock(assert_all_called=False) as rx:
+            rx.post("https://bridge.test/sharepoint/download").mock(
+                return_value=httpx.Response(
+                    200,
+                    json={
+                        "content_b64": "aGVsbG8gd29ybGQ=",  # "hello world"
+                        "size": 11,
+                        "content_type": "text/plain",
+                        "extracted": False,
+                        "text": None,
+                    },
+                )
+            )
+            r = runner.invoke(
+                app,
+                ["bridge", "download", "Deals/Calder/memo.txt", "--out", str(out)],
+            )
+    finally:
+        _exit_all(patches)
+    assert r.exit_code == 0, r.output
+    assert out.read_bytes() == b"hello world"
+
+
+def test_bridge_download_extract_text_prints_text(tmp_path):
+    captured: dict[str, object] = {}
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        captured["body"] = request.content
+        return httpx.Response(
+            200,
+            json={
+                "content_b64": "UEs=",
+                "size": 2,
+                "content_type": "application/pdf",
+                "extracted": True,
+                "text": "Calder term sheet body",
+            },
+        )
+
+    patches = _patches()
+    _enter_all(patches)
+    try:
+        with respx.mock(assert_all_called=False) as rx:
+            rx.post("https://bridge.test/sharepoint/download").mock(side_effect=handle)
+            r = runner.invoke(
+                app,
+                ["bridge", "download", "Deals/ts.pdf", "--extract-text"],
+            )
+    finally:
+        _exit_all(patches)
+    assert r.exit_code == 0, r.output
+    assert "Calder term sheet body" in r.output
+    assert b'"extract_text":true' in captured["body"]
+
+
 def test_bridge_upload_bad_if_exists_value(tmp_path):
     f = tmp_path / "x.txt"
     f.write_bytes(b"x")

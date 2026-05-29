@@ -139,6 +139,99 @@ def test_upload_sends_canonical_payload_and_returns_response():
     assert captured["headers"]["x-sanctum-module"] == "sharepoint"
 
 
+# --------------------------------------------------------------- children
+
+
+@respx.mock
+def test_children_sends_path_and_returns_listing():
+    captured: dict[str, object] = {}
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        captured["body"] = request.content
+        return httpx.Response(
+            200,
+            json={
+                "children": [
+                    {
+                        "name": "Memos",
+                        "drive_item_id": "F1",
+                        "is_folder": True,
+                        "is_file": False,
+                        "size": 0,
+                        "web_url": "https://sp/Memos",
+                        "last_modified": "2026-05-01T00:00:00Z",
+                        "child_count": 4,
+                    }
+                ],
+                "truncated": False,
+            },
+        )
+
+    respx.post("https://bridge.test/sharepoint/children").mock(side_effect=handle)
+    with httpx.Client() as http:
+        c = _client_with(http)
+        res = c.children("Deals/Calder")
+    assert res["truncated"] is False
+    assert res["children"][0]["name"] == "Memos"
+    assert b'"path":"Deals/Calder"' in captured["body"]
+
+
+# --------------------------------------------------------------- download
+
+
+@respx.mock
+def test_download_sends_path_and_extract_flag_default_false():
+    captured: dict[str, object] = {}
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        captured["body"] = request.content
+        return httpx.Response(
+            200,
+            json={
+                "content_b64": "aGVsbG8=",
+                "size": 5,
+                "content_type": "text/plain",
+                "extracted": False,
+                "text": None,
+            },
+        )
+
+    respx.post("https://bridge.test/sharepoint/download").mock(side_effect=handle)
+    with httpx.Client() as http:
+        c = _client_with(http)
+        res = c.download("Deals/Calder/memo.txt")
+    assert res["content_b64"] == "aGVsbG8="
+    assert res["extracted"] is False
+    assert b'"path":"Deals/Calder/memo.txt"' in captured["body"]
+    assert b'"extract_text":false' in captured["body"]
+
+
+@respx.mock
+def test_download_extract_text_sets_flag_true():
+    captured: dict[str, object] = {}
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        captured["body"] = request.content
+        return httpx.Response(
+            200,
+            json={
+                "content_b64": "UEs=",
+                "size": 2,
+                "content_type": "application/pdf",
+                "extracted": True,
+                "text": "extracted body",
+            },
+        )
+
+    respx.post("https://bridge.test/sharepoint/download").mock(side_effect=handle)
+    with httpx.Client() as http:
+        c = _client_with(http)
+        res = c.download("Deals/ts.pdf", extract_text=True)
+    assert res["extracted"] is True
+    assert res["text"] == "extracted body"
+    assert b'"extract_text":true' in captured["body"]
+
+
 # ------------------------------------------------------------ error mapping
 
 

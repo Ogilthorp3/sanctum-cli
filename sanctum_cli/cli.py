@@ -664,6 +664,46 @@ def bridge_folder_top(
         raise typer.Exit(code=int(exc.exit_code)) from exc
 
 
+@bridge_app.command("children", help="List the children of a SharePoint folder (read).")
+def bridge_children_top(
+    path: Annotated[str, typer.Argument(help="e.g. Deals/Calder/Memos")],
+    json_output: Annotated[bool, typer.Option("--json", help="Emit JSON.")] = False,
+) -> None:
+    try:
+        bridge_cmd.children_command(path=path, json_output=json_output)
+    except SanctumError as exc:
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code)) from exc
+
+
+@bridge_app.command("download", help="Download a SharePoint file (read), optionally extracting text.")
+def bridge_download_top(
+    path: Annotated[str, typer.Argument(help="Tenant-relative file path, e.g. Deals/Calder/memo.docx")],
+    out: Annotated[
+        Path | None,
+        typer.Option("--out", "-o", help="Write decoded bytes to this path.", dir_okay=False),
+    ] = None,
+    extract_text: Annotated[
+        bool,
+        typer.Option(
+            "--extract-text",
+            help="Also return server-side plain text for .docx/.pdf/.xlsx.",
+        ),
+    ] = False,
+    json_output: Annotated[bool, typer.Option("--json", help="Emit JSON.")] = False,
+) -> None:
+    try:
+        bridge_cmd.download_command(
+            path=path,
+            out=out,
+            extract_text=extract_text,
+            json_output=json_output,
+        )
+    except SanctumError as exc:
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code)) from exc
+
+
 @bridge_app.command(
     "doctor",
     help="Diagnose the bridge end-to-end: keychain, daemon, CF Access, rotator, allowlist.",

@@ -29,7 +29,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import httpx
 
@@ -173,6 +173,20 @@ class BridgeClient:
     def folder(self, path: str) -> dict[str, Any]:
         body = json.dumps({"path": path}, separators=(",", ":")).encode()
         return self._request("POST", "/sharepoint/folder", body=body)
+
+    def children(self, path: str) -> dict[str, Any]:
+        """List the children of a SharePoint folder (read)."""
+        body = json.dumps({"path": path}, separators=(",", ":")).encode()
+        return cast("dict[str, Any]", self._request("POST", "/sharepoint/children", body=body))
+
+    def download(
+        self, path: str, *, extract_text: bool = False
+    ) -> dict[str, Any]:
+        """Download a SharePoint file (read). With ``extract_text`` the bridge
+        also returns best-effort extracted plain text for .docx/.pdf/.xlsx."""
+        payload = {"path": path, "extract_text": extract_text}
+        body = json.dumps(payload, separators=(",", ":")).encode()
+        return cast("dict[str, Any]", self._request("POST", "/sharepoint/download", body=body))
 
     def upload(
         self,
