@@ -780,6 +780,70 @@ def bridge_rename_top(
         raise typer.Exit(code=int(exc.exit_code)) from exc
 
 
+@bridge_app.command("search", help="Search SharePoint for items matching a query (read).")
+def bridge_search_top(
+    query: Annotated[str, typer.Argument(help="Free-text query, e.g. Calder")],
+    folder: Annotated[
+        str | None,
+        typer.Option("--folder", help="Scope the search to this tenant-relative folder."),
+    ] = None,
+    top: Annotated[
+        int,
+        typer.Option("--top", help="Max hits to return (default 25).", min=1),
+    ] = 25,
+    json_output: Annotated[bool, typer.Option("--json", help="Emit JSON.")] = False,
+) -> None:
+    try:
+        bridge_cmd.search_command(query=query, folder=folder, top=top, json_output=json_output)
+    except SanctumError as exc:
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code)) from exc
+
+
+@bridge_app.command("move", help="Move a SharePoint item into another folder via the bridge.")
+def bridge_move_top(
+    path: Annotated[
+        str,
+        typer.Argument(help="Source item path, e.g. Deals/Calder/Memos/draft.docx"),
+    ],
+    dest_folder: Annotated[
+        str,
+        typer.Argument(help="Destination folder, e.g. Deals/Calder/Final"),
+    ],
+    new_name: Annotated[
+        str | None,
+        typer.Option("--name", help="Optional new bare name (no '/') at the destination."),
+    ] = None,
+    json_output: Annotated[bool, typer.Option("--json", help="Emit JSON.")] = False,
+) -> None:
+    try:
+        bridge_cmd.move_command(
+            path=path, dest_folder=dest_folder, new_name=new_name, json_output=json_output
+        )
+    except SanctumError as exc:
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code)) from exc
+
+
+@bridge_app.command("delete", help="Delete a SharePoint item to the Recycle Bin (write).")
+def bridge_delete_top(
+    path: Annotated[
+        str,
+        typer.Argument(help="Tenant-relative item path, e.g. Deals/Calder/Memos/obsolete.docx"),
+    ],
+    yes: Annotated[
+        bool,
+        typer.Option("--yes", help="Confirm the delete. Required — delete is destructive."),
+    ] = False,
+    json_output: Annotated[bool, typer.Option("--json", help="Emit JSON.")] = False,
+) -> None:
+    try:
+        bridge_cmd.delete_command(path=path, yes=yes, json_output=json_output)
+    except SanctumError as exc:
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code)) from exc
+
+
 def _report(exc: SanctumError) -> None:
     """Pretty-print a SanctumError to stderr with optional fix suggestion."""
     err_console.print(f"[bold red]error:[/] {exc.message}")

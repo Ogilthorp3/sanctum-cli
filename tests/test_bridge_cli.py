@@ -478,6 +478,308 @@ def test_bridge_rename_rejects_new_name_with_slash_client_side():
     assert "name" in r.output.lower()
 
 
+# ------------------------------------------------------------------- search
+
+
+def test_bridge_search_lists_hits():
+    patches = _patches()
+    _enter_all(patches)
+    try:
+        with respx.mock(assert_all_called=False) as rx:
+            rx.post("https://bridge.test/sharepoint/search").mock(
+                return_value=httpx.Response(
+                    200,
+                    json={
+                        "results": [
+                            {
+                                "name": "Calder",
+                                "drive_item_id": "F1",
+                                "is_folder": True,
+                                "is_file": False,
+                                "size": 0,
+                                "web_url": "https://sp/Calder",
+                                "parent_path": "Deals",
+                            },
+                            {
+                                "name": "term-sheet.pdf",
+                                "drive_item_id": "D1",
+                                "is_folder": False,
+                                "is_file": True,
+                                "size": 2048,
+                                "web_url": "https://sp/ts.pdf",
+                                "parent_path": "Deals/Calder",
+                            },
+                        ],
+                        "truncated": False,
+                    },
+                )
+            )
+            r = runner.invoke(app, ["bridge", "search", "Calder"])
+    finally:
+        _exit_all(patches)
+    assert r.exit_code == 0, r.output
+    assert "Calder" in r.output
+    assert "term-sheet.pdf" in r.output
+    # parent_path is surfaced — the keystone for locating a deal folder.
+    assert "Deals" in r.output
+
+
+def test_bridge_search_scoped_sends_folder_and_top():
+    captured: dict[str, object] = {}
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        captured["body"] = request.content
+        return httpx.Response(200, json={"results": [], "truncated": False})
+
+    patches = _patches()
+    _enter_all(patches)
+    try:
+        with respx.mock(assert_all_called=False) as rx:
+            rx.post("https://bridge.test/sharepoint/search").mock(side_effect=handle)
+            r = runner.invoke(
+                app,
+                ["bridge", "search", "memo", "--folder", "Deals/Calder", "--top", "5"],
+            )
+    finally:
+        _exit_all(patches)
+    assert r.exit_code == 0, r.output
+    body = captured["body"]
+    assert b'"folder_path":"Deals/Calder"' in body
+    assert b'"top":5' in body
+
+
+def test_bridge_search_json():
+    patches = _patches()
+    _enter_all(patches)
+    try:
+        with respx.mock(assert_all_called=False) as rx:
+            rx.post("https://bridge.test/sharepoint/search").mock(
+                return_value=httpx.Response(200, json={"results": [], "truncated": True})
+            )
+            r = runner.invoke(app, ["bridge", "search", "x", "--json"])
+    finally:
+        _exit_all(patches)
+    assert r.exit_code == 0, r.output
+    assert '"truncated"' in r.output
+
+
+def test_bridge_search_warns_when_truncated():
+    patches = _patches()
+    _enter_all(patches)
+    try:
+        with respx.mock(assert_all_called=False) as rx:
+            rx.post("https://bridge.test/sharepoint/search").mock(
+                return_value=httpx.Response(
+                    200,
+                    json={
+                        "results": [
+                            {
+                                "name": "x",
+                                "drive_item_id": "D",
+                                "is_folder": False,
+                                "is_file": True,
+                                "size": 1,
+                                "web_url": "https://sp/x",
+                                "parent_path": "Deals",
+                            }
+                        ],
+                        "truncated": True,
+                    },
+                )
+            )
+            r = runner.invoke(app, ["bridge", "search", "x", "--top", "1"])
+    finally:
+        _exit_all(patches)
+    assert r.exit_code == 0, r.output
+    assert "truncated" in r.output.lower()
+
+
+# ------------------------------------------------------------------- delete
+
+
+def test_bridge_delete_requires_yes_flag():
+    """Without --yes the delete must be refused BEFORE any network call — the
+    destructive-action guard."""
+    patches = _patches()
+    _enter_all(patches)
+    try:
+        # No respx mock: if the command hits the network, the test fails loudly.
+        r = runner.invoke(app, ["bridge", "delete", "Deals/Calder/old.docx"])
+    finally:
+        _exit_all(patches)
+    assert r.exit_code != 0
+    assert "yes" in r.output.lower() or "confirm" in r.output.lower()
+
+
+def test_bridge_delete_with_yes_happy_path():
+    captured: dict[str, object] = {}
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        captured["body"] = request.content
+        return httpx.Response(200, json={"deleted": True, "path": "Deals/Calder/old.docx"})
+
+    patches = _patches()
+    _enter_all(patches)
+    try:
+        with respx.mock(assert_all_called=False) as rx:
+            rx.post("https://bridge.test/sharepoint/delete").mock(side_effect=handle)
+            r = runner.invoke(app, ["bridge", "delete", "Deals/Calder/old.docx", "--yes"])
+    finally:
+        _exit_all(patches)
+    assert r.exit_code == 0, r.output
+    assert "deleted" in r.output.lower()
+    assert "recycle bin" in r.output.lower()
+    assert b'"path":"Deals/Calder/old.docx"' in captured["body"]
+
+
+def test_bridge_delete_blocked_path_surfaces_error():
+    patches = _patches()
+    _enter_all(patches)
+    try:
+        with respx.mock(assert_all_called=False) as rx:
+            rx.post("https://bridge.test/sharepoint/delete").mock(
+                return_value=httpx.Response(
+                    403,
+                    json={"error": "destination_not_allowed", "path": "Random/X/old.docx"},
+                )
+            )
+            r = runner.invoke(app, ["bridge", "delete", "Random/X/old.docx", "--yes"])
+    finally:
+        _exit_all(patches)
+    assert r.exit_code != 0
+    assert "allowlist" in r.output
+
+
+# ------------------------------------------------------------------- move
+
+
+def test_bridge_move_happy_path():
+    captured: dict[str, object] = {}
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        captured["body"] = request.content
+        return httpx.Response(
+            200,
+            json={
+                "drive_item_id": "src-id",
+                "web_url": "https://sp/moved",
+                "name": "memo.docx",
+                "parent_path": "Deals/Archive",
+            },
+        )
+
+    patches = _patches()
+    _enter_all(patches)
+    try:
+        with respx.mock(assert_all_called=False) as rx:
+            rx.post("https://bridge.test/sharepoint/move").mock(side_effect=handle)
+            r = runner.invoke(
+                app,
+                ["bridge", "move", "Deals/Calder/memo.docx", "Deals/Archive"],
+            )
+    finally:
+        _exit_all(patches)
+    assert r.exit_code == 0, r.output
+    assert "moved" in r.output
+    assert "Deals/Archive" in r.output
+    body = captured["body"]
+    assert b'"path":"Deals/Calder/memo.docx"' in body
+    assert b'"dest_folder":"Deals/Archive"' in body
+    assert b'"new_name":null' in body
+
+
+def test_bridge_move_with_name():
+    captured: dict[str, object] = {}
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        captured["body"] = request.content
+        return httpx.Response(
+            200,
+            json={
+                "drive_item_id": "src-id",
+                "web_url": "https://sp/moved",
+                "name": "final.docx",
+                "parent_path": "Deals/Archive",
+            },
+        )
+
+    patches = _patches()
+    _enter_all(patches)
+    try:
+        with respx.mock(assert_all_called=False) as rx:
+            rx.post("https://bridge.test/sharepoint/move").mock(side_effect=handle)
+            r = runner.invoke(
+                app,
+                ["bridge", "move", "Deals/memo.docx", "Deals/Archive", "--name", "final.docx"],
+            )
+    finally:
+        _exit_all(patches)
+    assert r.exit_code == 0, r.output
+    assert "final.docx" in r.output
+    assert b'"new_name":"final.docx"' in captured["body"]
+
+
+def test_bridge_move_json():
+    patches = _patches()
+    _enter_all(patches)
+    try:
+        with respx.mock(assert_all_called=False) as rx:
+            rx.post("https://bridge.test/sharepoint/move").mock(
+                return_value=httpx.Response(
+                    200,
+                    json={
+                        "drive_item_id": "src-id",
+                        "web_url": "https://sp/moved",
+                        "name": "memo.docx",
+                        "parent_path": "Deals/Archive",
+                    },
+                )
+            )
+            r = runner.invoke(
+                app, ["bridge", "move", "Deals/memo.docx", "Deals/Archive", "--json"]
+            )
+    finally:
+        _exit_all(patches)
+    assert r.exit_code == 0, r.output
+    assert '"parent_path"' in r.output
+
+
+def test_bridge_move_rejects_name_with_slash_client_side():
+    """A --name with a path separator is bad input — the CLI should reject it
+    before any network call (no respx mock needed)."""
+    patches = _patches()
+    _enter_all(patches)
+    try:
+        r = runner.invoke(
+            app,
+            ["bridge", "move", "Deals/memo.docx", "Deals/Archive", "--name", "sub/new.docx"],
+        )
+    finally:
+        _exit_all(patches)
+    assert r.exit_code != 0
+    assert "name" in r.output.lower()
+
+
+def test_bridge_move_blocked_dest_surfaces_error():
+    patches = _patches()
+    _enter_all(patches)
+    try:
+        with respx.mock(assert_all_called=False) as rx:
+            rx.post("https://bridge.test/sharepoint/move").mock(
+                return_value=httpx.Response(
+                    403,
+                    json={"error": "destination_not_allowed", "path": "Random/X"},
+                )
+            )
+            r = runner.invoke(
+                app, ["bridge", "move", "Deals/memo.docx", "Random/X"]
+            )
+    finally:
+        _exit_all(patches)
+    assert r.exit_code != 0
+    assert "allowlist" in r.output
+
+
 def test_bridge_upload_bad_if_exists_value(tmp_path):
     f = tmp_path / "x.txt"
     f.write_bytes(b"x")

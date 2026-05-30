@@ -198,6 +198,41 @@ class BridgeClient:
         body = json.dumps(payload, separators=(",", ":")).encode()
         return cast("dict[str, Any]", self._request("POST", "/sharepoint/rename", body=body))
 
+    def search(
+        self, query: str, *, folder_path: str | None = None, top: int = 25
+    ) -> dict[str, Any]:
+        """Search SharePoint for items matching ``query`` (read).
+
+        ``folder_path`` scopes the search to a sub-folder (``None`` = whole
+        drive). The bridge gates a scoped search on the read scope. Returns
+        ``{"results": [...], "truncated": bool}``."""
+        payload: dict[str, Any] = {"query": query, "folder_path": folder_path, "top": top}
+        body = json.dumps(payload, separators=(",", ":")).encode()
+        return cast("dict[str, Any]", self._request("POST", "/sharepoint/search", body=body))
+
+    def delete(self, path: str) -> dict[str, Any]:
+        """Delete a SharePoint file or folder (write).
+
+        The bridge gates this on the WRITE allowlist (same as ``upload`` /
+        ``rename``). The item goes to the site Recycle Bin — it is recoverable,
+        not hard-purged. Returns ``{"deleted": true, "path": str}``."""
+        payload = {"path": path}
+        body = json.dumps(payload, separators=(",", ":")).encode()
+        return cast("dict[str, Any]", self._request("POST", "/sharepoint/delete", body=body))
+
+    def move(
+        self, path: str, dest_folder: str, *, new_name: str | None = None
+    ) -> dict[str, Any]:
+        """Move a SharePoint item into ``dest_folder`` (write).
+
+        The bridge gates BOTH the source ``path`` AND the ``dest_folder`` on the
+        WRITE allowlist — you can only move within allowed roots. ``new_name``,
+        when given, must be a bare name (no path separator) and renames the item
+        at its destination in the same call."""
+        payload: dict[str, Any] = {"path": path, "dest_folder": dest_folder, "new_name": new_name}
+        body = json.dumps(payload, separators=(",", ":")).encode()
+        return cast("dict[str, Any]", self._request("POST", "/sharepoint/move", body=body))
+
     def upload(
         self,
         *,

@@ -6,7 +6,10 @@ Subcommands:
     sanctum bridge whoami                         show effective config
     sanctum bridge manifest [--json]              list modules + actions
     sanctum bridge folder <path>                  look up a SP folder
+    sanctum bridge search <query> [--folder ...]  search SP for items
     sanctum bridge upload <file> <folder> ...     upload a file to SP
+    sanctum bridge move <path> <dest> [--name ..] move a SP item
+    sanctum bridge delete <path> --yes            delete a SP item (Recycle Bin)
 
 Credentials come from the Keychain (services
 ``sanctum-bridge-cf-access-client-{id,secret}`` and
@@ -175,6 +178,44 @@ def children_command(path: str, json_output: bool = False) -> None:
         )
 
 
+def search_command(
+    query: str,
+    *,
+    folder: str | None = None,
+    top: int = 25,
+    json_output: bool = False,
+) -> None:
+    with _client() as c:
+        data = c.search(query, folder_path=folder, top=top)
+    if json_output:
+        console.print_json(data=data)
+        return
+    results = data.get("results", [])
+    scope = f" in {folder}" if folder else ""
+    console.print(f"[bold]{query}[/bold]{scope}  ({len(results)} hit(s))")
+    table = Table(show_header=True, header_style="bold cyan", box=None, padding=(0, 2))
+    table.add_column("type")
+    table.add_column("name", overflow="fold")
+    table.add_column("size", justify="right")
+    table.add_column("parent", overflow="fold")
+    for hit in results:
+        is_folder = hit.get("is_folder")
+        kind = "[blue]dir[/blue]" if is_folder else "file"
+        size = "-" if is_folder else _humanize_bytes(int(hit.get("size", 0)))
+        table.add_row(
+            kind,
+            hit.get("name", ""),
+            size,
+            hit.get("parent_path", ""),
+        )
+    console.print(table)
+    if data.get("truncated"):
+        err_console.print(
+            f"[yellow]warning[/yellow]: results were truncated at the --top cap "
+            f"({top}) — more matches exist. Raise --top or scope with --folder."
+        )
+
+
 def download_command(
     path: str,
     *,
@@ -242,6 +283,68 @@ def rename_command(
         console.print_json(data=result)
         return
     console.print(f"[green]renamed[/green]  {path} → {result['name']}")
+    console.print(f"  drive_item_id : {result['drive_item_id']}")
+    console.print(f"  web_url       : [link]{result['web_url']}[/link]")
+
+
+def delete_command(
+    path: str,
+    *,
+    yes: bool = False,
+    json_output: bool = False,
+) -> None:
+    # Destructive-action guard: require an explicit --yes. Without it, refuse
+    # before any network call with a clear message (the delete is recoverable
+    # via the Recycle Bin, but we still make the operator confirm intent).
+    if not yes:
+        msg = f"refusing to delete {path!r} without confirmation"
+        raise UserError(
+            msg,
+            fix=(
+                "pass --yes to confirm. The item goes to the SharePoint Recycle "
+                "Bin (recoverable), but delete is destructive — confirm intent."
+            ),
+        )
+
+    with _client() as c:
+        result = c.delete(path)
+
+    if json_output:
+        console.print_json(data=result)
+        return
+    console.print(f"[green]deleted[/green]  {result['path']} → Recycle Bin (recoverable)")
+
+
+def move_command(
+    path: str,
+    dest_folder: str,
+    *,
+    new_name: str | None = None,
+    json_output: bool = False,
+) -> None:
+    # ``new_name`` (when given) is a name, not a path. Reject separators / empty
+    # client-side so the obvious mistake fails fast — the bridge also enforces
+    # this server-side (defense in depth).
+    name: str | None = None
+    if new_name is not None:
+        name = new_name.strip()
+        if not name:
+            msg = "--name must not be empty"
+            raise UserError(msg, fix="omit --name to keep the current name, or pass a real name")
+        if "/" in name or "\\" in name:
+            msg = f"--name must be a bare name, not a path (got {new_name!r})"
+            raise UserError(
+                msg,
+                fix="--name renames at the destination; pass just the new name, no '/' or '\\'",
+            )
+
+    with _client() as c:
+        result = c.move(path, dest_folder, new_name=name)
+
+    if json_output:
+        console.print_json(data=result)
+        return
+    console.print(f"[green]moved[/green]  {path} → {result['parent_path']}/{result['name']}")
     console.print(f"  drive_item_id : {result['drive_item_id']}")
     console.print(f"  web_url       : [link]{result['web_url']}[/link]")
 

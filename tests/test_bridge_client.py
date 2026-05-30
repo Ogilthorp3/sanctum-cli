@@ -292,6 +292,171 @@ def test_rename_400_invalid_argument_raises_provider_error():
     assert "400" in exc.value.message
 
 
+# ----------------------------------------------------------------- search
+
+
+@respx.mock
+def test_search_sends_query_and_returns_results():
+    captured: dict[str, object] = {}
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        captured["body"] = request.content
+        return httpx.Response(
+            200,
+            json={
+                "results": [
+                    {
+                        "name": "Calder",
+                        "drive_item_id": "F1",
+                        "is_folder": True,
+                        "is_file": False,
+                        "size": 0,
+                        "web_url": "https://sp/Calder",
+                        "parent_path": "Deals",
+                    }
+                ],
+                "truncated": False,
+            },
+        )
+
+    respx.post("https://bridge.test/sharepoint/search").mock(side_effect=handle)
+    with httpx.Client() as http:
+        c = _client_with(http)
+        res = c.search("Calder")
+    assert res["truncated"] is False
+    assert res["results"][0]["name"] == "Calder"
+    body = captured["body"]
+    assert b'"query":"Calder"' in body
+    # Whole-drive search → folder_path is null on the wire.
+    assert b'"folder_path":null' in body
+    assert b'"top":25' in body
+
+
+@respx.mock
+def test_search_scoped_with_top_sends_folder_and_top():
+    captured: dict[str, object] = {}
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        captured["body"] = request.content
+        return httpx.Response(200, json={"results": [], "truncated": True})
+
+    respx.post("https://bridge.test/sharepoint/search").mock(side_effect=handle)
+    with httpx.Client() as http:
+        c = _client_with(http)
+        res = c.search("memo", folder_path="Deals/Calder", top=5)
+    assert res["truncated"] is True
+    body = captured["body"]
+    assert b'"folder_path":"Deals/Calder"' in body
+    assert b'"top":5' in body
+
+
+# ----------------------------------------------------------------- delete
+
+
+@respx.mock
+def test_delete_sends_path_and_returns_confirmation():
+    captured: dict[str, object] = {}
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        captured["body"] = request.content
+        captured["headers"] = dict(request.headers)
+        return httpx.Response(200, json={"deleted": True, "path": "Deals/Calder/old.docx"})
+
+    respx.post("https://bridge.test/sharepoint/delete").mock(side_effect=handle)
+    with httpx.Client() as http:
+        c = _client_with(http)
+        res = c.delete("Deals/Calder/old.docx")
+    assert res["deleted"] is True
+    assert res["path"] == "Deals/Calder/old.docx"
+    assert b'"path":"Deals/Calder/old.docx"' in captured["body"]
+    assert captured["headers"]["x-sanctum-module"] == "sharepoint"
+
+
+@respx.mock
+def test_delete_403_destination_not_allowed_raises_provider_error_with_fix():
+    respx.post("https://bridge.test/sharepoint/delete").mock(
+        return_value=httpx.Response(
+            403, json={"error": "destination_not_allowed", "path": "Random/X/old.docx"}
+        )
+    )
+    with httpx.Client() as http:
+        c = _client_with(http)
+        with pytest.raises(ProviderError) as exc:
+            c.delete("Random/X/old.docx")
+    assert "403" in exc.value.message
+    assert "allowlist" in (exc.value.fix or "")
+
+
+# ----------------------------------------------------------------- move
+
+
+@respx.mock
+def test_move_sends_path_dest_and_returns_item():
+    captured: dict[str, object] = {}
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        captured["body"] = request.content
+        return httpx.Response(
+            200,
+            json={
+                "drive_item_id": "src-id",
+                "web_url": "https://sp/moved",
+                "name": "memo.docx",
+                "parent_path": "Deals/Archive",
+            },
+        )
+
+    respx.post("https://bridge.test/sharepoint/move").mock(side_effect=handle)
+    with httpx.Client() as http:
+        c = _client_with(http)
+        res = c.move("Deals/Calder/memo.docx", "Deals/Archive")
+    assert res["drive_item_id"] == "src-id"
+    assert res["parent_path"] == "Deals/Archive"
+    body = captured["body"]
+    assert b'"path":"Deals/Calder/memo.docx"' in body
+    assert b'"dest_folder":"Deals/Archive"' in body
+    assert b'"new_name":null' in body
+
+
+@respx.mock
+def test_move_with_new_name_sends_name():
+    captured: dict[str, object] = {}
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        captured["body"] = request.content
+        return httpx.Response(
+            200,
+            json={
+                "drive_item_id": "src-id",
+                "web_url": "https://sp/moved",
+                "name": "final.docx",
+                "parent_path": "Deals/Archive",
+            },
+        )
+
+    respx.post("https://bridge.test/sharepoint/move").mock(side_effect=handle)
+    with httpx.Client() as http:
+        c = _client_with(http)
+        res = c.move("Deals/memo.docx", "Deals/Archive", new_name="final.docx")
+    assert res["name"] == "final.docx"
+    assert b'"new_name":"final.docx"' in captured["body"]
+
+
+@respx.mock
+def test_move_403_dest_not_allowed_raises_provider_error_with_fix():
+    respx.post("https://bridge.test/sharepoint/move").mock(
+        return_value=httpx.Response(
+            403, json={"error": "destination_not_allowed", "path": "Random/X"}
+        )
+    )
+    with httpx.Client() as http:
+        c = _client_with(http)
+        with pytest.raises(ProviderError) as exc:
+            c.move("Deals/memo.docx", "Random/X")
+    assert "403" in exc.value.message
+    assert "allowlist" in (exc.value.fix or "")
+
+
 # ------------------------------------------------------------ error mapping
 
 
