@@ -376,6 +376,108 @@ def test_bridge_download_extract_text_prints_text(tmp_path):
     assert b'"extract_text":true' in captured["body"]
 
 
+def test_bridge_rename_happy_path():
+    captured: dict[str, object] = {}
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        captured["body"] = request.content
+        return httpx.Response(
+            200,
+            json={
+                "drive_item_id": "01ITEM",
+                "web_url": "https://sp/renamed",
+                "name": "investment-memo.docx",
+            },
+        )
+
+    patches = _patches()
+    _enter_all(patches)
+    try:
+        with respx.mock(assert_all_called=False) as rx:
+            rx.post("https://bridge.test/sharepoint/rename").mock(side_effect=handle)
+            r = runner.invoke(
+                app,
+                [
+                    "bridge",
+                    "rename",
+                    "Deals/Calder/Memos/draft.docx",
+                    "investment-memo.docx",
+                ],
+            )
+    finally:
+        _exit_all(patches)
+    assert r.exit_code == 0, r.output
+    assert "renamed" in r.output
+    assert "investment-memo.docx" in r.output
+    assert "01ITEM" in r.output
+    body = captured["body"]
+    assert b'"path":"Deals/Calder/Memos/draft.docx"' in body
+    assert b'"new_name":"investment-memo.docx"' in body
+
+
+def test_bridge_rename_json():
+    patches = _patches()
+    _enter_all(patches)
+    try:
+        with respx.mock(assert_all_called=False) as rx:
+            rx.post("https://bridge.test/sharepoint/rename").mock(
+                return_value=httpx.Response(
+                    200,
+                    json={
+                        "drive_item_id": "01ITEM",
+                        "web_url": "https://sp/renamed",
+                        "name": "new.docx",
+                    },
+                )
+            )
+            r = runner.invoke(
+                app,
+                ["bridge", "rename", "Deals/old.docx", "new.docx", "--json"],
+            )
+    finally:
+        _exit_all(patches)
+    assert r.exit_code == 0, r.output
+    assert '"drive_item_id"' in r.output
+    assert '"name"' in r.output
+
+
+def test_bridge_rename_blocked_path_surfaces_error():
+    patches = _patches()
+    _enter_all(patches)
+    try:
+        with respx.mock(assert_all_called=False) as rx:
+            rx.post("https://bridge.test/sharepoint/rename").mock(
+                return_value=httpx.Response(
+                    403,
+                    json={"error": "destination_not_allowed", "path": "Random/X/memo.docx"},
+                )
+            )
+            r = runner.invoke(
+                app,
+                ["bridge", "rename", "Random/X/memo.docx", "new.docx"],
+            )
+    finally:
+        _exit_all(patches)
+    assert r.exit_code != 0
+    assert "allowlist" in r.output
+
+
+def test_bridge_rename_rejects_new_name_with_slash_client_side():
+    """A new_name with a path separator is bad input — the CLI should reject it
+    before any network call (no respx mock needed)."""
+    patches = _patches()
+    _enter_all(patches)
+    try:
+        r = runner.invoke(
+            app,
+            ["bridge", "rename", "Deals/memo.docx", "sub/new.docx"],
+        )
+    finally:
+        _exit_all(patches)
+    assert r.exit_code != 0
+    assert "name" in r.output.lower()
+
+
 def test_bridge_upload_bad_if_exists_value(tmp_path):
     f = tmp_path / "x.txt"
     f.write_bytes(b"x")

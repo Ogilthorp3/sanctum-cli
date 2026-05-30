@@ -232,6 +232,66 @@ def test_download_extract_text_sets_flag_true():
     assert b'"extract_text":true' in captured["body"]
 
 
+# ----------------------------------------------------------------- rename
+
+
+@respx.mock
+def test_rename_sends_path_and_new_name_and_returns_item():
+    captured: dict[str, object] = {}
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        captured["body"] = request.content
+        captured["headers"] = dict(request.headers)
+        return httpx.Response(
+            200,
+            json={
+                "drive_item_id": "item-x",
+                "web_url": "https://sp/renamed",
+                "name": "investment-memo.docx",
+            },
+        )
+
+    respx.post("https://bridge.test/sharepoint/rename").mock(side_effect=handle)
+    with httpx.Client() as http:
+        c = _client_with(http)
+        res = c.rename("Deals/Calder/memo.docx", "investment-memo.docx")
+    assert res["drive_item_id"] == "item-x"
+    assert res["name"] == "investment-memo.docx"
+    body = captured["body"]
+    assert b'"path":"Deals/Calder/memo.docx"' in body
+    assert b'"new_name":"investment-memo.docx"' in body
+    assert captured["headers"]["x-sanctum-module"] == "sharepoint"
+
+
+@respx.mock
+def test_rename_403_destination_not_allowed_raises_provider_error_with_fix():
+    respx.post("https://bridge.test/sharepoint/rename").mock(
+        return_value=httpx.Response(
+            403, json={"error": "destination_not_allowed", "path": "Random/X/memo.docx"}
+        )
+    )
+    with httpx.Client() as http:
+        c = _client_with(http)
+        with pytest.raises(ProviderError) as exc:
+            c.rename("Random/X/memo.docx", "new.docx")
+    assert "403" in exc.value.message
+    assert "allowlist" in (exc.value.fix or "")
+
+
+@respx.mock
+def test_rename_400_invalid_argument_raises_provider_error():
+    respx.post("https://bridge.test/sharepoint/rename").mock(
+        return_value=httpx.Response(
+            400, json={"error": "invalid_argument", "detail": "new_name must be a bare name"}
+        )
+    )
+    with httpx.Client() as http:
+        c = _client_with(http)
+        with pytest.raises(ProviderError) as exc:
+            c.rename("Deals/memo.docx", "sub/new.docx")
+    assert "400" in exc.value.message
+
+
 # ------------------------------------------------------------ error mapping
 
 

@@ -188,6 +188,16 @@ class BridgeClient:
         body = json.dumps(payload, separators=(",", ":")).encode()
         return cast("dict[str, Any]", self._request("POST", "/sharepoint/download", body=body))
 
+    def rename(self, path: str, new_name: str) -> dict[str, Any]:
+        """Rename a SharePoint file or folder in place (write).
+
+        ``new_name`` is a bare name — not a path. The bridge gates this on the
+        write allowlist (same as ``upload``) and rejects a ``new_name`` that
+        carries a path separator."""
+        payload = {"path": path, "new_name": new_name}
+        body = json.dumps(payload, separators=(",", ":")).encode()
+        return cast("dict[str, Any]", self._request("POST", "/sharepoint/rename", body=body))
+
     def upload(
         self,
         *,
@@ -238,6 +248,11 @@ def _fix_for(status: int, body: dict[str, Any]) -> str:
             return "this nonce was used recently; client must generate a fresh one"
         if code == "clock_skew":
             return "host clock is more than 60s off UTC; sync NTP"
+    if status == 400 and body.get("error") == "invalid_argument":
+        return (
+            "bad request input; for rename, new_name must be a bare file/folder "
+            "name (no '/' or '\\') and not empty."
+        )
     if status == 403 and body.get("error") == "destination_not_allowed":
         return (
             "folder root is not on the bridge allowlist; edit "

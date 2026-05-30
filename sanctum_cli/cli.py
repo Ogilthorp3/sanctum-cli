@@ -761,6 +761,25 @@ def bridge_upload_top(
         raise typer.Exit(code=int(exc.exit_code)) from exc
 
 
+@bridge_app.command("rename", help="Rename a SharePoint file or folder in place via the bridge.")
+def bridge_rename_top(
+    path: Annotated[
+        str,
+        typer.Argument(help="Tenant-relative item path, e.g. Deals/Calder/Memos/draft.docx"),
+    ],
+    new_name: Annotated[
+        str,
+        typer.Argument(help="New bare name (no '/'), e.g. investment-memo.docx"),
+    ],
+    json_output: Annotated[bool, typer.Option("--json", help="Emit JSON.")] = False,
+) -> None:
+    try:
+        bridge_cmd.rename_command(path=path, new_name=new_name, json_output=json_output)
+    except SanctumError as exc:
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code)) from exc
+
+
 def _report(exc: SanctumError) -> None:
     """Pretty-print a SanctumError to stderr with optional fix suggestion."""
     err_console.print(f"[bold red]error:[/] {exc.message}")

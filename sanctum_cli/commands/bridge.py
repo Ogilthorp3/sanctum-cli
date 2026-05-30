@@ -215,6 +215,37 @@ def download_command(
             )
 
 
+def rename_command(
+    path: str,
+    new_name: str,
+    *,
+    json_output: bool = False,
+) -> None:
+    # ``new_name`` is a name, not a path. Reject separators / empty client-side
+    # so the obvious mistake fails fast with a clear message — the bridge also
+    # enforces this server-side (defense in depth).
+    name = new_name.strip()
+    if not name:
+        msg = "new_name must not be empty"
+        raise UserError(msg, fix="pass the new file/folder name as the second argument")
+    if "/" in name or "\\" in name:
+        msg = f"new_name must be a bare name, not a path (got {new_name!r})"
+        raise UserError(
+            msg,
+            fix="rename does not move items; pass just the new name, with no '/' or '\\'",
+        )
+
+    with _client() as c:
+        result = c.rename(path, name)
+
+    if json_output:
+        console.print_json(data=result)
+        return
+    console.print(f"[green]renamed[/green]  {path} → {result['name']}")
+    console.print(f"  drive_item_id : {result['drive_item_id']}")
+    console.print(f"  web_url       : [link]{result['web_url']}[/link]")
+
+
 def _humanize_bytes(n: int) -> str:
     size = float(n)
     for unit in ("B", "KiB", "MiB", "GiB"):
