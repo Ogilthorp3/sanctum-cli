@@ -6,7 +6,7 @@ Covers the four dirty conditions:
  3. Any sample with service_nonzero.
  4. A pressure_level==4 sample not followed by a strictly-later pressure_level<=2 sample.
 """
-from sanctum_cli.soak.harness import SoakResult, Sample, classify_soak
+from sanctum_cli.soak.harness import Sample, SoakResult, classify_soak
 
 
 def _r(samples: list[Sample], faults: list[str] | None = None) -> SoakResult:

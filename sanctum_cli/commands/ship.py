@@ -21,13 +21,11 @@ the conservative side for the two gates that need future work:
 """
 from __future__ import annotations
 
-import json
 import shlex
 import subprocess
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -47,6 +45,7 @@ from sanctum_cli.ship_gates import (
     gate_soak,
     overall,
 )
+from sanctum_cli.soak import SoakResult, classify_soak
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -183,40 +182,33 @@ def _demo_exits_zero(demo: str) -> bool:
         return False
 
 
-def _soak_days(m: ModuleManifest) -> float | None:
+def _load_soak_result(m: ModuleManifest) -> SoakResult | None:
+    """Load the soak result file for *m*, or return None if absent/corrupt."""
     result_path = Path(m.soak.result_path.replace("{module}", m.module)).expanduser()
     if not result_path.is_file():
         return None
     try:
-        data = json.loads(result_path.read_text())
-        started_at = datetime.fromisoformat(data["started_at"].replace("Z", "+00:00"))
-        last_at = datetime.fromisoformat(data["last_at"].replace("Z", "+00:00"))
-        now = datetime.now(tz=UTC)
-        # Use the later of last_at and now to measure elapsed time from start.
-        end = max(last_at, now)
-        delta = end - started_at
-        return delta.total_seconds() / 86400
-    except (KeyError, ValueError, OSError):
+        return SoakResult.model_validate_json(result_path.read_text())
+    except (ValueError, OSError):
         return None
+
+
+def _soak_days(m: ModuleManifest) -> float | None:
+    """Return elapsed soak days via classify_soak, or None if no result exists."""
+    result = _load_soak_result(m)
+    if result is None:
+        return None
+    days, _ = classify_soak(result)
+    return days
 
 
 def _soak_clean(m: ModuleManifest) -> bool:
-    result_path = Path(m.soak.result_path.replace("{module}", m.module)).expanduser()
-    if not result_path.is_file():
+    """Return True iff the soak result passes all four dirty conditions."""
+    result = _load_soak_result(m)
+    if result is None:
         return False
-    try:
-        data = json.loads(result_path.read_text())
-        faults: list[Any] = data.get("faults", [])
-        if faults:
-            return False
-        for sample in data.get("samples", []):
-            if sample.get("red_probes"):
-                return False
-            if sample.get("service_nonzero"):
-                return False
-        return True
-    except (KeyError, ValueError, OSError):
-        return False
+    _, clean = classify_soak(result)
+    return clean
 
 
 def default_adapters() -> dict[str, Callable[..., Any]]:
