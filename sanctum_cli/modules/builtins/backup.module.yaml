@@ -1,0 +1,24 @@
+module: backup
+version: 1.0.0
+description: Encrypted restic backup to the operator's own cloud repo (R2 default)
+depends_on: []
+services: []
+secrets:
+  - {account: sanctum, service: r2-account-id, required: true, generate: none}
+  - {account: sanctum, service: r2-access-key-id, required: true, generate: none}
+  - {account: sanctum, service: r2-secret-access-key, required: true, generate: none}
+probes:
+  - backup.backup_recent
+alerts:
+  sink: chitti
+  pager_conditions: []
+uninstall:
+  bootout_labels: []
+  revoke_secrets: [r2-account-id, r2-access-key-id, r2-secret-access-key]
+  remove_paths: []
+  rename_suffix: ".uninstalled-{date}"
+docs: https://github.com/Ogilthorp3/sanctum-cli/blob/main/docs/backup.md
+demo: sanctum backup snapshots
+soak:
+  min_days: 7
+  result_path: ~/.sanctum/soak/backup.json
