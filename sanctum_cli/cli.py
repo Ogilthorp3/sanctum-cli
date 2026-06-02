@@ -24,8 +24,8 @@ from sanctum_cli.commands import chat as chat_cmd
 from sanctum_cli.commands import cloud as cloud_cmd
 from sanctum_cli.commands import code as code_cmd
 from sanctum_cli.commands import config_cmd, doctor, status
-from sanctum_cli.commands import keychain_cmd as keychain_command
 from sanctum_cli.commands import devices as devices_cmd
+from sanctum_cli.commands import keychain_cmd as keychain_command
 from sanctum_cli.commands import keys_backup as keys_backup_cmd
 from sanctum_cli.commands import logs as logs_cmd
 from sanctum_cli.commands import onboard as onboard_cmd
@@ -35,6 +35,7 @@ from sanctum_cli.commands import self_test as self_test_cmd
 from sanctum_cli.commands import uninstall as uninstall_cmd
 from sanctum_cli.commands import update as update_cmd
 from sanctum_cli.commands import vision as vision_cmd
+from sanctum_cli.commands.module import module_app
 from sanctum_cli.errors import ExitCode, SanctumError
 
 app = typer.Typer(
@@ -232,6 +233,8 @@ def devices_top() -> None:
 def schedule_top() -> None:
     schedule_cmd.schedule_command()
 
+
+app.add_typer(module_app, name="module")
 
 keys_app = typer.Typer(help="Keychain-backed credential helpers.")
 app.add_typer(keys_app, name="keys")
