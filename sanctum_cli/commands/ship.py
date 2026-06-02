@@ -170,6 +170,12 @@ def _docs_resolves(url: str) -> bool:
 
 
 def _demo_exits_zero(demo: str) -> bool:
+    # Trust boundary: ``demo`` comes from the module manifest, which is an
+    # operator-controlled, locally-installed file (*.module.yaml in
+    # ~/.sanctum/modules/ or the built-in builtins/ directory).  It is split
+    # via ``shlex.split`` and passed directly to ``subprocess.run`` with
+    # ``shell=False`` (the default), so no shell interpolation occurs.
+    # Operators who install a module with a malicious demo field own that risk.
     try:
         result = subprocess.run(
             shlex.split(demo),
@@ -241,12 +247,21 @@ _STATUS_LABEL: dict[GateStatus, str] = {
 }
 
 
-def render(report: ShipReport, json_out: bool = False) -> int:
+def render(report: ShipReport, json_out: bool = False, allow_amber: bool = False) -> int:
     """Render the ship report and return the appropriate exit code.
 
+    Args:
+        report:      The evaluated ship report.
+        json_out:    Emit JSON instead of the Rich table.
+        allow_amber: When True, AMBER verdict exits 0 (conditionally ready).
+                     When False (default), AMBER exits 1 — the caller must
+                     explicitly opt in via --allow-amber.
+
     Returns:
-        0 if verdict is GREEN or AMBER (ready / conditionally ready).
-        1 if verdict is RED (not shippable).
+        0 if verdict is GREEN.
+        0 if verdict is AMBER and allow_amber is True.
+        1 if verdict is AMBER and allow_amber is False.
+        1 if verdict is RED (regardless of allow_amber).
     """
     if json_out:
         import json as _json
@@ -290,4 +305,8 @@ def render(report: ShipReport, json_out: bool = False) -> int:
             )
         )
 
-    return 0 if report.verdict is not GateStatus.RED else 1
+    if report.verdict is GateStatus.GREEN:
+        return 0
+    if report.verdict is GateStatus.AMBER and allow_amber:
+        return 0
+    return 1

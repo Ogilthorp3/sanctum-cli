@@ -108,7 +108,13 @@ class ModuleManifest(BaseModel):
         from_attributes: bool | None = None,
         context: Any = None,
     ) -> ModuleManifest:
-        """Validate and unwrap ManifestError from pydantic's ValidationError wrapper."""
+        """Validate and unwrap ManifestError from pydantic's ValidationError wrapper.
+
+        Note: iterating exc.errors() surfaces only the *first* value_error because
+        the loop raises on the first match.  This is fine for the single current
+        validator (_check_revoke_secrets_declared); revisit if additional
+        model_validators are added that can produce independent value_errors.
+        """
         try:
             return super().model_validate(
                 obj,
@@ -136,6 +142,8 @@ def load_manifest(path: Path) -> ModuleManifest:
         data = yaml.safe_load(_Path(path).read_text())
     except OSError as e:
         raise ManifestError(f"cannot read manifest {path}: {e}") from e
+    except yaml.YAMLError as e:
+        raise ManifestError(f"invalid YAML in manifest {path}: {e}") from e
     if not isinstance(data, dict):
         raise ManifestError(f"manifest {path} is not a mapping")
     return ModuleManifest.model_validate(data)

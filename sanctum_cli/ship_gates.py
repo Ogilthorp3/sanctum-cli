@@ -27,10 +27,11 @@ class GateResult:
 
 
 def gate_install_uninstall(m: ModuleManifest) -> GateResult:
+    # The former amber branch (`remove_paths and not rename_suffix`) was unreachable:
+    # the RED check above already returns when `rename_suffix` is falsy, so the
+    # amber condition could never be True. Removed.
     if not m.uninstall.rename_suffix:
         return GateResult("install/uninstall", GateStatus.RED, "no uninstall handler")
-    if m.uninstall.remove_paths and not m.uninstall.rename_suffix:
-        return GateResult("install/uninstall", GateStatus.AMBER, "purge without rename safety")
     return GateResult("install/uninstall", GateStatus.GREEN, "reversible, data preserved")
 
 

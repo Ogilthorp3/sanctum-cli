@@ -34,3 +34,20 @@ def test_generate_enum_rejects_unknown():
     bad = {**VALID, "secrets": [{"account": "sanctum", "service": "x", "required": True, "generate": "rsa"}]}
     with pytest.raises(Exception):
         ModuleManifest.model_validate(bad)
+
+
+def test_load_manifest_raises_manifest_error_on_invalid_yaml(tmp_path):
+    """A malformed YAML file → ManifestError (not a raw yaml.YAMLError)."""
+    import yaml
+    bad = tmp_path / "bad.module.yaml"
+    bad.write_text("key: [unclosed", encoding="utf-8")
+    with pytest.raises(ManifestError, match="invalid YAML"):
+        load_manifest(bad)
+    # Must NOT propagate as a raw yaml.YAMLError
+    bad.write_text("key: [unclosed", encoding="utf-8")
+    try:
+        load_manifest(bad)
+    except ManifestError:
+        pass  # expected
+    except yaml.YAMLError:
+        pytest.fail("load_manifest should wrap YAMLError in ManifestError, not re-raise raw")

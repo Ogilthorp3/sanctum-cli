@@ -27,9 +27,9 @@ import pytest
 from typer.testing import CliRunner
 
 from sanctum_cli.cli import app
-from sanctum_cli.commands.ship import evaluate
+from sanctum_cli.commands.ship import ShipReport, evaluate, render
 from sanctum_cli.modules.registry import ModuleRegistry
-from sanctum_cli.ship_gates import GateStatus
+from sanctum_cli.ship_gates import GateResult, GateStatus
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -203,3 +203,35 @@ def test_doctor_ship_json_has_verdict(tmp_path: Path, monkeypatch: pytest.Monkey
     assert expected_gates <= gate_names, (
         f"missing gates in JSON output: {expected_gates - gate_names}"
     )
+
+
+# ─── Test 3: render() exit-code policy ──────────────────────────────────────
+
+
+def _report(verdict: GateStatus) -> ShipReport:
+    """Build a minimal ShipReport with the given verdict."""
+    return ShipReport(
+        module="m",
+        gates=[GateResult("g", verdict, "detail")],
+        verdict=verdict,
+    )
+
+
+def test_render_green_exits_0() -> None:
+    assert render(_report(GateStatus.GREEN)) == 0
+
+
+def test_render_amber_exits_1_without_flag() -> None:
+    """AMBER without --allow-amber must exit 1 (not 0)."""
+    assert render(_report(GateStatus.AMBER), allow_amber=False) == 1
+
+
+def test_render_amber_exits_0_with_allow_amber() -> None:
+    """AMBER with allow_amber=True must exit 0."""
+    assert render(_report(GateStatus.AMBER), allow_amber=True) == 0
+
+
+def test_render_red_exits_1_regardless_of_allow_amber() -> None:
+    """RED always exits 1, even with allow_amber=True."""
+    assert render(_report(GateStatus.RED), allow_amber=True) == 1
+    assert render(_report(GateStatus.RED), allow_amber=False) == 1

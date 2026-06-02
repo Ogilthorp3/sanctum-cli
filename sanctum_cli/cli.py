@@ -164,13 +164,20 @@ def doctor_top(
         str | None,
         typer.Option("--ship", help="Score a module against the ship bar."),
     ] = None,
+    allow_amber: Annotated[
+        bool,
+        typer.Option(
+            "--allow-amber",
+            help="(--ship only) Exit 0 when the verdict is AMBER (conditionally ready).",
+        ),
+    ] = False,
 ) -> None:
     if ship is not None:
         from sanctum_cli.commands.ship import default_adapters, evaluate, render
         from sanctum_cli.modules.registry import ModuleRegistry
 
         report = evaluate(ship, ModuleRegistry.discover(), default_adapters())
-        raise typer.Exit(render(report, json_out=json_output))
+        raise typer.Exit(render(report, json_out=json_output, allow_amber=allow_amber))
 
     try:
         doctor.doctor_command(full=full, json_output=json_output)
