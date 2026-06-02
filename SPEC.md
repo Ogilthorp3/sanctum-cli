@@ -96,9 +96,23 @@ sanctum backup restore <snap-id> <target>
 sanctum doctor                       # run all health probes; brevity-gated
 sanctum doctor --full                # expanded diagnostic
 sanctum doctor --fix                 # auto-remediate known drifts (mac-reconciler-style)
+sanctum doctor --ship <module>       # score a module against the six ship-bar gates
+sanctum doctor --ship <mod> --json   # machine-readable JSON verdict + gate breakdown
 sanctum agent <name> [start|stop|status|logs]
 sanctum proxy [restart|logs|status]
 sanctum keychain [list|rotate <service>]
+
+# Module system
+sanctum module list                  # list discovered modules (builtin + user)
+sanctum module status <name>         # gate summary for a module
+sanctum module demo <name>           # run the module's demo command
+sanctum module install <name>        # install a module
+sanctum module uninstall <name>      # uninstall a module
+
+# Soak harness
+sanctum soak <module>                # continuous health recording loop
+sanctum soak <module> --once         # single sample (for cron / launchd)
+sanctum soak <module> --days 7       # target soak duration (informational)
 
 # Meta
 sanctum config validate              # schema-check ~/.sanctum/instance.yaml
