@@ -311,9 +311,17 @@ def uninstall_module(
     manifest = registry.get(name)
     result = UninstallResult(name=name)
 
-    # 1. bootout labels (synthetic/real launchd labels)
+    # 1. bootout labels — resolve the launchd domain per service kind.
+    # Build a {label: kind} map from the manifest's declared services so we
+    # can pick "system" for launchdaemons and "gui/<uid>" for everything else.
+    label_to_kind = {svc.label: svc.kind for svc in manifest.services}
     for label in manifest.uninstall.bootout_labels:
-        bootout_label(label)
+        from sanctum_cli.modules.manifest import ServiceKind
+        kind = label_to_kind.get(label)
+        domain = "system" if kind is ServiceKind.launchdaemon else f"gui/{os.getuid()}"
+        # Pass the full launchctl target string (domain/label) to the injected
+        # callable so tests can assert the correct domain without touching launchd.
+        bootout_label(f"{domain}/{label}")
         result.bootout.append(label)
 
     # 2. revoke secrets — resolve each service's account from its SecretSpec
@@ -360,6 +368,22 @@ def demo_module(
 # ─── real side-effect adapters (production) ──────────────────────────
 
 
+def _bootout_full_target(target: str) -> None:
+    """Bootout a launchd service by its full target string (``domain/label``).
+
+    The injected ``bootout_label`` callable in ``uninstall_module`` receives
+    the pre-resolved ``domain/label`` string so tests can assert domain
+    correctness without touching launchd.  This is the real production adapter
+    that converts that string to the ``launchctl bootout`` invocation.
+    """
+    subprocess.run(
+        ["launchctl", "bootout", target],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
 def _real_keychain_mint(account: str, service: str) -> None:
     """Mint a fresh 64-hex-char secret into the login Keychain.
 
@@ -367,6 +391,14 @@ def _real_keychain_mint(account: str, service: str) -> None:
     ``keychain rotate`` so the boundary stays auditable. Raises
     ``ManifestError`` if the ``security`` binary is missing or the write
     fails.
+
+    Security note: the minted secret is passed as the ``-w`` argv to
+    ``security``.  It is therefore transiently visible via ``ps`` for the
+    duration of the subprocess call — the same exposure as ``sanctum
+    keychain rotate``.  The macOS ``security`` CLI has no stdin mode for
+    ``add-generic-password``, so argv is the only available channel.  This
+    matches the repo's secrets-opsec doctrine: short-lived argv exposure is
+    accepted for minting; operators must not run ``ps`` during the call.
     """
     if not shutil.which(SECURITY_BIN):
         raise ManifestError(
@@ -468,7 +500,7 @@ def uninstall_command(
             name,
             purge=purge,
             registry=registry,
-            bootout_label=_uninstall.bootout_label,
+            bootout_label=_bootout_full_target,
             revoke_secret=_uninstall.revoke_keychain_entry,
             rename_path=_uninstall.rename_with_suffix,
             remove_path=_real_remove_path,

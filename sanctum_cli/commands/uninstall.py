@@ -65,15 +65,22 @@ KEYCHAIN_SERVICES = [
 # adapters behind injected callables so the teardown logic lives in one place.
 
 
-def bootout_label(label: str) -> None:
-    """Bootout one LaunchAgent label from the current GUI domain.
+def bootout_label(label: str, domain: str | None = None) -> None:
+    """Bootout one LaunchAgent/Daemon label from the given launchd domain.
+
+    Args:
+        label:  The launchd label (e.g. ``com.sanctum.backup``).
+        domain: The launchd domain prefix.  Defaults to ``gui/<uid>`` (the
+                current user's GUI domain) when None — preserving the original
+                global-uninstall behavior for existing call sites that omit it.
 
     Idempotent at the launchctl level: booting out a label that is not
     loaded is a no-op (non-zero rc, ignored). Touches launchd only — does
     NOT rename or delete any plist file.
     """
+    resolved_domain = domain if domain is not None else f"gui/{os.getuid()}"
     subprocess.run(
-        ["launchctl", "bootout", f"gui/{os.getuid()}/{label}"],
+        ["launchctl", "bootout", f"{resolved_domain}/{label}"],
         capture_output=True,
         text=True,
         check=False,

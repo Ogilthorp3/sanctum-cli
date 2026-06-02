@@ -354,6 +354,13 @@ def module_probes(registry: ModuleRegistry) -> dict[str, list[Probe]]:
 
     The existing ``PROBES`` flat list and runner are **not** modified by this
     function — this is an additive view for consumers such as the soak harness.
+
+    Design note: self-test intentionally does NOT merge module probes into its
+    own ``PROBES`` runner.  Doing so would double-run the built-in
+    ``backup_recent`` probe (which already appears in ``PROBES`` directly) and
+    would break existing tests that monkeypatch ``PROBES``.  Module probes are
+    consumed by the soak harness (``run_soak`` → ``_collect_sample``) instead,
+    which is the appropriate long-running signal collector for per-module health.
     """
     result: dict[str, list[Probe]] = {}
     for name, manifest in registry.manifests.items():

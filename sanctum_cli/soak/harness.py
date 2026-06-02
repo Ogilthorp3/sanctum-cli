@@ -117,6 +117,10 @@ def classify_soak(result: SoakResult) -> tuple[float, bool]:
     # For each sample at pressure_level==4, there must be a strictly later
     # sample (by index; ts ordering is preserved by the appender) whose
     # pressure_level <= 2.
+    # Note: "strictly later by index" assumes samples are in chronological order.
+    # This invariant is guaranteed by run_soak's appender, which always calls
+    # result.samples.append(sample) followed by _atomic_write.  Callers that
+    # construct SoakResult manually (e.g. tests) must maintain the same order.
     samples = result.samples
     for i, sample in enumerate(samples):
         if sample.pressure_level == 4:

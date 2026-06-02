@@ -13,6 +13,7 @@ for real).
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -197,14 +198,16 @@ def test_uninstall_runs_manifest_teardown_via_injected_callables(tmp_path: Path)
         "testmod",
         purge=False,
         registry=reg,
-        bootout_label=lambda label: booted.append(label),
+        bootout_label=lambda target: booted.append(target),
         revoke_secret=lambda account, service: (revoked.append((account, service)), True)[1],
         rename_path=lambda p, suffix: (renamed.append(str(p)), True)[1],
         remove_path=lambda p: (removed.append(str(p)), True)[1],
     )
 
-    # the synthetic label was booted out (NOT a real com.sanctum.* service)
-    assert booted == ["com.sanctum.shipbar-test-noop"]
+    # the synthetic label was booted out (NOT a real com.sanctum.* service);
+    # it's a launchagent so the target is gui/<uid>/<label>
+    expected_target = f"gui/{os.getuid()}/com.sanctum.shipbar-test-noop"
+    assert booted == [expected_target]
     # both declared revoke targets attempted, with the manifest's account
     assert revoked == [("sanctum", "shipbar-test-key"), ("sanctum", "shipbar-test-supplied")]
     # WITHOUT --purge, remove_paths is NOT touched
@@ -221,7 +224,7 @@ def test_uninstall_purge_removes_paths(tmp_path: Path) -> None:
         "testmod",
         purge=True,
         registry=reg,
-        bootout_label=lambda label: None,
+        bootout_label=lambda target: None,
         revoke_secret=lambda account, service: True,
         rename_path=lambda p, suffix: True,
         remove_path=lambda p: (removed.append(str(p)), True)[1],
@@ -249,7 +252,7 @@ def test_uninstall_also_removes_installed_manifest(tmp_path: Path) -> None:
         purge=False,
         registry=reg,
         modules_dir=modules_dir,
-        bootout_label=lambda label: None,
+        bootout_label=lambda target: None,
         revoke_secret=lambda account, service: True,
         rename_path=lambda p, suffix: (renamed.append(str(p)), True)[1],
         remove_path=lambda p: True,
@@ -265,7 +268,7 @@ def test_uninstall_unknown_module_raises(tmp_path: Path) -> None:
             "ghost",
             purge=False,
             registry=reg,
-            bootout_label=lambda label: None,
+            bootout_label=lambda target: None,
             revoke_secret=lambda account, service: True,
             rename_path=lambda p, suffix: True,
             remove_path=lambda p: True,
@@ -320,3 +323,89 @@ def test_uninstall_primitives_are_importable() -> None:
     assert callable(un.bootout_label)
     assert callable(un.revoke_keychain_entry)
     assert callable(un.rename_with_suffix)
+
+
+# ── bootout domain routing ─────────────────────────────────────────────
+#
+# The bootout callable receives the full launchctl target string, not just
+# the label. launchdaemon services resolve to "system/<label>"; launchagent
+# (and any other kind) resolve to "gui/<uid>/<label>".
+
+_DAEMON_MANIFEST = """\
+module: testdaemon
+version: 0.0.1
+description: synthetic daemon module for domain-routing tests
+services:
+  - label: com.sanctum.shipbar-test-daemon
+    kind: launchdaemon
+    keepalive: false
+uninstall:
+  bootout_labels: [com.sanctum.shipbar-test-daemon]
+  revoke_secrets: []
+  remove_paths: []
+  rename_suffix: ".uninstalled-{date}"
+docs: https://x.invalid/testdaemon
+demo: "true"
+"""
+
+_AGENT_MANIFEST = """\
+module: testagent
+version: 0.0.1
+description: synthetic agent module for domain-routing tests
+services:
+  - label: com.sanctum.shipbar-test-agent
+    kind: launchagent
+    keepalive: false
+uninstall:
+  bootout_labels: [com.sanctum.shipbar-test-agent]
+  revoke_secrets: []
+  remove_paths: []
+  rename_suffix: ".uninstalled-{date}"
+docs: https://x.invalid/testagent
+demo: "true"
+"""
+
+
+def _reg_from_yaml(tmp_path: Path, yaml_text: str) -> ModuleRegistry:
+    from sanctum_cli.modules.manifest import load_manifest
+
+    src = tmp_path / "mod.module.yaml"
+    src.write_text(yaml_text, encoding="utf-8")
+    m = load_manifest(src)
+    return ModuleRegistry(manifests={m.module: m})
+
+
+def test_bootout_uses_system_domain_for_launchdaemon(tmp_path: Path) -> None:
+    """A launchdaemon service → bootout target is system/<label>."""
+    reg = _reg_from_yaml(tmp_path, _DAEMON_MANIFEST)
+    booted: list[str] = []
+
+    module_cmd.uninstall_module(
+        "testdaemon",
+        purge=False,
+        registry=reg,
+        bootout_label=lambda target: booted.append(target),
+        revoke_secret=lambda account, service: True,
+        rename_path=lambda p, suffix: True,
+        remove_path=lambda p: True,
+    )
+
+    assert booted == ["system/com.sanctum.shipbar-test-daemon"]
+
+
+def test_bootout_uses_gui_domain_for_launchagent(tmp_path: Path) -> None:
+    """A launchagent service → bootout target is gui/<uid>/<label>."""
+    reg = _reg_from_yaml(tmp_path, _AGENT_MANIFEST)
+    booted: list[str] = []
+
+    module_cmd.uninstall_module(
+        "testagent",
+        purge=False,
+        registry=reg,
+        bootout_label=lambda target: booted.append(target),
+        revoke_secret=lambda account, service: True,
+        rename_path=lambda p, suffix: True,
+        remove_path=lambda p: True,
+    )
+
+    assert booted == [f"gui/{os.getuid()}/com.sanctum.shipbar-test-agent"]
