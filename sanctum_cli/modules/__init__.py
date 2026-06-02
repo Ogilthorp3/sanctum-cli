@@ -3,5 +3,6 @@ from sanctum_cli.modules.manifest import (
     ModuleManifest,
     load_manifest,
 )
+from sanctum_cli.modules.registry import DependencyError, ModuleRegistry
 
-__all__ = ["ManifestError", "ModuleManifest", "load_manifest"]
+__all__ = ["DependencyError", "ManifestError", "ModuleManifest", "ModuleRegistry", "load_manifest"]
