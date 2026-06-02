@@ -34,7 +34,25 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel, ConfigDict
 
 if TYPE_CHECKING:
+    from sanctum_cli.commands.self_test import Probe
     from sanctum_cli.modules.registry import ModuleRegistry
+
+
+# Module-level callable so tests can monkeypatch
+# "sanctum_cli.soak.harness.module_probes" to inject controlled probe sets.
+# We import lazily (inside the function body) to avoid a circular import at
+# module load time: harness <- self_test <- (transitive) harness would cycle.
+def module_probes(registry: ModuleRegistry) -> dict[str, list[Probe]]:
+    """Return the module-keyed probe dict from the module registry.
+
+    Delegates to ``sanctum_cli.commands.self_test.module_probes`` via a
+    lazy import so this harness module can be imported before the commands
+    package is fully initialised without triggering a circular import.
+    """
+    from sanctum_cli.commands.self_test import (
+        module_probes as _real_module_probes,
+    )
+    return _real_module_probes(registry)
 
 
 # ─── Schema ─────────────────────────────────────────────────────────
@@ -173,12 +191,19 @@ def _launchctl_exit_codes() -> dict[str, int]:
     return codes
 
 
-def _collect_sample(service_labels: list[str]) -> Sample:
+def _collect_sample(
+    service_labels: list[str],
+    *,
+    module: str = "",
+    registry: ModuleRegistry | None = None,
+) -> Sample:
     """Build a single Sample from live system signals.
 
-    Probes are not yet wired to live callables (the probe registry is not
-    yet callable from this layer). The red_probes list is left empty until
-    Task 9 (PROBES module-keyed refactor) connects probe callables here.
+    When *registry* and *module* are provided, runs the module's declared
+    probes via ``module_probes`` and records any that returned a failing
+    ``ProbeResult`` in ``red_probes``.  A probe that raises an exception is
+    treated as failing (name still recorded) so the soak can surface broken
+    probes without crashing the runner.
     """
     ts = datetime.now(tz=UTC).isoformat().replace("+00:00", "Z")
     pressure = _read_pressure_level()
@@ -189,11 +214,26 @@ def _collect_sample(service_labels: list[str]) -> Sample:
         for label in service_labels
         if exit_codes.get(label, 0) != 0
     ]
+
+    # Run the module's declared probes and collect any that went red.
+    red: list[str] = []
+    if registry is not None and module:
+        keyed = module_probes(registry)
+        for probe in keyed.get(module, []):
+            try:
+                result = probe.check()
+            except Exception:
+                result_passed = False
+            else:
+                result_passed = result.passed
+            if not result_passed:
+                red.append(probe.name)
+
     return Sample(
         ts=ts,
         pressure_level=pressure,
         swap_used_mb=swap_mb,
-        red_probes=[],  # TODO Task 9: wire module probe callables
+        red_probes=red,
         service_nonzero=service_nonzero,
     )
 
@@ -262,7 +302,7 @@ def run_soak(
     service_labels = [s.label for s in manifest.services]
 
     result = _load_or_init(result_path, module)
-    sample = _collect_sample(service_labels)
+    sample = _collect_sample(service_labels, module=module, registry=registry)
     result.samples.append(sample)
     result.last_at = sample.ts
     _atomic_write(result_path, result)
@@ -274,7 +314,7 @@ def run_soak(
     try:
         while True:
             time.sleep(interval_sec)
-            sample = _collect_sample(service_labels)
+            sample = _collect_sample(service_labels, module=module, registry=registry)
             result = _load_or_init(result_path, module)  # re-read in case of external write
             result.samples.append(sample)
             result.last_at = sample.ts
