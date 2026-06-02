@@ -159,7 +159,18 @@ def doctor_top(
     json_output: Annotated[
         bool, typer.Option("--json", help="Emit JSON (full report regardless of --full).")
     ] = False,
+    ship: Annotated[
+        str | None,
+        typer.Option("--ship", help="Score a module against the ship bar."),
+    ] = None,
 ) -> None:
+    if ship is not None:
+        from sanctum_cli.commands.ship import default_adapters, evaluate, render
+        from sanctum_cli.modules.registry import ModuleRegistry
+
+        report = evaluate(ship, ModuleRegistry.discover(), default_adapters())
+        raise typer.Exit(render(report, json_out=json_output))
+
     try:
         doctor.doctor_command(full=full, json_output=json_output)
     except SanctumError as exc:
