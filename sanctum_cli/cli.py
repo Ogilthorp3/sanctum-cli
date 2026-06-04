@@ -24,8 +24,8 @@ from sanctum_cli.commands import chat as chat_cmd
 from sanctum_cli.commands import cloud as cloud_cmd
 from sanctum_cli.commands import code as code_cmd
 from sanctum_cli.commands import config_cmd, doctor, status
-from sanctum_cli.commands import keychain_cmd as keychain_command
 from sanctum_cli.commands import devices as devices_cmd
+from sanctum_cli.commands import keychain_cmd as keychain_command
 from sanctum_cli.commands import keys_backup as keys_backup_cmd
 from sanctum_cli.commands import logs as logs_cmd
 from sanctum_cli.commands import onboard as onboard_cmd
@@ -35,6 +35,7 @@ from sanctum_cli.commands import self_test as self_test_cmd
 from sanctum_cli.commands import uninstall as uninstall_cmd
 from sanctum_cli.commands import update as update_cmd
 from sanctum_cli.commands import vision as vision_cmd
+from sanctum_cli.commands.module import module_app
 from sanctum_cli.errors import ExitCode, SanctumError
 
 app = typer.Typer(
@@ -159,7 +160,25 @@ def doctor_top(
     json_output: Annotated[
         bool, typer.Option("--json", help="Emit JSON (full report regardless of --full).")
     ] = False,
+    ship: Annotated[
+        str | None,
+        typer.Option("--ship", help="Score a module against the ship bar."),
+    ] = None,
+    allow_amber: Annotated[
+        bool,
+        typer.Option(
+            "--allow-amber",
+            help="(--ship only) Exit 0 when the verdict is AMBER (conditionally ready).",
+        ),
+    ] = False,
 ) -> None:
+    if ship is not None:
+        from sanctum_cli.commands.ship import default_adapters, evaluate, render
+        from sanctum_cli.modules.registry import ModuleRegistry
+
+        report = evaluate(ship, ModuleRegistry.discover(), default_adapters())
+        raise typer.Exit(render(report, json_out=json_output, allow_amber=allow_amber))
+
     try:
         doctor.doctor_command(full=full, json_output=json_output)
     except SanctumError as exc:
@@ -221,6 +240,8 @@ def devices_top() -> None:
 def schedule_top() -> None:
     schedule_cmd.schedule_command()
 
+
+app.add_typer(module_app, name="module")
 
 keys_app = typer.Typer(help="Keychain-backed credential helpers.")
 app.add_typer(keys_app, name="keys")
@@ -842,6 +863,33 @@ def bridge_delete_top(
     except SanctumError as exc:
         _report(exc)
         raise typer.Exit(code=int(exc.exit_code)) from exc
+
+
+@app.command("soak", help="Record a module's unattended health sample (use --once for cron).")
+def soak_top(
+    module: Annotated[str, typer.Argument(help="Module name (e.g. backup).")],
+    days: Annotated[
+        float,
+        typer.Option("--days", help="Target soak duration in days (informational).", min=0.0),
+    ] = 7.0,
+    interval_sec: Annotated[
+        int,
+        typer.Option("--interval-sec", help="Seconds between samples (ignored with --once).", min=1),
+    ] = 3600,
+    once: Annotated[
+        bool,
+        typer.Option("--once", help="Capture exactly one sample and exit."),
+    ] = False,
+) -> None:
+    from sanctum_cli.modules.registry import ModuleRegistry
+    from sanctum_cli.soak import run_soak
+
+    try:
+        registry = ModuleRegistry.discover()
+        run_soak(module, registry, days=days, interval_sec=interval_sec, once=once)
+    except Exception as exc:
+        err_console.print(f"[bold red]soak error:[/] {exc}")
+        raise typer.Exit(1) from exc
 
 
 def _report(exc: SanctumError) -> None:

@@ -145,6 +145,24 @@ class UISettings(StrictModel):
     json_default: bool = False
 
 
+# ─── Module overrides ────────────────────────────────────────────────
+
+
+class ModuleConfig(StrictModel):
+    """Per-module operator overrides.
+
+    Only ``enabled`` for now (YAGNI). Keyed by module name under
+    ``cli.modules`` in instance.yaml, e.g.::
+
+        cli:
+          modules:
+            backup:
+              enabled: false
+    """
+
+    enabled: bool = True
+
+
 # ─── Top-level CLI section ──────────────────────────────────────────
 
 
@@ -176,6 +194,7 @@ class CliConfig(StrictModel):
     ui: UISettings = Field(default_factory=UISettings)
     recipes: dict[str, Recipe] = Field(default_factory=dict)
     default_recipe: str | None = None
+    modules: dict[str, ModuleConfig] = Field(default_factory=dict)
 
 
 class InstanceMetadata(StrictModel):

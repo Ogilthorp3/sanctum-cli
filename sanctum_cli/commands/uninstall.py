@@ -30,9 +30,9 @@ What it never touches:
 
 from __future__ import annotations
 
-import shutil
+import os
 import subprocess
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
 
@@ -58,6 +58,64 @@ KEYCHAIN_SERVICES = [
 ]
 
 
+# ─── Shared single-item teardown primitives ──────────────────────────
+#
+# These are the smallest reversible/destructive units. The global uninstall
+# loops below call them, and ``commands/module.py`` reuses them as the real
+# adapters behind injected callables so the teardown logic lives in one place.
+
+
+def bootout_label(label: str, domain: str | None = None) -> None:
+    """Bootout one LaunchAgent/Daemon label from the given launchd domain.
+
+    Args:
+        label:  The launchd label (e.g. ``com.sanctum.backup``).
+        domain: The launchd domain prefix.  Defaults to ``gui/<uid>`` (the
+                current user's GUI domain) when None — preserving the original
+                global-uninstall behavior for existing call sites that omit it.
+
+    Idempotent at the launchctl level: booting out a label that is not
+    loaded is a no-op (non-zero rc, ignored). Touches launchd only — does
+    NOT rename or delete any plist file.
+    """
+    resolved_domain = domain if domain is not None else f"gui/{os.getuid()}"
+    subprocess.run(
+        ["launchctl", "bootout", f"{resolved_domain}/{label}"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def revoke_keychain_entry(account: str, service: str) -> bool:
+    """Delete one generic-password entry. Returns True iff it existed + was
+    deleted (rc==0). Missing entries return False (not an error)."""
+    result = subprocess.run(
+        ["security", "delete-generic-password", "-a", account, "-s", service],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.returncode == 0
+
+
+def rename_with_suffix(path: Path, suffix: str) -> bool:
+    """Rename *path* by appending *suffix* (recoverable, not a delete).
+
+    Returns True iff the path existed and the rename succeeded. A
+    ``{date}`` token in *suffix* is expanded to today's UTC YYYY-MM-DD.
+    """
+    if not path.exists():
+        return False
+    rendered = suffix.replace("{date}", datetime.now(UTC).strftime("%Y-%m-%d"))
+    try:
+        path.rename(path.with_name(path.name + rendered))
+    except OSError as exc:
+        console.print(f"  [yellow]could not rename {path}: {exc}[/]")
+        return False
+    return True
+
+
 def _bootout_and_delete_launchagents() -> list[str]:
     """Bootout every com.sanctum.*.plist in ~/Library/LaunchAgents/ and
     rename them with a .uninstalled-YYYY-MM-DD suffix. Returns list of
@@ -66,16 +124,13 @@ def _bootout_and_delete_launchagents() -> list[str]:
     if not la_dir.is_dir():
         return []
     touched = []
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    ts = datetime.now(UTC).strftime("%Y-%m-%d")
     for plist in sorted(la_dir.glob("com.sanctum.*.plist")):
         if ".retired" in plist.name or ".disabled" in plist.name:
             continue
         label = plist.stem
         # Bootout (ok if not loaded).
-        subprocess.run(
-            ["launchctl", "bootout", f"gui/{__import__('os').getuid()}/{label}"],
-            capture_output=True, text=True,
-        )
+        bootout_label(label)
         # Rename rather than delete — recoverable.
         plist.rename(plist.with_suffix(f".plist.uninstalled-{ts}"))
         touched.append(label)
@@ -88,12 +143,7 @@ def _revoke_keychain_entries() -> list[str]:
     deleted = []
     for service in KEYCHAIN_SERVICES:
         # `-a sanctum` for account; the service name is the full path.
-        result = subprocess.run(
-            ["security", "delete-generic-password", "-a", "sanctum", "-s",
-             service.removeprefix("sanctum/")],
-            capture_output=True, text=True,
-        )
-        if result.returncode == 0:
+        if revoke_keychain_entry("sanctum", service.removeprefix("sanctum/")):
             deleted.append(service)
     return deleted
 
@@ -108,24 +158,18 @@ def _untap_homebrew() -> bool:
 
 def _rename_app_bundles() -> list[str]:
     renamed = []
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     for app_name in ("SanctumBridge.app", "SanctumLauncher.app"):
         for parent in (Path.home() / "Applications", Path("/Applications")):
             app = parent / app_name
-            if app.is_dir():
-                target = parent / f"{app_name}.uninstalled-{ts}"
-                try:
-                    app.rename(target)
-                    renamed.append(str(app))
-                except OSError as e:
-                    console.print(f"  [yellow]could not rename {app}: {e}[/]")
+            if app.is_dir() and rename_with_suffix(app, ".uninstalled-{date}"):
+                renamed.append(str(app))
     return renamed
 
 
 def _purge_data_dirs() -> list[str]:
     """ONLY called when --purge is set. Removes the user-data dirs."""
     removed = []
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d-%H%M%S")
+    ts = datetime.now(UTC).strftime("%Y-%m-%d-%H%M%S")
     root = Path.home() / ".sanctum"
     if root.is_dir():
         target = root.with_name(f".sanctum.purged-{ts}")

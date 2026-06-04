@@ -99,6 +99,35 @@ cli:
 
 `sanctum config validate` checks the schema and prints a precise pointer for any violation.
 
+## Module system — ship bar
+
+Sanctum uses a module manifest system (`*.module.yaml`) to declare services, secrets, probes, alert routing, and uninstall steps. The ship bar gates each module before release.
+
+```bash
+sanctum module list                       # list discovered modules (builtin + user)
+sanctum module status <name>              # gate summary for a module
+sanctum module install <name>             # install a module (future)
+sanctum module uninstall <name>           # uninstall a module (future)
+sanctum module demo <name>                # run the module's demo command
+
+sanctum doctor --ship <module>            # score a module against all six ship-bar gates
+sanctum doctor --ship backup --json       # machine-readable JSON verdict + gate breakdown
+
+sanctum soak <module> [--once]            # record one (or continuous) health samples
+sanctum soak backup --days 7 --once       # single sample for use in cron
+```
+
+The six ship-bar gates are: `install/uninstall`, `secrets-bootstrap`, `self-heal`, `alert-hygiene`, `soak`, `docs+demo`. All six must be GREEN for a module to ship; AMBER is conditionally ready; RED blocks.
+
+Module overrides in `instance.yaml`:
+
+```yaml
+cli:
+  modules:
+    backup:
+      enabled: false   # disable a module without uninstalling it
+```
+
 ## Exit codes
 
 | Code | Meaning |

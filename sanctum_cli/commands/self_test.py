@@ -18,6 +18,7 @@ summary panel at the end.
 
 from __future__ import annotations
 
+import importlib
 import json
 import os
 import sqlite3
@@ -28,7 +29,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Callable
+from typing import TYPE_CHECKING, Annotated, Callable
 
 import typer
 from rich.console import Console
@@ -36,6 +37,9 @@ from rich.panel import Panel
 from rich.text import Text
 
 from sanctum_cli import config
+
+if TYPE_CHECKING:
+    from sanctum_cli.modules.registry import ModuleRegistry
 
 console = Console()
 
@@ -287,6 +291,84 @@ PROBES: list[Probe] = [
     Probe("R2D2 supervisor heartbeat",    _haus_only("r2d2", probe_r2d2_heartbeat)),
     Probe("audit log within budget",      _haus_only("audit", probe_audit_log_bounded)),
 ]
+
+# ── Module-keyed probe registry ───────────────────────────────────────
+#
+# The flat ``PROBES`` list above is what the runner iterates (unchanged by
+# this refactor).  ``module_probes`` produces the *module-keyed* view that
+# the soak harness and any future consumer can use to discover which probes
+# belong to which installed module.
+#
+# Resolution convention for a dotted probe path "a.b.c.probe_fn":
+#   - The *callable* is the last component; everything before it is the
+#     module path within ``sanctum_cli.commands``.
+#   - We try ``sanctum_cli.commands.<a.b.c>`` first, then ``sanctum_cli.<a.b.c>``
+#     as a fallback, then the path verbatim.
+#   - If the import fails, a failing probe is returned so self-test surfaces
+#     the broken reference without crashing.
+
+_SEARCH_PREFIXES = (
+    "sanctum_cli.commands.",
+    "sanctum_cli.",
+    "",
+)
+
+
+def _resolve_probe_callable(dotted_path: str) -> Callable[[], ProbeResult]:
+    """Resolve a dotted probe path to a callable, or return a failing stub.
+
+    The path must end with a callable name.  The portion before the last dot
+    is the module path; we try each prefix in ``_SEARCH_PREFIXES`` in order.
+
+    Returns a zero-argument callable that returns a ``ProbeResult``.
+    """
+    if "." not in dotted_path:
+        detail = f"probe path '{dotted_path}' has no module component (need 'module.fn')"
+        return lambda: ProbeResult(False, detail)
+
+    mod_part, fn_name = dotted_path.rsplit(".", 1)
+    last_exc: Exception = ImportError(f"no prefix resolved '{dotted_path}'")
+
+    for prefix in _SEARCH_PREFIXES:
+        full_mod = f"{prefix}{mod_part}" if prefix else mod_part
+        try:
+            mod = importlib.import_module(full_mod)
+            fn: Callable[[], ProbeResult] = getattr(mod, fn_name)
+            return fn
+        except (ImportError, AttributeError) as exc:
+            last_exc = exc
+            continue
+
+    captured = last_exc
+    detail = f"import error for probe '{dotted_path}': {captured}"
+    return lambda: ProbeResult(False, detail)
+
+
+def module_probes(registry: ModuleRegistry) -> dict[str, list[Probe]]:
+    """Build a module-keyed probe dict from *registry*.
+
+    Each module in the registry contributes its ``probes`` list under its
+    module name key.  Probe dotted-paths are resolved via
+    ``_resolve_probe_callable``; unresolvable paths produce failing probes
+    (self-test surfaces the broken reference without crashing).
+
+    The existing ``PROBES`` flat list and runner are **not** modified by this
+    function — this is an additive view for consumers such as the soak harness.
+
+    Design note: self-test intentionally does NOT merge module probes into its
+    own ``PROBES`` runner.  Doing so would double-run the built-in
+    ``backup_recent`` probe (which already appears in ``PROBES`` directly) and
+    would break existing tests that monkeypatch ``PROBES``.  Module probes are
+    consumed by the soak harness (``run_soak`` → ``_collect_sample``) instead,
+    which is the appropriate long-running signal collector for per-module health.
+    """
+    result: dict[str, list[Probe]] = {}
+    for name, manifest in registry.manifests.items():
+        result[name] = [
+            Probe(path, _resolve_probe_callable(path))
+            for path in manifest.probes
+        ]
+    return result
 
 
 # ── Public command ────────────────────────────────────────────────────
