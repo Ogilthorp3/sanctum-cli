@@ -22,7 +22,7 @@ import subprocess
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 from rich.console import Console
@@ -102,7 +102,7 @@ def keys_backup_command(
         bundle_dir = Path(td) / "sanctum-keys"
         bundle_dir.mkdir()
 
-        manifest = {
+        manifest: dict[str, Any] = {
             "created": datetime.now(timezone.utc).isoformat(),
             "host": os.uname().nodename,
             "services": [],

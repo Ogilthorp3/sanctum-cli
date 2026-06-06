@@ -59,13 +59,13 @@ def logs_command(
 ) -> None:
     if list_services or service == "list":
         console.print("[bold]Known services:[/]")
-        for name, paths in sorted(LOG_MAP.items()):
-            for p in paths:
+        for name, log_paths in sorted(LOG_MAP.items()):
+            for p in log_paths:
                 marker = "✓" if p.is_file() else "·"
                 console.print(f"  {marker}  {name:18s}  {p}")
         return
 
-    paths = LOG_MAP.get(service.lower())
+    paths: list[Path] | None = LOG_MAP.get(service.lower())
     if not paths:
         console.print(f"[red]unknown service:[/] {service}")
         console.print("Run `sanctum logs --list` to see what's known.")

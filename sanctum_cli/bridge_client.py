@@ -162,17 +162,17 @@ class BridgeClient:
 
     # ----------------------------------------------------------------- public
     def health(self) -> dict[str, Any]:
-        return self._request("GET", "/_health")
+        return cast("dict[str, Any]", self._request("GET", "/_health"))
 
     def manifest(self) -> dict[str, Any]:
-        return self._request("GET", "/_manifest")
+        return cast("dict[str, Any]", self._request("GET", "/_manifest"))
 
     def diagnostic(self) -> dict[str, Any]:
-        return self._request("GET", "/_diagnostic")
+        return cast("dict[str, Any]", self._request("GET", "/_diagnostic"))
 
     def folder(self, path: str) -> dict[str, Any]:
         body = json.dumps({"path": path}, separators=(",", ":")).encode()
-        return self._request("POST", "/sharepoint/folder", body=body)
+        return cast("dict[str, Any]", self._request("POST", "/sharepoint/folder", body=body))
 
     def children(self, path: str) -> dict[str, Any]:
         """List the children of a SharePoint folder (read)."""
@@ -252,7 +252,7 @@ class BridgeClient:
             "if_exists": if_exists,
         }
         body = json.dumps(payload, separators=(",", ":")).encode()
-        return self._request("POST", "/sharepoint/upload", body=body)
+        return cast("dict[str, Any]", self._request("POST", "/sharepoint/upload", body=body))
 
 
 def encode_file(path: Path | str) -> tuple[str, str]:

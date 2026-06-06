@@ -11,6 +11,7 @@ assign`` (Phase 2 of Family Pass) or by editing the YAML.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any, cast
 
 import typer
 import yaml
@@ -20,7 +21,7 @@ from rich.table import Table
 console = Console()
 
 
-def _load_devices() -> dict | None:
+def _load_devices() -> dict[str, Any] | None:
     """Find devices.yaml in the canonical screen-time module location."""
     candidates = [
         Path.home() / ".sanctum/screen-time/devices.yaml",
@@ -29,7 +30,7 @@ def _load_devices() -> dict | None:
     for p in candidates:
         if p.is_file():
             try:
-                return yaml.safe_load(p.read_text(encoding="utf-8"))
+                return cast("dict[str, Any] | None", yaml.safe_load(p.read_text(encoding="utf-8")))
             except yaml.YAMLError:
                 return None
     return None
