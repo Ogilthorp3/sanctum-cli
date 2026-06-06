@@ -24,6 +24,7 @@ from sanctum_cli.commands import chat as chat_cmd
 from sanctum_cli.commands import cloud as cloud_cmd
 from sanctum_cli.commands import code as code_cmd
 from sanctum_cli.commands import config_cmd, doctor, status
+from sanctum_cli.commands import deadman as deadman_cmd
 from sanctum_cli.commands import devices as devices_cmd
 from sanctum_cli.commands import keychain_cmd as keychain_command
 from sanctum_cli.commands import keys_backup as keys_backup_cmd
@@ -416,6 +417,31 @@ def cloud_setup_top(
 ) -> None:
     try:
         cloud_cmd.cloud_setup_command(backend=backend, no_open=no_open, no_persist=no_persist)
+    except SanctumError as exc:
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code)) from exc
+
+
+# ─── deadman (off-box backup dead-man's-switch) ─────────────────────
+
+deadman_app = typer.Typer(help="Off-box backup dead-man's-switch — heartbeat to GitHub.")
+app.add_typer(deadman_app, name="deadman")
+
+
+@deadman_app.command(
+    "beat",
+    help="Record a success heartbeat for <check> and push it off-box (call on backup success).",
+)
+def deadman_beat_top(
+    check: Annotated[str, typer.Argument(help="Check id, e.g. backup-fresh | restore-drill.")],
+    max_hours: Annotated[
+        int | None,
+        typer.Option("--max-hours", help="Override the staleness threshold (hours) for this check."),
+    ] = None,
+) -> None:
+    try:
+        key = deadman_cmd.beat(check, max_hours=max_hours)
+        typer.echo(f"heartbeat written + pushed: {key}")
     except SanctumError as exc:
         _report(exc)
         raise typer.Exit(code=int(exc.exit_code)) from exc
