@@ -20,13 +20,13 @@ Credentials come from the Keychain (services
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import Annotated, Literal
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Literal
 
-import typer
+if TYPE_CHECKING:
+    from pathlib import Path
+
 from rich.console import Console
 from rich.table import Table
 
@@ -499,7 +499,7 @@ def _check_health(c: BridgeClient) -> list[Check]:
     if started:
         try:
             t0 = datetime.fromisoformat(str(started).replace("Z", "+00:00"))
-            uptime_s = (datetime.now(timezone.utc) - t0).total_seconds()
+            uptime_s = (datetime.now(UTC) - t0).total_seconds()
             if uptime_s < 60:
                 out.append(Check("uptime", "WARN", f"{uptime_s:.0f}s — recently restarted"))
             else:
@@ -542,7 +542,7 @@ def _check_diagnostic(c: BridgeClient) -> list[Check]:
     else:
         try:
             t = datetime.fromisoformat(last_run.replace("Z", "+00:00"))
-            age_h = (datetime.now(timezone.utc) - t).total_seconds() / 3600
+            age_h = (datetime.now(UTC) - t).total_seconds() / 3600
             if age_h > 48:
                 out.append(Check("rotator last_run", "FAIL", f"{age_h:.0f}h ago — stale"))
             else:

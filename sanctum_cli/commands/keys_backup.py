@@ -20,7 +20,7 @@ import json
 import os
 import subprocess
 import tempfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -84,9 +84,8 @@ def keys_backup_command(
     ))
     console.print()
 
-    if not yes:
-        if not typer.confirm("Continue?", default=True):
-            raise typer.Exit(code=0)
+    if not yes and not typer.confirm("Continue?", default=True):
+        raise typer.Exit(code=0)
 
     # Prompt for the passphrase twice; openssl will derive a key from it.
     p1 = getpass.getpass("Passphrase for the bundle: ")
@@ -103,7 +102,7 @@ def keys_backup_command(
         bundle_dir.mkdir()
 
         manifest: dict[str, Any] = {
-            "created": datetime.now(timezone.utc).isoformat(),
+            "created": datetime.now(UTC).isoformat(),
             "host": os.uname().nodename,
             "services": [],
         }
@@ -113,7 +112,7 @@ def keys_backup_command(
             if value is None:
                 continue
             (bundle_dir / service).write_text(value, encoding="utf-8")
-            os.chmod(bundle_dir / service, 0o600)
+            (bundle_dir / service).chmod(0o600)
             manifest["services"].append({
                 "service": service,
                 "length": len(value),
@@ -141,7 +140,7 @@ def keys_backup_command(
         if r.returncode != 0:
             console.print(f"[red]openssl encryption failed:[/] {r.stderr.strip()}")
             raise typer.Exit(code=1)
-        os.chmod(out, 0o600)
+        out.chmod(0o600)
 
     console.print()
     console.print(Panel(
