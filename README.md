@@ -6,33 +6,59 @@ One terminal binary, `sanctum`, that is the unified front door to a Sanctum host
 
 ## Status
 
-**v0.1.0a1 — bootstrap.** Foundation in place. One end-to-end command (`sanctum status`) and one config command (`sanctum config validate`). Provider implementations and the cloud-setup TUI wizard are deferred to v0.2 / v0.3 per `SPEC.md`.
+**v0.9.0 — public release.** Installable from the public Homebrew tap. A person
+who isn't the author can go from a fresh Mac to encrypted, verified cloud backups
+in minutes with a single command.
 
-| Layer | State |
+| Capability | State |
 |---|---|
-| Config schema (pydantic v2) | ✅ |
-| Discovery resolver (env > config > default) | ✅ |
-| Keychain wrapper (macOS `security`) | ✅ |
-| Telemetry (JSONL, redacted by default) | ✅ |
-| Pure router (rule-based, property-tested) | ✅ |
-| Provider ABC + Capability flags | ✅ stub |
-| `sanctum status` (host, disk, backups, telemetry) | ✅ |
-| `sanctum config validate` | ✅ |
-| Provider implementations | ⏳ v0.2 |
-| Cloud-setup TUI wizard | ⏳ v0.3 |
-| Doctor / agent / proxy commands | ⏳ v0.2 |
+| `brew install` from the public tap | ✅ |
+| `sanctum onboard` — recipe → cloud wizard → first backup → restore canary | ✅ |
+| Backup recipes (`family` / `operator` / `code`) + R2 / B2 / Google Drive backends | ✅ |
+| Encrypted `restic` backups, per-host bucket, Keychain-only credentials | ✅ |
+| Module manifest system + six-gate ship bar (`sanctum doctor --ship`) | ✅ |
+| Honest, tier-aware `sanctum self-test` | ✅ |
+| 13-pattern + filename pre-push secret scanner | ✅ |
+| Rule-based prompt router (Claude / Gemini / MLX-local) | ✅ |
+| Sigstore release signing | ⏳ roadmap |
 
-## Read first
+See [`SPEC.md`](./SPEC.md) for the full design, doctrine, and roadmap.
 
-- [`SPEC.md`](./SPEC.md) — full design (548 lines): mission, doctrine, architecture, CLI surface, config schema, routing, providers, wizards, security, failure modes, roadmap, testing.
-
-## Quick start (dev)
+## Install
 
 ```bash
-make venv          # uv venv .venv (Python 3.12)
-make install       # uv pip install -e ".[dev]"
-make check         # ruff + mypy + pytest
-make run           # sanctum status
+brew tap ogilthorp3/sanctum
+brew install sanctum-cli
+sanctum --version
+```
+
+`restic` comes in as a recommended dependency; `rclone` is optional (Google Drive).
+
+## Quick start
+
+One command takes a fresh Mac to verified cloud backups. It scaffolds a minimal
+`~/.sanctum/instance.yaml` if you don't have one, estimates your backup size against
+the cloud free tier, walks you through the cloud credentials, runs the first backup,
+and proves a restore round-trips a file through the cloud:
+
+```bash
+sanctum onboard --recipe family      # or: operator | code
+```
+
+Day to day:
+
+```bash
+sanctum status                       # one-line health: backup age, disk, providers
+sanctum backup                       # run a backup
+sanctum self-test                    # honest, tier-aware health check
+sanctum doctor --ship backup         # score a module against the six ship-bar gates
+```
+
+## Develop
+
+```bash
+make venv && make install            # uv venv + editable install (Python 3.12)
+make check                           # ruff + mypy + pytest
 ```
 
 ## Doctrine
@@ -69,7 +95,7 @@ sanctum_cli/
 
 ## Configuration
 
-`sanctum-cli` reads `~/.sanctum/instance.yaml` (or `$SANCTUM_INSTANCE_FILE`) and pulls a `cli:` block. The block is **optional** — every field has a sensible default. Customize when you want to.
+`sanctum-cli` reads `~/.sanctum/instance.yaml` (or `$SANCTUM_INSTANCE_FILE`). The file needs at minimum an `instance:` block with `name` + `slug` — `sanctum onboard` scaffolds a minimal one automatically on first run if you don't have it. The `cli:` block below is **optional**; every field has a sensible default.
 
 ```yaml
 instance:
