@@ -80,10 +80,7 @@ def test_one_fail_panel_says_failed(runner, one_fail_probes):
 def test_json_output_all_pass(runner, all_pass_probes):
     result = runner.invoke(app, ["self-test", "--json"])
     assert result.exit_code == 0
-    # Extract the JSON block from output (Rich wraps it).
-    data = json.loads(result.output.strip().splitlines()[-1] if not result.output.startswith("{") else result.output)
-    # Just confirm the shape exists; Rich may wrap output.
-    # Re-parse more leniently:
+    # Extract the JSON block from output (Rich wraps it); parse leniently.
     start = result.output.find("{")
     payload = json.loads(result.output[start:result.output.rfind("}") + 1])
     assert payload["total"] == 3

@@ -223,3 +223,250 @@ def phone_mode_command(kid: str, mode: str, *, apply: bool = False) -> None:
         f"[green]✓[/] {kid} set to [cyan]{mode_norm}[/] — wrote {path} "
         f"(backup: {backup.name}). Reload the screen-time engine to apply."
     )
+
+
+# ── Box compatibility gate ────────────────────────────────────────────
+#
+# Enforcement strength is NOT uniform across Firewalla models. Router/DHCP
+# modes put the box in the traffic path (blocks bite unconditionally); spoof
+# mode enforces via ARP, so a kid's device that slips `monitored` is silently
+# unenforced. Capacity values are read from the box firmware's own
+# platform/*/Platform.js getPolicyCapacity() (verified on-box 2026-06-10):
+# Red = 1000, everything else (Blue/Purple/Navy/Gold/GSE/Gold Pro/PSE) = 3000.
+# The 2026-06-09 corpse-pile incident is why capacity is checked at all.
+
+BOX_POLICY_CAPACITY: dict[str, int] = {"red": 1000}
+DEFAULT_POLICY_CAPACITY = 3000
+
+# Models the Sanctum stack has actually run against (Purple pre-2026-05
+# migration, Gold Pro since) plus models sharing their platform code paths.
+_KNOWN_MODELS = frozenset(
+    {"red", "blue", "blueplus", "purple", "purplese", "navy", "gold", "gse", "goldpro", "pse"}
+)
+# In-path modes: every LAN packet traverses the box, blocks enforce regardless
+# of per-device monitoring. Everything else depends on ARP spoofing.
+_IN_PATH_MODES = frozenset({"router", "dhcp"})
+
+_BRIDGE_URL_ENV = "FIREWALLA_BRIDGE_URL"
+_BRIDGE_TOKEN_ENV = "FIREWALLA_BRIDGE_TOKEN"
+_BRIDGE_TOKEN_FILE = Path.home() / ".sanctum/secrets/firewalla-bridge-token"
+
+
+class CompatCheck(NamedTuple):
+    """One compatibility assertion with an actionable fix."""
+
+    name: str
+    status: str  # "PASS" | "WARN" | "FAIL"
+    detail: str
+    fix: str | None
+
+
+def assess_compat(
+    info: dict[str, Any],
+    policy_count: int | None,
+    monitored: dict[str, bool | None] | None,
+) -> list[CompatCheck]:
+    """Pure compatibility assessment from the bridge's /info payload.
+
+    ``monitored`` maps managed MACs to the box's per-device `monitored` flag
+    (None = unknown); only consulted outside in-path modes, where it decides
+    whether enforcement actually reaches each kid's device.
+    """
+    box = info.get("box") or {}
+    caps = info.get("capabilities") or {}
+    model = str(box.get("model") or "").lower()
+    mode = str(caps.get("box_mode") or box.get("mode") or "").lower()
+    checks: list[CompatCheck] = []
+
+    if caps.get("enforcement_ready"):
+        checks.append(CompatCheck("box-link", "PASS", "bridge paired and box API live", None))
+    else:
+        checks.append(
+            CompatCheck(
+                "box-link",
+                "FAIL",
+                "bridge reachable but box API not ready",
+                "check pairing keys (~/.openclaw/firewalla/keys) + box connectivity",
+            )
+        )
+
+    in_path = mode in _IN_PATH_MODES
+    if in_path:
+        checks.append(
+            CompatCheck("mode", "PASS", f"{mode} mode — box is in the traffic path", None)
+        )
+    else:
+        checks.append(
+            CompatCheck(
+                "mode",
+                "WARN",
+                f"{mode or 'unknown'} mode — enforcement depends on per-device "
+                "monitoring (ARP spoof); an unmonitored device is NOT blocked",
+                "keep Monitoring ON for every kid device in the Firewalla app",
+            )
+        )
+
+    capacity = BOX_POLICY_CAPACITY.get(model, DEFAULT_POLICY_CAPACITY)
+    if policy_count is None:
+        checks.append(
+            CompatCheck(
+                "capacity",
+                "WARN",
+                f"could not read the box policy count (cap {capacity})",
+                "retry; if persistent, check `GET /policies` on the bridge",
+            )
+        )
+    else:
+        pct = 100 * policy_count / capacity
+        status = "PASS" if pct < 60 else ("WARN" if pct < 90 else "FAIL")
+        checks.append(
+            CompatCheck(
+                "capacity",
+                status,
+                f"{policy_count}/{capacity} policy rules used ({pct:.0f}%)",
+                None
+                if status == "PASS"
+                else "purge stale rules: bridge POST /policies/purge (see 2026-06-09 incident)",
+            )
+        )
+
+    if model in _KNOWN_MODELS:
+        checks.append(CompatCheck("model", "PASS", f"{model} — known platform", None))
+    else:
+        checks.append(
+            CompatCheck(
+                "model",
+                "WARN",
+                f"{model or 'unknown'} — Sanctum has not been validated on this model",
+                "expected to work (shared firmware) — report issues",
+            )
+        )
+
+    if not in_path and monitored is not None:
+        unmon = sorted(m for m, v in monitored.items() if v is False)
+        unknown = sorted(m for m, v in monitored.items() if v is None)
+        if unmon:
+            checks.append(
+                CompatCheck(
+                    "monitoring",
+                    "FAIL",
+                    "unmonitored managed device(s): " + ", ".join(unmon),
+                    "enable Monitoring for these devices in the Firewalla app",
+                )
+            )
+        elif unknown:
+            checks.append(
+                CompatCheck(
+                    "monitoring",
+                    "WARN",
+                    "monitoring state unknown for: " + ", ".join(unknown),
+                    "device may be offline — re-check when it joins the network",
+                )
+            )
+        else:
+            checks.append(
+                CompatCheck("monitoring", "PASS", "all managed devices monitored", None)
+            )
+
+    return checks
+
+
+def _fetch_bridge_json(path: str) -> dict[str, Any] | None:
+    """GET a bridge endpoint; None on any transport/auth failure (caller decides)."""
+    import httpx
+
+    url = os.environ.get(_BRIDGE_URL_ENV, "http://127.0.0.1:1984")
+    token = os.environ.get(_BRIDGE_TOKEN_ENV, "").strip()
+    if not token:
+        try:
+            token = _BRIDGE_TOKEN_FILE.read_text(encoding="utf-8").strip()
+        except OSError:
+            return None
+    try:
+        resp = httpx.get(
+            f"{url}{path}", headers={"Authorization": f"Bearer {token}"}, timeout=15
+        )
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        return data if isinstance(data, dict) else None
+    except (httpx.HTTPError, ValueError):
+        return None
+
+
+def _managed_macs(config: dict[str, Any]) -> list[str]:
+    """Every MAC the engine can be asked to enforce (family + shared + screens)."""
+    macs: set[str] = set()
+    for member in (config.get("family") or {}).values():
+        if isinstance(member, dict):
+            for dev in member.get("personal_devices") or []:
+                if isinstance(dev, dict) and dev.get("mac"):
+                    macs.add(str(dev["mac"]).upper())
+    shared = config.get("shared_devices") or {}
+    for dev_info in shared.values() if isinstance(shared, dict) else []:
+        if isinstance(dev_info, dict) and dev_info.get("mac"):
+            macs.add(str(dev_info["mac"]).upper())
+    for screen in (config.get("screens") or {}).values():
+        if isinstance(screen, dict):
+            for mac in screen.get("macs") or []:
+                macs.add(str(mac).upper())
+    return sorted(macs)
+
+
+def compat_command(*, strict: bool = False) -> None:
+    """``sanctum screen-time compat`` — assert the box can enforce what we promise."""
+    info = _fetch_bridge_json("/info")
+    if info is None:
+        raise LocalError(
+            "Firewalla bridge unreachable — compatibility cannot be verified",
+            fix="is com.sanctum.firewalla running? (`launchctl print system/com.sanctum.firewalla`)",
+        )
+
+    policies = _fetch_bridge_json("/policies")
+    policy_count = policies.get("count") if isinstance(policies, dict) else None
+    if not isinstance(policy_count, int):
+        policy_count = None
+
+    caps = info.get("capabilities") or {}
+    mode = str(caps.get("box_mode") or (info.get("box") or {}).get("mode") or "").lower()
+    monitored: dict[str, bool | None] | None = None
+    if mode not in _IN_PATH_MODES:
+        try:
+            config = _load_devices(_resolve_devices_path())
+        except LocalError:
+            config = None
+        if config:
+            monitored = {}
+            for mac in _managed_macs(config):
+                host = _fetch_bridge_json(f"/host/{mac}")
+                val = host.get("monitored") if isinstance(host, dict) else None
+                monitored[mac] = val if isinstance(val, bool) else None
+
+    checks = assess_compat(info, policy_count, monitored)
+
+    box = info.get("box") or {}
+    table = Table(title=f"Firewalla compatibility — {box.get('modelDisplay') or '?'} ({mode or '?'} mode)")
+    table.add_column("check")
+    table.add_column("status")
+    table.add_column("detail")
+    table.add_column("fix")
+    style = {"PASS": "green", "WARN": "yellow", "FAIL": "red"}
+    for c in checks:
+        table.add_row(c.name, Text(c.status, style=style[c.status]), c.detail, c.fix or "")
+    console.print(table)
+
+    fails = [c for c in checks if c.status == "FAIL"]
+    warns = [c for c in checks if c.status == "WARN"]
+    if fails:
+        raise LocalError(
+            "compatibility FAIL: " + "; ".join(f"{c.name}: {c.detail}" for c in fails),
+            fix=fails[0].fix,
+        )
+    if warns and strict:
+        raise LocalError(
+            "compatibility WARN (strict): " + "; ".join(f"{c.name}: {c.detail}" for c in warns),
+            fix=warns[0].fix,
+        )
+    console.print(
+        "[green]✓ compatible[/]" + (f" [yellow]({len(warns)} warning(s))[/]" if warns else "")
+    )

@@ -260,6 +260,22 @@ def screentime_coverage() -> None:
 
 
 @screentime_app.command(
+    "compat",
+    help="Verify the paired Firewalla can enforce what Sanctum promises (model/mode/capacity/monitoring).",
+)
+def screentime_compat(
+    strict: Annotated[
+        bool, typer.Option("--strict", help="Treat warnings as failures (onboarding gate).")
+    ] = False,
+) -> None:
+    try:
+        screentime_cmd.compat_command(strict=strict)
+    except SanctumError as exc:
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code)) from exc
+
+
+@screentime_app.command(
     "phone-mode",
     help="Set a kid's phone mode: apple | macpause | both. Previews unless --apply.",
 )

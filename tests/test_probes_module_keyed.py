@@ -11,7 +11,6 @@ Part (c): ``run_soak`` populates ``red_probes`` from a failing module probe.
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
@@ -21,12 +20,8 @@ from sanctum_cli.commands import self_test as st
 from sanctum_cli.modules.manifest import ModuleManifest
 from sanctum_cli.modules.registry import ModuleRegistry
 from sanctum_cli.soak.harness import (
-    Sample,
-    SoakResult,
-    _collect_sample,
     run_soak,
 )
-
 
 # ── helpers ──────────────────────────────────────────────────────────────
 
@@ -180,7 +175,7 @@ class _FakeRegistry:
     def __init__(self, manifest: _FakeManifest) -> None:
         self._manifest = manifest
 
-    def get(self, name: str) -> _FakeManifest:  # noqa: ARG002
+    def get(self, name: str) -> _FakeManifest:
         return self._manifest
 
 
