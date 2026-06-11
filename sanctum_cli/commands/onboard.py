@@ -31,9 +31,19 @@ from rich.text import Text
 from sanctum_cli import config, recipes
 from sanctum_cli.backends import b2, gdrive, r2
 from sanctum_cli.commands import backup as backup_cmd
-from sanctum_cli.errors import UserError
+from sanctum_cli.errors import LocalError, UserError
 
 console = Console()
+
+# ── Optional-module gates ─────────────────────────────────────────────
+# Post-backup checks, keyed by recipe name. A gate SKIPS (never blocks)
+# when its module isn't installed/paired — onboarding must not hard-fail
+# on an optional module being absent — but runs STRICT when the module
+# answers, so a brand-new operator sees a misconfiguration (fix included)
+# before relying on it. Listed as data so tests can assert membership.
+RECIPE_GATES: dict[str, tuple[str, ...]] = {
+    "family": ("firewalla-compat",),
+}
 
 # ── Surface polish ────────────────────────────────────────────────────
 # The onboarding flow is the first time a new operator (or a friend of the
@@ -141,8 +151,7 @@ def onboard_command(
         cfg = config.load()
     else:
         console.print(
-            f"\n[bold]Step 2.[/] Cloud target already configured "
-            f"({rcp.target}) — skipping setup."
+            f"\n[bold]Step 2.[/] Cloud target already configured ({rcp.target}) — skipping setup."
         )
 
     # Step 3 — dry-run for transparency
@@ -161,6 +170,11 @@ def onboard_command(
     console.print("\n[bold]Step 5.[/] Restore canary")
     _run_canary()
 
+    # Step 6 — optional-module gates (family: Firewalla screen-time compat)
+    if "firewalla-compat" in RECIPE_GATES.get(recipe, ()):
+        console.print("\n[bold]Step 6.[/] Firewalla compatibility")
+        _run_firewalla_compat()
+
     console.print()
     try:
         who = os.getlogin()
@@ -168,9 +182,7 @@ def onboard_command(
         who = os.environ.get("USER", "friend")
 
     body = Group(
-        Text.from_markup(
-            f"[bold green]Your Sanctum is alive, {who}.[/]\n"
-        ),
+        Text.from_markup(f"[bold green]Your Sanctum is alive, {who}.[/]\n"),
         Text.from_markup(
             "It just ran its first backup and verified the restore by round-"
             "tripping a known file through your cloud bucket. From here, "
@@ -211,6 +223,36 @@ def _dispatch_cloud_setup(backend: str, *, no_open: bool) -> None:
         raise UserError(msg)
 
 
+def _run_firewalla_compat() -> None:
+    """Firewalla screen-time gate — skip-if-absent, strict-if-present.
+
+    The /info probe distinguishes "module not paired" (bridge unreachable or
+    no token → SKIP, onboarding continues) from "paired but incompatible" —
+    ``compat_command`` raises :class:`LocalError` for both cases, so we probe
+    first instead of parsing exception messages. When the bridge answers, the
+    assessment runs STRICT: a spoof-mode box or a near-capacity policy table
+    is surfaced to the brand-new operator *now*, fix text included, instead
+    of via the first silently-unenforced curfew. The verdict is loud but
+    non-blocking (same stance as the restore canary): the backup already
+    succeeded, and `sanctum screen-time compat --strict` is the hard gate.
+    """
+    from sanctum_cli.commands import screen_time
+
+    if screen_time._fetch_bridge_json("/info") is None:
+        console.print(
+            "  [yellow]skipped[/] — screen-time module not paired yet — "
+            "run `sanctum screen-time compat` after pairing"
+        )
+        return
+    try:
+        # Prints the per-check table (status + fix columns) before raising.
+        screen_time.compat_command(strict=True)
+    except LocalError as exc:
+        console.print(f"  [red]✗[/] {exc.message}")
+        if exc.fix:
+            console.print(f"  [dim]fix: {exc.fix}[/]")
+
+
 def _run_canary() -> None:
     """Lightweight canary — restore ~/.zshrc, sha256-diff against live."""
     import hashlib
@@ -228,9 +270,7 @@ def _run_canary() -> None:
         return
     probe = Path("~/.zshrc").expanduser()
     if not probe.exists():
-        console.print(
-            "  [yellow]skipped[/] — no ~/.zshrc on this host; nothing to round-trip"
-        )
+        console.print("  [yellow]skipped[/] — no ~/.zshrc on this host; nothing to round-trip")
         return
     live_sha = hashlib.sha256(probe.read_bytes()).hexdigest()
     console.print(f"  live ~/.zshrc sha256={live_sha[:16]}…")
