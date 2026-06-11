@@ -24,6 +24,7 @@ from sanctum_cli.commands import chat as chat_cmd
 from sanctum_cli.commands import cloud as cloud_cmd
 from sanctum_cli.commands import code as code_cmd
 from sanctum_cli.commands import config_cmd, doctor, status
+from sanctum_cli.commands import council as council_cmd
 from sanctum_cli.commands import deadman as deadman_cmd
 from sanctum_cli.commands import devices as devices_cmd
 from sanctum_cli.commands import keychain_cmd as keychain_command
@@ -236,6 +237,19 @@ def logs_top(
 @app.command("devices", help="List the haushold device inventory.")
 def devices_top() -> None:
     devices_cmd.devices_command()
+
+
+@app.command(
+    "council",
+    help="Convene the Jedi Council: interactive chamber, or one-shot fan-out with a question.",
+)
+def council_top(
+    question: Annotated[
+        str | None,
+        typer.Argument(help="Ask the full council once and exit; omit for the interactive chamber."),
+    ] = None,
+) -> None:
+    council_cmd.council_command(question)
 
 
 @app.command("schedule", help="Show the haushold curfew schedule.")
