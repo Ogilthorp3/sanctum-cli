@@ -93,5 +93,5 @@ class TestStaticRender:
         # the no-animation path still returns a renderable with the brand + seats
         text = b.static_banner_text()
         assert "S A N C T U M" in text  # the spaced wordmark is the brand
-        for seat_label in ("Yoda", "Windu", "Qui-Gon", "Ki-Adi-Mundi", "Cilghal"):
+        for seat_label in ("Yoda", "Windu", "Qui-Gon", "Ki-Adi-Mundi", "Cilghal", "Jocasta"):
             assert seat_label in text

@@ -113,6 +113,19 @@ SEATS: dict[str, Seat] = {
         ),
         style="blue",
     ),
+    "jocasta": Seat(
+        label="Jocasta",
+        model="council-brain",
+        persona=(
+            "You are Jocasta Nu of the Sanctum Jedi Council — the keeper of"
+            " records on the Mac. You hold the haus's memory: iMessage,"
+            " Calendar, Contacts, Mail, CRM, and the tech-lookout. You answer"
+            " from what is written and recorded, cite the source when you can,"
+            " and say plainly when a record is missing rather than guess."
+            " Precise, archival, a touch wry."
+        ),
+        style="bright_white",
+    ),
 }
 
 
@@ -329,7 +342,7 @@ def _repl() -> None:
     transcript = Transcript()
     banner.render_banner(console)
     console.print("[dim]The chamber is in session. "
-                  "/yoda /windu /quigon /mundi /cilghal switch seats · "
+                  "/yoda /windu /quigon /mundi /cilghal /jocasta switch seats · "
                   "/council <q> asks everyone · /new clears · /quit leaves[/]")
     while True:
         seat = SEATS[active]
