@@ -89,7 +89,13 @@ def main(
         typer.Option("--traceback", help="Print full traceback on uncaught exceptions."),
     ] = False,
 ) -> None:
-    """Sanctum CLI entry point. With no subcommand, prints status one-liner."""
+    """Sanctum CLI entry point.
+
+    With no subcommand: prints the status one-liner (the HUD), then — only
+    when stdin AND stdout are a real TTY — opens the Jedi Council chamber.
+    Pipes, scripts, and sentinels calling bare ``sanctum`` keep getting the
+    banner and a clean exit; an automation must never hang in a REPL.
+    """
     ctx.ensure_object(dict)
     ctx.obj["traceback"] = traceback
 
@@ -100,6 +106,16 @@ def main(
         except SanctumError as exc:
             _report(exc)
             raise typer.Exit(code=int(exc.exit_code)) from exc
+        if _stdio_is_tty():
+            council_cmd._repl()
+
+
+def _stdio_is_tty() -> bool:
+    """True when a human is at both ends (REPL-safe)."""
+    try:
+        return sys.stdin.isatty() and sys.stdout.isatty()
+    except (AttributeError, ValueError):
+        return False
 
 
 # Register status as a top-level command too (`sanctum status [--json]`)
