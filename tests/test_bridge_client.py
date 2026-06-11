@@ -556,7 +556,6 @@ def test_from_keychain_user_error_when_entry_missing():
 
     with patch.object(
         kc, "read", side_effect=kc.KeychainEntryMissingError("missing")
-    ):
-        with pytest.raises(UserError) as exc:
-            BridgeCreds.from_keychain()
+    ), pytest.raises(UserError) as exc:
+        BridgeCreds.from_keychain()
     assert "Keychain" in exc.value.message

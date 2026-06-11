@@ -27,7 +27,7 @@ import json
 import os
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
@@ -53,7 +53,7 @@ class BridgeCreds:
     hmac_secret: str
 
     @classmethod
-    def from_keychain(cls) -> "BridgeCreds":
+    def from_keychain(cls) -> BridgeCreds:
         try:
             return cls(
                 cf_access_id=keychain.read(*_KC_CF_ID),
@@ -105,7 +105,7 @@ class BridgeClient:
             self._http.close()
             self._http = None
 
-    def __enter__(self) -> "BridgeClient":
+    def __enter__(self) -> BridgeClient:
         return self
 
     def __exit__(self, *_: object) -> None:
@@ -114,7 +114,7 @@ class BridgeClient:
     def _sign(
         self, *, method: str, path: str, body: bytes
     ) -> dict[str, str]:
-        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        ts = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         nonce = str(uuid.uuid4())
         body_hash = hashlib.sha256(body).hexdigest()
         canonical = f"{ts}\n{nonce}\n{method}\n{path}\n{body_hash}"
@@ -162,17 +162,17 @@ class BridgeClient:
 
     # ----------------------------------------------------------------- public
     def health(self) -> dict[str, Any]:
-        return self._request("GET", "/_health")
+        return cast("dict[str, Any]", self._request("GET", "/_health"))
 
     def manifest(self) -> dict[str, Any]:
-        return self._request("GET", "/_manifest")
+        return cast("dict[str, Any]", self._request("GET", "/_manifest"))
 
     def diagnostic(self) -> dict[str, Any]:
-        return self._request("GET", "/_diagnostic")
+        return cast("dict[str, Any]", self._request("GET", "/_diagnostic"))
 
     def folder(self, path: str) -> dict[str, Any]:
         body = json.dumps({"path": path}, separators=(",", ":")).encode()
-        return self._request("POST", "/sharepoint/folder", body=body)
+        return cast("dict[str, Any]", self._request("POST", "/sharepoint/folder", body=body))
 
     def children(self, path: str) -> dict[str, Any]:
         """List the children of a SharePoint folder (read)."""
@@ -252,7 +252,7 @@ class BridgeClient:
             "if_exists": if_exists,
         }
         body = json.dumps(payload, separators=(",", ":")).encode()
-        return self._request("POST", "/sharepoint/upload", body=body)
+        return cast("dict[str, Any]", self._request("POST", "/sharepoint/upload", body=body))
 
 
 def encode_file(path: Path | str) -> tuple[str, str]:

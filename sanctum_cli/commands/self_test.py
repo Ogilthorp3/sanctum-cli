@@ -20,16 +20,15 @@ from __future__ import annotations
 
 import importlib
 import json
-import os
-import sqlite3
 import socket
+import sqlite3
 import subprocess
 import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Callable
+from typing import TYPE_CHECKING, Annotated
 
 import typer
 from rich.console import Console
@@ -39,6 +38,8 @@ from rich.text import Text
 from sanctum_cli import config
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from sanctum_cli.modules.registry import ModuleRegistry
 
 console = Console()
@@ -86,13 +87,14 @@ def _haus_tier_installed() -> bool:
 def _haus_only(name: str, check_fn: Callable[[], ProbeResult]) -> Callable[[], ProbeResult]:
     """Decorator-like wrapper: skip a haus-tier probe with n/a when this is
     a CLI-only install. The wrapped function is only invoked on haus
-    installs."""
+    installs. ``name`` names the probe in the n/a diagnostic so an operator
+    can tell at a glance which haus surface was skipped."""
     def wrapped() -> ProbeResult:
         if not _haus_tier_installed():
             return ProbeResult(
                 passed=True,
                 not_applicable=True,
-                reason="CLI-only install (no haus services configured)",
+                reason=f"CLI-only install: {name} probe skipped (no haus services configured)",
             )
         return check_fn()
     return wrapped

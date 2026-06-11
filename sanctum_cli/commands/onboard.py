@@ -18,9 +18,8 @@ need to run. Existing operators can use the underlying primitives
 
 from __future__ import annotations
 
-from typing import Annotated
-
 import os
+from typing import Annotated
 
 import typer
 from rich.align import Align
@@ -102,7 +101,9 @@ def onboard_command(
     yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip confirmation prompts.")] = False,
 ) -> None:
     """One-shot first-run: recipe → cloud setup → first backup → canary."""
-    cfg = config.load()
+    # ensure() (not load()) so a brand-new Mac with no ~/.sanctum/instance.yaml
+    # gets a minimal one scaffolded here instead of hard-failing on first run.
+    cfg = config.ensure()
     rcp = recipes.resolve(recipe, cfg.cli)
 
     _print_splash()

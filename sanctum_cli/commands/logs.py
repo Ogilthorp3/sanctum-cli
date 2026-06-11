@@ -10,6 +10,7 @@ Defaults to ``--follow`` and ``--lines 50``. ``--once`` for a snapshot.
 
 from __future__ import annotations
 
+import contextlib
 import subprocess
 from pathlib import Path
 from typing import Annotated
@@ -59,13 +60,13 @@ def logs_command(
 ) -> None:
     if list_services or service == "list":
         console.print("[bold]Known services:[/]")
-        for name, paths in sorted(LOG_MAP.items()):
-            for p in paths:
+        for name, log_paths in sorted(LOG_MAP.items()):
+            for p in log_paths:
                 marker = "✓" if p.is_file() else "·"
                 console.print(f"  {marker}  {name:18s}  {p}")
         return
 
-    paths = LOG_MAP.get(service.lower())
+    paths: list[Path] | None = LOG_MAP.get(service.lower())
     if not paths:
         console.print(f"[red]unknown service:[/] {service}")
         console.print("Run `sanctum logs --list` to see what's known.")
@@ -75,7 +76,7 @@ def logs_command(
     extant = [p for p in paths if p.is_file()]
     if not extant:
         console.print(f"[yellow]no log files exist yet for {service}.[/]")
-        console.print(f"Expected locations:")
+        console.print("Expected locations:")
         for p in paths:
             console.print(f"  {p}")
         raise typer.Exit(code=2)
@@ -86,7 +87,5 @@ def logs_command(
     args.extend(str(p) for p in extant)
 
     # exec replaces this process with tail so Ctrl-C is clean.
-    try:
+    with contextlib.suppress(KeyboardInterrupt):
         subprocess.run(args, check=False)
-    except KeyboardInterrupt:
-        pass

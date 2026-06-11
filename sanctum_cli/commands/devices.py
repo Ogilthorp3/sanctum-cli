@@ -10,28 +10,37 @@ assign`` (Phase 2 of Family Pass) or by editing the YAML.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
+from typing import Any
 
 import typer
 import yaml
 from rich.console import Console
 from rich.table import Table
+from rich.text import Text
 
 console = Console()
 
 
-def _load_devices() -> dict | None:
+def _load_devices() -> dict[str, Any] | None:
     """Find devices.yaml in the canonical screen-time module location."""
-    candidates = [
-        Path.home() / ".sanctum/screen-time/devices.yaml",
-        Path.home() / "Projects/sanctum-screen-time/devices.yaml",
-    ]
+    override = os.environ.get("SANCTUM_DEVICES_FILE")
+    candidates = (
+        [Path(override).expanduser()]
+        if override
+        else [
+            Path.home() / ".sanctum/screen-time/devices.yaml",
+            Path.home() / "Projects/sanctum-screen-time/devices.yaml",
+        ]
+    )
     for p in candidates:
         if p.is_file():
             try:
-                return yaml.safe_load(p.read_text(encoding="utf-8"))
+                data = yaml.safe_load(p.read_text(encoding="utf-8"))
             except yaml.YAMLError:
                 return None
+            return data if isinstance(data, dict) else None
     return None
 
 
@@ -55,31 +64,31 @@ def devices_command() -> None:
         table.add_column("Device")
         table.add_column("MAC")
         for person_id, person in family.items():
-            devices = person.get("devices", [])
+            # Real schema: personal_devices (not "devices"); member key is the name.
+            devices = person.get("personal_devices", [])
             if not devices:
                 continue
             for d in devices:
                 table.add_row(
-                    str(person.get("name", person_id)),
-                    str(d.get("name", "?")),
-                    str(d.get("mac", "?")),
+                    Text(str(person.get("name", person_id))),
+                    Text(str(d.get("name", "?"))),
+                    Text(str(d.get("mac", "?"))),
                 )
         console.print(table)
         console.print()
 
-    shared = data.get("shared_devices", [])
+    # Real schema: shared_devices is a {key: {name, mac}} mapping, not a list.
+    shared = data.get("shared_devices") or {}
     if shared:
         table = Table(title="Shared devices", show_header=True, header_style="bold cyan")
         table.add_column("Key")
         table.add_column("Name")
         table.add_column("MAC")
-        table.add_column("Hard curfew")
-        for d in shared:
+        for key, d in shared.items():
             table.add_row(
-                str(d.get("key", "?")),
-                str(d.get("name", "?")),
-                str(d.get("mac", "?")),
-                str(d.get("hard_curfew", "—")),
+                Text(str(key)),
+                Text(str(d.get("name", "?"))),
+                Text(str(d.get("mac", "?"))),
             )
         console.print(table)
         console.print()

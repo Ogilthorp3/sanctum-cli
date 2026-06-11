@@ -1,6 +1,8 @@
 import pytest
+
 from sanctum_cli.modules.manifest import ModuleManifest
-from sanctum_cli.modules.registry import ModuleRegistry, DependencyError
+from sanctum_cli.modules.registry import DependencyError, ModuleRegistry
+
 
 def _m(name, deps=None):
     return ModuleManifest.model_validate({

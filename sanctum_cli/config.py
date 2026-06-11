@@ -12,6 +12,8 @@ so typos in keys fail loudly with a precise pointer.
 from __future__ import annotations
 
 import os
+import re
+import socket
 from pathlib import Path
 from typing import Any, Literal
 
@@ -265,3 +267,39 @@ def _format_validation_error(exc: ValidationError, target: Path) -> str:
         loc = ".".join(str(p) for p in err["loc"])
         lines.append(f"  {loc}: {err['msg']}")
     return "\n".join(lines)
+
+
+# ─── First-run scaffolding ───────────────────────────────────────────
+
+
+def _default_identity() -> tuple[str, str]:
+    """Derive a friendly ``(name, slug)`` from the hostname for first-run setup."""
+    host = (socket.gethostname() or "sanctum").split(".")[0]
+    slug = re.sub(r"[^a-z0-9]+", "-", host.lower()).strip("-") or "sanctum"
+    return f"{host} Sanctum", slug
+
+
+def scaffold_instance(path: Path | None = None) -> Path:
+    """Write a minimal, valid ``instance.yaml`` when the user has none.
+
+    Backs the ``sanctum init`` command and :func:`ensure` so a brand-new machine
+    can run the CLI without hand-writing YAML. Returns the path written.
+    """
+    target = path or instance_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    name, slug = _default_identity()
+    target.write_text(f"instance:\n  name: {name}\n  slug: {slug}\n", encoding="utf-8")
+    return target
+
+
+def ensure(path: Path | None = None) -> Config:
+    """Load the instance config, scaffolding a minimal one if it is absent.
+
+    :func:`load` hard-raises when the file is missing — correct for most
+    commands, but fatal on a fresh Mac's first ``onboard``. ``ensure`` creates a
+    minimal stub first so first-run works, then loads normally.
+    """
+    target = path or instance_path()
+    if not target.exists():
+        scaffold_instance(target)
+    return load(target)

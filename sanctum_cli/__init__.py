@@ -7,5 +7,13 @@ Public API is intentionally tiny. Everything user-facing lives behind the
 
 from __future__ import annotations
 
-__version__ = "0.1.0a1"
+from importlib.metadata import PackageNotFoundError, version
+
+try:
+    # Single source of truth: the installed package metadata (pyproject version).
+    # Avoids the stale-hardcoded-literal drift that shipped "0.1.0a1" through v0.9.0.
+    __version__ = version("sanctum-cli")
+except PackageNotFoundError:  # running from a source tree without an install
+    __version__ = "0.0.0+source"
+
 __all__ = ["__version__"]

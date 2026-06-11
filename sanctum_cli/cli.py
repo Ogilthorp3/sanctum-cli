@@ -32,6 +32,7 @@ from sanctum_cli.commands import logs as logs_cmd
 from sanctum_cli.commands import onboard as onboard_cmd
 from sanctum_cli.commands import proxy as proxy_cmd
 from sanctum_cli.commands import schedule as schedule_cmd
+from sanctum_cli.commands import screen_time as screentime_cmd
 from sanctum_cli.commands import self_test as self_test_cmd
 from sanctum_cli.commands import uninstall as uninstall_cmd
 from sanctum_cli.commands import update as update_cmd
@@ -240,6 +241,56 @@ def devices_top() -> None:
 @app.command("schedule", help="Show the haushold curfew schedule.")
 def schedule_top() -> None:
     schedule_cmd.schedule_command()
+
+
+screentime_app = typer.Typer(help="Screen-time coverage + phone enforcement mode.")
+app.add_typer(screentime_app, name="screen-time")
+
+
+@screentime_app.command(
+    "coverage",
+    help="Show which personal devices are network-enforced vs deferred to Apple Screen Time.",
+)
+def screentime_coverage() -> None:
+    try:
+        screentime_cmd.coverage_command()
+    except SanctumError as exc:
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code)) from exc
+
+
+@screentime_app.command(
+    "compat",
+    help="Verify the paired Firewalla can enforce what Sanctum promises (model/mode/capacity/monitoring).",
+)
+def screentime_compat(
+    strict: Annotated[
+        bool, typer.Option("--strict", help="Treat warnings as failures (onboarding gate).")
+    ] = False,
+) -> None:
+    try:
+        screentime_cmd.compat_command(strict=strict)
+    except SanctumError as exc:
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code)) from exc
+
+
+@screentime_app.command(
+    "phone-mode",
+    help="Set a kid's phone mode: apple | macpause | both. Previews unless --apply.",
+)
+def screentime_phone_mode(
+    kid: Annotated[str, typer.Argument(help="Child id as it appears in devices.yaml.")],
+    mode: Annotated[str, typer.Argument(help="apple | macpause | both")],
+    apply: Annotated[
+        bool, typer.Option("--apply", help="Write the change (backs up devices.yaml first).")
+    ] = False,
+) -> None:
+    try:
+        screentime_cmd.phone_mode_command(kid=kid, mode=mode, apply=apply)
+    except SanctumError as exc:
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code)) from exc
 
 
 app.add_typer(module_app, name="module")

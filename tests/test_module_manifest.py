@@ -1,5 +1,6 @@
 import pytest
-from sanctum_cli.modules.manifest import ModuleManifest, ManifestError, load_manifest
+
+from sanctum_cli.modules.manifest import ManifestError, ModuleManifest, load_manifest
 
 VALID = {
     "module": "backup",
@@ -32,7 +33,7 @@ def test_revoke_secret_must_be_declared():
 
 def test_generate_enum_rejects_unknown():
     bad = {**VALID, "secrets": [{"account": "sanctum", "service": "x", "required": True, "generate": "rsa"}]}
-    with pytest.raises(Exception):
+    with pytest.raises((ManifestError, ValueError)):
         ModuleManifest.model_validate(bad)
 
 
