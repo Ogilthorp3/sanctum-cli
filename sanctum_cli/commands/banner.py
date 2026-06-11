@@ -37,6 +37,7 @@ _SEATS: tuple[tuple[str, str], ...] = (
     ("Ki-Adi-Mundi", "yellow"),
     ("Cilghal", "blue"),
     ("Jocasta", "bright_white"),
+    ("Mon Mothma", "bright_blue"),
 )
 
 

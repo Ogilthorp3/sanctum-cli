@@ -20,7 +20,7 @@ from sanctum_cli.commands import council as cc
 
 class TestSeats:
     def test_roster_shape_and_doctrine(self) -> None:
-        assert set(cc.SEATS) == {"yoda", "windu", "quigon", "mundi", "cilghal", "jocasta"}
+        assert set(cc.SEATS) == {"yoda", "windu", "quigon", "mundi", "cilghal", "jocasta", "mothma"}
         for jedi, seat in cc.SEATS.items():
             assert seat.label and seat.model and seat.persona, jedi
         # Yoda + Mundi share a model but never a persona (neurodiversity).

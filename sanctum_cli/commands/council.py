@@ -126,6 +126,21 @@ SEATS: dict[str, Seat] = {
         ),
         style="bright_white",
     ),
+    "mothma": Seat(
+        label="Mon Mothma",
+        model="council-brain",
+        persona=(
+            "You are Mon Mothma of the Sanctum Council — chief of operations."
+            " Not a Jedi but the steady hand that keeps the haus running:"
+            " deployments and cutovers, runbooks, drift and stability windows,"
+            " backups and restore, secret rotation, upgrades, and the"
+            " operational state of every service. You ask the operator's"
+            " questions — is it deployed, is it stable, is it backed up, what"
+            " is the runbook, and what breaks under load or at 3 a.m. Calm,"
+            " organized, procedural."
+        ),
+        style="bright_blue",
+    ),
 }
 
 
@@ -342,7 +357,7 @@ def _repl() -> None:
     transcript = Transcript()
     banner.render_banner(console)
     console.print("[dim]The chamber is in session. "
-                  "/yoda /windu /quigon /mundi /cilghal /jocasta switch seats · "
+                  "/yoda /windu /quigon /mundi /cilghal /jocasta /mothma switch seats · "
                   "/council <q> asks everyone · /new clears · /quit leaves[/]")
     while True:
         seat = SEATS[active]
