@@ -32,6 +32,8 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 
+from sanctum_cli.commands import banner
+
 console = Console()
 
 PROXYD_URL_ENV = "SANCTUM_PROXYD_URL"
@@ -325,8 +327,9 @@ def _print_seats(active: str) -> None:
 def _repl() -> None:
     active = DEFAULT_SEAT
     transcript = Transcript()
-    console.print("[bold]Sanctum Council[/] — the chamber is in session.")
-    console.print("[dim]/yoda /windu /quigon /mundi /cilghal switch seats · "
+    banner.render_banner(console)
+    console.print("[dim]The chamber is in session. "
+                  "/yoda /windu /quigon /mundi /cilghal switch seats · "
                   "/council <q> asks everyone · /new clears · /quit leaves[/]")
     while True:
         seat = SEATS[active]
