@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
 import pytest
+import yaml
 from typer.testing import CliRunner
 
 from sanctum_cli import recipes
@@ -206,3 +207,159 @@ def test_firewalla_compat_gate_listed_in_family_recipe() -> None:
     assert "firewalla-compat" in onboard.RECIPE_GATES["family"]
     # Gates may only reference recipes that actually exist.
     assert set(onboard.RECIPE_GATES) <= set(recipes.BUILTINS)
+
+
+# ── Family setup interview (family recipe) ────────────────────────────
+#
+# The interview seeds the screen-time registry (devices.yaml): names, roles,
+# and — for children — an optional smartphone number for bedtime courtesy
+# notices via iMessage. Expectations on the member shape derive from the
+# on-disk schema screen_time.py already reads (family.<slug>.role /
+# .notify_imessage / .personal_devices), not from the interview code.
+
+
+def _invoke_family_onboard_interactive(input_text: str) -> tuple[int, str]:
+    """Run `onboard --recipe family` (no --yes), feeding stdin to the prompts.
+
+    Callers' input must start with two newlines: they accept the "proceed?"
+    and "run the real backup now?" confirms at their defaults. Stdout is
+    whitespace-normalized against rich's 80-column wrapping.
+    """
+    with (
+        patch("sanctum_cli.commands.onboard.backup_cmd.backup_estimate"),
+        patch("sanctum_cli.commands.onboard.backup_cmd.backup_run"),
+        patch("sanctum_cli.commands.onboard._dispatch_cloud_setup"),
+        patch("sanctum_cli.commands.onboard._run_canary"),
+    ):
+        result = runner.invoke(app, ["onboard", "--recipe", "family"], input=input_text)
+    return result.exit_code, " ".join(result.stdout.split())
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("(514) 555-0142", ("+15145550142", True)),  # 10-digit NA, formatted
+        ("514.555.0142", ("+15145550142", True)),  # dots are formatting too
+        ("+33 6 12 34 56 78", ("+33612345678", False)),  # explicit country code
+        ("+1 (514) 555-0142", ("+15145550142", False)),  # leading + is trusted
+        ("555-0142", None),  # 7 digits — ambiguous, re-prompt
+        ("not a phone", None),
+        ("+123", None),  # too short to be a real number
+        ("", None),
+    ],
+)
+def test_normalize_phone(raw: str, expected: tuple[str, bool] | None) -> None:
+    """Formatting is stripped, + trusted, bare 10 digits flagged as assumed-NA."""
+    assert onboard.normalize_phone(raw) == expected
+
+
+def test_onboard_family_interview_writes_child_with_normalized_phone(
+    full_instance_yaml: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fresh haus: interview → skeleton devices.yaml with a normalized +1 number."""
+    monkeypatch.setenv("SANCTUM_INSTANCE_FILE", str(full_instance_yaml))
+    devices = tmp_path / "devices.yaml"
+    monkeypatch.setenv("SANCTUM_DEVICES_FILE", str(devices))
+
+    code, out = _invoke_family_onboard_interactive(
+        "\n\n"  # proceed? / run the real backup now? (defaults)
+        "Maya\n"  # member name
+        "child\n"  # role
+        "(514) 555-0142\n"  # loosely formatted NA number
+        "y\n"  # confirm the +1 assumption
+        "\n"  # empty name → done
+    )
+    assert code == 0, out
+    assert "Family setup" in out
+    data = yaml.safe_load(devices.read_text(encoding="utf-8"))
+    assert data["family"]["maya"] == {
+        "role": "child",
+        "notify_imessage": "+15145550142",
+        "personal_devices": [],
+    }
+    # Engine-loadable skeleton: the other top-level maps exist, empty.
+    assert data["shared_devices"] == {}
+    assert data["screens"] == {}
+
+
+def test_onboard_family_interview_merge_never_clobbers_existing_member(
+    full_instance_yaml: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Existing slug survives untouched; only the genuinely new member is added."""
+    monkeypatch.setenv("SANCTUM_INSTANCE_FILE", str(full_instance_yaml))
+    devices = tmp_path / "devices.yaml"
+    devices.write_text(
+        "family:\n"
+        "  maya:\n"
+        "    role: child\n"
+        "    enforce_personal: macpause\n"
+        "    personal_devices:\n"
+        "      - name: iPhone\n"
+        '        mac: "AA:BB:CC:DD:EE:FF"\n'
+        "shared_devices: {}\n"
+        "screens: {}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("SANCTUM_DEVICES_FILE", str(devices))
+
+    code, out = _invoke_family_onboard_interactive(
+        "\n\n"
+        "Maya\nchild\n\n"  # same slug, no phone — must be skipped, not merged
+        "Theo\nparent\n"  # parents are never asked for a phone
+        "\n"  # done
+    )
+    assert code == 0, out
+    assert "already in devices.yaml" in out  # the skip note
+    data = yaml.safe_load(devices.read_text(encoding="utf-8"))
+    # Existing member untouched — enforce flag and device list both survive.
+    assert data["family"]["maya"]["enforce_personal"] == "macpause"
+    assert data["family"]["maya"]["personal_devices"] == [
+        {"name": "iPhone", "mac": "AA:BB:CC:DD:EE:FF"}
+    ]
+    assert "notify_imessage" not in data["family"]["maya"]
+    assert data["family"]["theo"] == {"role": "parent", "personal_devices": []}
+    assert (tmp_path / "devices.yaml.bak").exists()  # backup before merge-write
+
+
+def test_onboard_family_interview_yes_skips_without_touching_file(
+    full_instance_yaml: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--yes must never hang on stdin nor write the registry."""
+    monkeypatch.setenv("SANCTUM_INSTANCE_FILE", str(full_instance_yaml))
+    devices = tmp_path / "devices.yaml"
+    monkeypatch.setenv("SANCTUM_DEVICES_FILE", str(devices))
+
+    code, out = _invoke_family_onboard()  # --yes path, no stdin supplied
+    assert code == 0, out
+    assert "Family setup" in out
+    assert "skipped — interactive step" in out
+    assert "run `sanctum onboard` without --yes to set up the family" in out
+    assert not devices.exists()
+
+
+def test_onboard_family_interview_bad_phone_reprompts_then_accepts(
+    full_instance_yaml: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """7-digit junk re-prompts; a +CC number then lands verbatim, formatting stripped."""
+    monkeypatch.setenv("SANCTUM_INSTANCE_FILE", str(full_instance_yaml))
+    devices = tmp_path / "devices.yaml"
+    monkeypatch.setenv("SANCTUM_DEVICES_FILE", str(devices))
+
+    code, out = _invoke_family_onboard_interactive(
+        "\n\n"
+        "Noa\nchild\n"
+        "555-0142\n"  # too short — must re-prompt, never store
+        "+33 6 12 34 56 78\n"  # then a valid international number
+        "\n"
+    )
+    assert code == 0, out
+    assert "couldn't parse that" in out
+    data = yaml.safe_load(devices.read_text(encoding="utf-8"))
+    assert data["family"]["noa"]["notify_imessage"] == "+33612345678"
+
+
+def test_family_setup_gate_listed_before_firewalla_compat() -> None:
+    """The interview is recipe-listed data and runs before the compat gate."""
+    gates = onboard.RECIPE_GATES["family"]
+    assert "family-setup" in gates
+    assert gates.index("family-setup") < gates.index("firewalla-compat")

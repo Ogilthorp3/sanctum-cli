@@ -9,7 +9,10 @@ The 30-second-to-working-backup demo. Composes existing primitives:
   3. Cloud setup wizard (R2 by default) if not already configured.
   4. First real backup with the recipe.
   5. Restore canary against ``~/.zshrc`` to prove the round-trip.
-  6. Done — print next-step status.
+  6. Recipe gates, in listed order — family: the family interview (names,
+     roles, smartphone numbers → the screen-time registry), then the
+     Firewalla compatibility check.
+  7. Done — print next-step status.
 
 For the lambda-family audience: this is the only command they should
 need to run. Existing operators can use the underlying primitives
@@ -19,13 +22,16 @@ need to run. Existing operators can use the underlying primitives
 from __future__ import annotations
 
 import os
-from typing import Annotated
+import re
+from pathlib import Path
+from typing import Annotated, Any
 
 import typer
+import yaml
 from rich.align import Align
 from rich.console import Console, Group
 from rich.panel import Panel
-from rich.prompt import Confirm
+from rich.prompt import Confirm, Prompt
 from rich.text import Text
 
 from sanctum_cli import config, recipes
@@ -36,13 +42,15 @@ from sanctum_cli.errors import LocalError, UserError
 console = Console()
 
 # ── Optional-module gates ─────────────────────────────────────────────
-# Post-backup checks, keyed by recipe name. A gate SKIPS (never blocks)
-# when its module isn't installed/paired — onboarding must not hard-fail
-# on an optional module being absent — but runs STRICT when the module
-# answers, so a brand-new operator sees a misconfiguration (fix included)
-# before relying on it. Listed as data so tests can assert membership.
+# Post-backup steps, keyed by recipe name and run in listed order. A gate
+# SKIPS (never blocks) when its module isn't installed/paired or when the
+# run is non-interactive (--yes) — onboarding must not hard-fail on an
+# optional module being absent, nor hang a scripted run on stdin — but
+# runs STRICT when the module answers, so a brand-new operator sees a
+# misconfiguration (fix included) before relying on it. Listed as data so
+# tests can assert membership and ordering.
 RECIPE_GATES: dict[str, tuple[str, ...]] = {
-    "family": ("firewalla-compat",),
+    "family": ("family-setup", "firewalla-compat"),
 }
 
 # ── Surface polish ────────────────────────────────────────────────────
@@ -170,10 +178,17 @@ def onboard_command(
     console.print("\n[bold]Step 5.[/] Restore canary")
     _run_canary()
 
-    # Step 6 — optional-module gates (family: Firewalla screen-time compat)
-    if "firewalla-compat" in RECIPE_GATES.get(recipe, ()):
-        console.print("\n[bold]Step 6.[/] Firewalla compatibility")
-        _run_firewalla_compat()
+    # Step 6+ — optional-module gates, in recipe-listed order
+    # (family: interview → screen-time registry, then Firewalla compat)
+    step_no = 6
+    for gate in RECIPE_GATES.get(recipe, ()):
+        if gate == "family-setup":
+            console.print(f"\n[bold]Step {step_no}.[/] Family setup")
+            _run_family_setup(yes=yes)
+        elif gate == "firewalla-compat":
+            console.print(f"\n[bold]Step {step_no}.[/] Firewalla compatibility")
+            _run_firewalla_compat()
+        step_no += 1
 
     console.print()
     try:
@@ -221,6 +236,198 @@ def _dispatch_cloud_setup(backend: str, *, no_open: bool) -> None:
     else:
         msg = f"unknown backend for onboarding: {backend!r}"
         raise UserError(msg)
+
+
+# ── Family setup (interview) ──────────────────────────────────────────
+# "Ask family members and smartphone numbers" — the interview seeds the
+# screen-time registry (devices.yaml) so the module has people to protect
+# the day it's paired. Pure logic (slug/phone/merge) is module-level so
+# tests can hit it without a TTY.
+
+_PHONE_FORMATTING_RE = re.compile(r"[\s\-().]")
+
+
+def slugify_member(name: str) -> str:
+    """Family-map key for a member: lowercased, non-alphanumerics stripped."""
+    return "".join(ch for ch in name.lower() if ch.isalnum())
+
+
+def normalize_phone(raw: str) -> tuple[str, bool] | None:
+    """Loosely formatted phone input → E.164-ish ``+<digits>``.
+
+    Spaces/dashes/parens/dots are formatting, never stored. A leading ``+``
+    is trusted as-is (8 to 15 digits, per E.164's ceiling); a bare 10-digit
+    number is assumed North American (``+1``) and flagged for operator
+    confirmation — the second tuple element is True. Anything else returns
+    None and the caller re-prompts.
+    """
+    cleaned = _PHONE_FORMATTING_RE.sub("", raw.strip())
+    if cleaned.startswith("+"):
+        digits = cleaned[1:]
+        if digits.isdigit() and 8 <= len(digits) <= 15:
+            return f"+{digits}", False
+        return None
+    if cleaned.isdigit() and len(cleaned) == 10:
+        return f"+1{cleaned}", True
+    return None
+
+
+def merge_family_members(
+    devices_config: dict[str, Any], members: dict[str, dict[str, Any]]
+) -> tuple[dict[str, Any], list[str], list[str]]:
+    """Merge interviewed members into a devices config — never clobbering.
+
+    Returns ``(new_config, added, skipped)``. An existing member with the
+    same slug is left exactly as found (skipped); only genuinely new slugs
+    are added. The input config is not mutated.
+    """
+    import copy
+
+    new = copy.deepcopy(devices_config)
+    family = new.get("family")
+    if not isinstance(family, dict):  # absent or a degenerate scalar `family:`
+        family = {}
+        new["family"] = family
+    added: list[str] = []
+    skipped: list[str] = []
+    for slug, member in members.items():
+        if slug in family:
+            skipped.append(slug)
+        else:
+            family[slug] = member
+            added.append(slug)
+    return new, added, skipped
+
+
+def _prompt_phone(name: str) -> str | None:
+    """Optional smartphone number for a child — loops until valid or skipped."""
+    while True:
+        raw = Prompt.ask(
+            f"  {name}'s smartphone number — for bedtime courtesy notices via "
+            "iMessage (enter to skip)",
+            default="",
+            show_default=False,
+        ).strip()
+        if not raw:
+            return None
+        normalized = normalize_phone(raw)
+        if normalized is None:
+            console.print(
+                "  [red]couldn't parse that[/] — try +<country><number> or a "
+                "10-digit North American number"
+            )
+            continue
+        phone, assumed_na = normalized
+        if assumed_na and not Confirm.ask(
+            f"  assuming North America → {phone} — correct?", default=True
+        ):
+            continue
+        return phone
+
+
+def _interview_family() -> dict[str, dict[str, Any]]:
+    """Ask for family members + smartphone numbers until the operator is done."""
+    console.print(
+        "  Who lives in the haus? Names and roles seed the screen-time "
+        "registry; a child's smartphone number lets Sanctum send bedtime "
+        "courtesy notices via iMessage. Press enter on an empty name when "
+        "you're done."
+    )
+    members: dict[str, dict[str, Any]] = {}
+    while True:
+        name = Prompt.ask(
+            "\n  family member name (enter when done)", default="", show_default=False
+        ).strip()
+        if not name:
+            return members
+        slug = slugify_member(name)
+        if not slug:
+            console.print("  [red]a name needs at least one letter or digit[/]")
+            continue
+        if slug in members:
+            console.print(f"  [yellow]already added[/] {slug} this session — skipping")
+            continue
+        role = Prompt.ask("  role", choices=["child", "parent"], default="child")
+        member: dict[str, Any] = {"role": role, "personal_devices": []}
+        if role == "child":
+            phone = _prompt_phone(name)
+            if phone:
+                member = {"role": role, "notify_imessage": phone, "personal_devices": []}
+        members[slug] = member
+
+
+def _devices_write_path() -> Path:
+    """Where the family registry lives — env override, else existing file, else default.
+
+    Mirrors ``screen_time._resolve_devices_path`` but returns the canonical
+    default instead of raising when nothing exists yet: onboarding is
+    exactly the moment the file gets created.
+    """
+    from sanctum_cli.commands import screen_time
+
+    override = os.environ.get(screen_time.ENV_DEVICES_FILE)
+    if override:
+        return Path(override).expanduser()
+    for candidate in screen_time._DEVICES_CANDIDATES:
+        if candidate.is_file():
+            return candidate
+    return screen_time._DEVICES_CANDIDATES[0]
+
+
+def _run_family_setup(*, yes: bool) -> None:
+    """Family interview gate — names, roles, smartphone numbers → devices.yaml.
+
+    Interactive by design, so ``--yes`` SKIPS it (prompting a scripted run
+    against a closed stdin would hang). Merge never clobbers: re-running
+    onboarding on a configured haus only adds new people; an existing slug
+    is skipped with a note. A fresh file gets the full engine-loadable
+    skeleton (family + empty shared_devices/screens maps).
+    """
+    if yes:
+        console.print(
+            "  [yellow]skipped[/] — interactive step; run `sanctum onboard` "
+            "without --yes to set up the family"
+        )
+        return
+
+    members = _interview_family()
+    if not members:
+        console.print("  [dim]no family members added — registry untouched[/]")
+        return
+
+    from sanctum_cli.commands import screen_time
+
+    path = _devices_write_path()
+    if path.is_file():
+        try:
+            devices_config = screen_time._load_devices(path)
+        except LocalError as exc:
+            console.print(f"  [red]✗[/] {exc.message}")
+            if exc.fix:
+                console.print(f"  [dim]fix: {exc.fix}[/]")
+            console.print("  [dim]registry not written — fix the file and re-run[/]")
+            return
+        merged, added, skipped = merge_family_members(devices_config, members)
+        for slug in skipped:
+            console.print(f"  [yellow]skipped[/] {slug} — already in {path.name}; not clobbering")
+        if not added:
+            console.print("  [dim]nothing new to write[/]")
+            return
+        backup = path.parent / (path.name + ".bak")
+        backup.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+        path.write_text(
+            yaml.safe_dump(merged, sort_keys=False, allow_unicode=True), encoding="utf-8"
+        )
+        console.print(
+            f"  [green]✓[/] added {len(added)} member(s) to {path} (backup: {backup.name})"
+        )
+    else:
+        skeleton: dict[str, Any] = {"family": members, "shared_devices": {}, "screens": {}}
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            yaml.safe_dump(skeleton, sort_keys=False, allow_unicode=True), encoding="utf-8"
+        )
+        console.print(f"  [green]✓[/] wrote {len(members)} member(s) to new {path}")
 
 
 def _run_firewalla_compat() -> None:
