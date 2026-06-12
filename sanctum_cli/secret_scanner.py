@@ -24,18 +24,38 @@ if TYPE_CHECKING:
 # Patterns that strongly indicate a credential. Each entry is (label, regex).
 CONTENT_PATTERNS: list[tuple[str, re.Pattern[bytes]]] = [
     ("aws-access-key-id", re.compile(rb"AKIA[0-9A-Z]{16}")),
-    ("aws-secret-access-key-env", re.compile(rb"AWS_SECRET_ACCESS_KEY\s*=\s*['\"]?[A-Za-z0-9/+]{40}")),
+    (
+        "aws-secret-access-key-env",
+        re.compile(rb"AWS_SECRET_ACCESS_KEY\s*=\s*['\"]?[A-Za-z0-9/+]{40}"),
+    ),
     ("anthropic-api-key", re.compile(rb"sk-ant-(?:api03-)?[A-Za-z0-9_\-]{40,}")),
     ("openai-api-key", re.compile(rb"sk-(?:proj-)?[A-Za-z0-9_\-]{40,}")),
     ("github-token", re.compile(rb"gh[pousr]_[A-Za-z0-9_]{36,}")),
     ("google-oauth-client-secret", re.compile(rb"GOCSPX-[A-Za-z0-9_\-]{20,}")),
     ("google-api-key", re.compile(rb"AIza[0-9A-Za-z_\-]{35}")),
     ("slack-token", re.compile(rb"xox[baprs]-[A-Za-z0-9-]{10,}")),
-    ("ssh-private-key", re.compile(rb"-----BEGIN (?:RSA |OPENSSH |EC |DSA |PGP )?PRIVATE KEY-----")),
+    (
+        "private-key-block",
+        re.compile(
+            rb"-----BEGIN (?:RSA |OPENSSH |EC |DSA |PGP )?PRIVATE KEY(?: BLOCK)?-----"
+            rb".*?(?:-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----|\Z)",
+            re.DOTALL,
+        ),
+    ),
+    (
+        "ssh-private-key",
+        re.compile(rb"-----BEGIN (?:RSA |OPENSSH |EC |DSA |PGP )?PRIVATE KEY-----"),
+    ),
     ("pgp-private-key", re.compile(rb"-----BEGIN PGP PRIVATE KEY BLOCK-----")),
-    ("jwt-with-likely-secret", re.compile(rb"eyJ[A-Za-z0-9_\-]{20,}\.eyJ[A-Za-z0-9_\-]{20,}\.[A-Za-z0-9_\-]{20,}")),
+    (
+        "jwt-with-likely-secret",
+        re.compile(rb"eyJ[A-Za-z0-9_\-]{20,}\.eyJ[A-Za-z0-9_\-]{20,}\.[A-Za-z0-9_\-]{20,}"),
+    ),
     ("b2-application-key", re.compile(rb"K00[0-9][A-Za-z0-9+/_-]{42,}")),
-    ("r2-secret-access-key-context", re.compile(rb"r2[_-]?secret[_-]?access[_-]?key\s*[:=]\s*['\"]?[0-9a-f]{64}", re.IGNORECASE)),
+    (
+        "r2-secret-access-key-context",
+        re.compile(rb"r2[_-]?secret[_-]?access[_-]?key\s*[:=]\s*['\"]?[0-9a-f]{64}", re.IGNORECASE),
+    ),
 ]
 
 # Filenames that are categorically risky regardless of contents.

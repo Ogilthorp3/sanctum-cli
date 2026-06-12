@@ -31,6 +31,8 @@ class TestRedact:
         assert "BEGIN OPENSSH PRIVATE KEY" not in out
         assert "100% normal text" in out, "redaction must not mangle innocent text"
         assert "[REDACTED:" in out
+        assert "abc" not in out, "the key BODY must die, not just the BEGIN header"
+        assert "END OPENSSH PRIVATE KEY" not in out
 
     def test_clean_text_passes_unchanged(self) -> None:
         clean = "agents: 12 running, 0 failed — disk 77%"
@@ -83,3 +85,87 @@ class TestAuditLedger:
             duration_ms=1,
         )
         assert ledger.exists()
+
+
+class TestRegistry:
+    def test_four_read_tools_registered_no_mutations(self) -> None:
+        assert set(ct.REGISTRY) == {"sanctum_status", "sanctum_doctor", "agent_list", "logs_tail"}
+        assert all(t.kind == "read" for t in ct.REGISTRY.values()), "phase 1 ships reads only"
+
+    def test_schemas_are_anthropic_shaped(self) -> None:
+        for tool in ct.REGISTRY.values():
+            assert tool.input_schema["type"] == "object"
+            assert isinstance(tool.description, str) and tool.description
+
+    def test_run_tool_unknown_name_is_error_not_crash(self, tmp_path: Path) -> None:
+        result = ct.run_tool(
+            "rm_dash_rf", {}, seat="Yoda", session="s", ledger=tmp_path / "a.jsonl"
+        )
+        assert result.is_error
+        assert "unknown tool" in result.content.lower()
+        # even the refusal is audited
+        assert (tmp_path / "a.jsonl").exists()
+
+    def test_run_tool_executes_audits_and_redacts(self, tmp_path: Path) -> None:
+        # swap in a stub tool so the test owns the output; the real tools
+        # are exercised by their own smoke below
+        stub = ct.CouncilTool(
+            name="stub",
+            description="test stub",
+            input_schema={"type": "object", "properties": {}},
+            kind="read",
+            run=lambda params: "key sk-ant-api03-" + "B" * 50,
+        )
+        result = ct.run_tool(
+            "stub",
+            {},
+            seat="Yoda",
+            session="s",
+            ledger=tmp_path / "a.jsonl",
+            registry={"stub": stub},
+        )
+        assert not result.is_error
+        assert "sk-ant-" not in result.content, "redaction wraps every executor"
+        line = json.loads((tmp_path / "a.jsonl").read_text().splitlines()[0])
+        assert line["tool"] == "stub" and line["outcome"] == "ok"
+
+    def test_executor_exception_becomes_error_result(self, tmp_path: Path) -> None:
+        def boom(params: dict[str, object]) -> str:
+            raise RuntimeError("doctor exploded")
+
+        stub = ct.CouncilTool(
+            name="boom", description="d", input_schema={"type": "object"}, kind="read", run=boom
+        )
+        result = ct.run_tool(
+            "boom",
+            {},
+            seat="Yoda",
+            session="s",
+            ledger=tmp_path / "a.jsonl",
+            registry={"boom": stub},
+        )
+        assert result.is_error and "doctor exploded" in result.content
+        line = json.loads((tmp_path / "a.jsonl").read_text().splitlines()[0])
+        assert line["outcome"] == "error"
+
+
+class TestRealReadTools:
+    def test_agent_list_runs_against_this_mac(self, tmp_path: Path) -> None:
+        # real executor, real launchctl — this box runs com.sanctum agents
+        result = ct.run_tool(
+            "agent_list", {}, seat="Yoda", session="s", ledger=tmp_path / "a.jsonl"
+        )
+        assert not result.is_error
+        assert "com.sanctum." in result.content
+
+    def test_logs_tail_caps_lines_and_handles_unknown_service(self, tmp_path: Path) -> None:
+        bad = ct.run_tool(
+            "logs_tail",
+            {"service": "no-such-svc-xyz"},
+            seat="Yoda",
+            session="s",
+            ledger=tmp_path / "a.jsonl",
+        )
+        assert bad.is_error
+        cap = ct.REGISTRY["logs_tail"].input_schema["properties"]["lines"]
+        assert cap.get("maximum") == 200, "the cap is part of the published schema"
