@@ -24,6 +24,9 @@ _TRAIL_DEEP = (0, 80, 24)
 # Charset: half-width katakana (single-cell — full-width would shear the
 # grid) plus digits, with a rare Sanctum gem hiding in the rain.
 GLYPHS = [chr(cp) for cp in range(0xFF66, 0xFF9E)] + list("0123456789")
+# U+25C6 is East-Asian-Width Ambiguous — rich counts it as 1 cell, but a
+# terminal configured to treat ambiguous as wide would render 2 cells and
+# shear the grid. We accept this bet because no good single-cell diamond exists.
 GEM = "◆"
 GEM_RARITY = 200  # ~one gem per 200 glyphs
 

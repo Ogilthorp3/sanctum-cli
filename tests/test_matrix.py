@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import random
 
+from rich.style import Style
+
 from sanctum_cli.commands import matrix as m
 
 
@@ -52,6 +54,7 @@ class TestGlyphs:
         rng = random.Random(3)
         seen = {m.pick_glyph(rng) for _ in range(2000)}
         assert seen <= set(m.GLYPHS) | {m.GEM}
+        assert len(seen) > 50, "draws must cover the charset, not collapse to a few glyphs"
 
     def test_the_gem_hides_in_the_rain(self) -> None:
         rng = random.Random(3)
@@ -77,3 +80,19 @@ class TestFrame:
         near = m.trail_rgb(1, 10)
         far = m.trail_rgb(10, 10)
         assert near[1] > far[1], "green channel must dim with distance from the head"
+
+    def test_head_and_trail_render_at_the_right_rows(self) -> None:
+        # kills the upside-down-rain and styleless-head mutants the
+        # geometry test cannot see
+        rng = random.Random(9)
+        col = m.ColumnState(head=5, trail=2, period=1)
+        frame = m.compose_frame([col], width=1, height=10, rng=rng)
+        lines = frame.plain.split("\n")
+        lit = {row for row, line in enumerate(lines) if line.strip()}
+        assert lit == {3, 4, 5}, "trail directly above the head, nothing else lit"
+        # width=1 → each row is one char + newline, so the head cell (row 5)
+        # sits at plain-text offset 10; its span must carry the bold head style
+        head_span = next(s for s in frame.spans if s.start == 10)
+        style = head_span.style
+        assert isinstance(style, Style)
+        assert style.bold, "the head wears the bold phosphor highlight"
