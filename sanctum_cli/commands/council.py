@@ -345,13 +345,18 @@ def _post_with_tools(
     return result
 
 
-def _persona(seat: Seat) -> str:
+def _persona(seat: Seat, *, armed: bool | None = None) -> str:
     """Compose the system prompt for a seat.
 
     Armed seats get an instruments clause enumerating their tools plus the
     live-state contract. Unarmed seats get an honest no-tools declaration.
+
+    ``armed=None`` (default) derives the arming from whether the seat has
+    tools configured. Pass ``armed=False`` to force the unarmed clause even
+    for an armed seat (e.g. the REPL fallback after ToolsRejected).
     """
-    if seat.tools:
+    is_armed = seat.tools if armed is None else armed
+    if is_armed:
         mounted = council_tools.mount_tools(seat.tools, is_tty=True)
         tool_lines = "\n".join(f"- {t.name} — {t.description}" for t in mounted)
         return (
@@ -373,7 +378,12 @@ def _tool_turn(seat: Seat, messages: list[dict[str, object]]) -> str:
     """Buffered Anthropic tool-use loop for armed seats. The cap and the
     breaker keep a confused model from sawing at the instruments all
     night (council #6). Statuses run sequentially — verb dots while the
-    model thinks, instrument dots while a tool runs — never nested."""
+    model thinks, instrument dots while a tool runs — never nested.
+
+    Per-block extraction is hardened: malformed tool_use blocks (stringified
+    JSON input, missing id, missing name) degrade per-block with an audited
+    error result fed back to the model rather than aborting the turn.
+    """
     mounted = council_tools.mount_tools(seat.tools, is_tty=console.is_terminal)
     specs: list[dict[str, object]] = [
         {"name": t.name, "description": t.description, "input_schema": t.input_schema}
@@ -383,42 +393,132 @@ def _tool_turn(seat: Seat, messages: list[dict[str, object]]) -> str:
     session = f"repl-{os.getpid()}"
     calls = 0
     consecutive_errors = 0
+    first_post = True
     while True:
         with console.status(
             thinking_markup(seat), spinner="simpleDotsScrolling", spinner_style=seat.style
         ):
-            data = _post_with_tools(seat, convo, system=_persona(seat), tools=specs)
+            try:
+                data = _post_with_tools(seat, convo, system=_persona(seat), tools=specs)
+            except ToolsRejected:
+                if first_post:
+                    raise
+                raise RuntimeError(
+                    "mid-turn tools failure: seat rejected tools mid-loop"
+                ) from None
+        first_post = False
         blocks = data.get("content", [])
         if not isinstance(blocks, list):
             blocks = []
         tool_uses = [b for b in blocks if isinstance(b, dict) and b.get("type") == "tool_use"]
         if data.get("stop_reason") != "tool_use" or not tool_uses:
-            return "".join(
+            answer = "".join(
                 b.get("text", "") for b in blocks if isinstance(b, dict) and b.get("type") == "text"
             ).strip()
+            return answer if answer else "(no answer)"
         results: list[dict[str, object]] = []
         budget_hit = False
         for block in tool_uses:
+            # ── Extract fields with per-block malformation handling ──────
+            block_id: str | None = None
+            block_name: str | None = None
+            block_input: dict[str, object] | None = None
+            parse_error: str | None = None
+
+            if not isinstance(block, dict):
+                parse_error = f"tool_use block is not a dict: {type(block).__name__}"
+            else:
+                raw_id = block.get("id")
+                block_id = str(raw_id) if raw_id is not None else None
+
+                raw_name = block.get("name")
+                block_name = str(raw_name) if raw_name is not None else None
+                if block_name is None:
+                    parse_error = "tool_use block missing 'name'"
+                elif block_id is None:
+                    parse_error = "tool_use block missing 'id' — cannot form tool_result"
+
+                raw_input = block.get("input")
+                if isinstance(raw_input, str):
+                    # Stringified JSON — attempt rescue (classic local-model malformation)
+                    try:
+                        parsed = json.loads(raw_input)
+                        if isinstance(parsed, dict):
+                            block_input = parsed
+                        else:
+                            parse_error = (
+                                f"tool_use 'input' parsed to non-dict: {type(parsed).__name__}"
+                            )
+                    except json.JSONDecodeError as exc:
+                        parse_error = f"tool_use 'input' is unparseable string: {exc}"
+                elif isinstance(raw_input, dict):
+                    block_input = raw_input
+                elif raw_input is None:
+                    block_input = {}
+                else:
+                    parse_error = (
+                        f"tool_use 'input' has unexpected type: {type(raw_input).__name__}"
+                    )
+
+            if parse_error is not None:
+                # Audit malformed attempt; feed error result back if we have an id
+                audit_tool = block_name if block_name else "<malformed>"
+                council_tools.audit(
+                    council_tools.AUDIT_LEDGER,
+                    seat=seat.label,
+                    session=session,
+                    tool=audit_tool,
+                    params={},
+                    kind="unknown",
+                    mode="auto",
+                    outcome="error",
+                    duration_ms=0,
+                )
+                if block_id is not None:
+                    results.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": block_id,
+                            "content": f"malformed tool call: {parse_error}",
+                            "is_error": True,
+                        }
+                    )
+                # continue to next block — don't abort the turn
+                consecutive_errors += 1
+                continue
+
+            # ── Normal block — apply cap / breaker ───────────────────────
             calls += 1
-            if calls > TOOL_CALL_CAP or consecutive_errors >= 2:
+            if calls > TOOL_CALL_CAP:
                 budget_hit = True
                 results.append(
                     {
                         "type": "tool_result",
-                        "tool_use_id": block["id"],
+                        "tool_use_id": block_id,
                         "content": "tool budget exhausted — answer with what you have",
                         "is_error": True,
                     }
                 )
                 continue
+            if consecutive_errors >= 2:
+                budget_hit = True
+                results.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": block_id,
+                        "content": "instrument error budget exceeded — answer with what you have",
+                        "is_error": True,
+                    }
+                )
+                continue
             with console.status(
-                f"[{seat.style}]{seat.label} consults the instruments… ({block['name']})[/]",
+                f"[{seat.style}]{seat.label} consults the instruments… ({block_name})[/]",
                 spinner="simpleDotsScrolling",
                 spinner_style=seat.style,
             ):
                 result = council_tools.run_tool(
-                    str(block["name"]),
-                    dict(block.get("input") or {}),
+                    str(block_name),
+                    dict(block_input or {}),
                     seat=seat.label,
                     session=session,
                 )
@@ -426,13 +526,16 @@ def _tool_turn(seat: Seat, messages: list[dict[str, object]]) -> str:
             results.append(
                 {
                     "type": "tool_result",
-                    "tool_use_id": block["id"],
+                    "tool_use_id": block_id,
                     "content": result.content,
                     "is_error": result.is_error,
                 }
             )
         if budget_hit:
-            # Don't loop back to the model — return a capped fallback.
+            # Breaker or cap hit — return distinctive strings so the caller
+            # can distinguish the two failure modes (Fix 5).
+            if consecutive_errors >= 2:
+                return "(instrument errors — answering without further tools)"
             return "(tool call cap reached — partial answer only)"
         convo.append({"role": "assistant", "content": blocks})
         convo.append({"role": "user", "content": results})
@@ -520,6 +623,82 @@ def _print_seats(active: str) -> None:
         console.print(f"  [{seat.style}]{marker} /{jedi:<8}[/] {seat.label} — {seat.model}")
 
 
+def _say_turn(
+    seat: Seat,
+    transcript: Transcript,
+    raw_arg: str,
+) -> None:
+    """Execute one say/switch_say turn: tool loop (armed) or streaming.
+
+    Extracted from ``_repl`` so that Ctrl-C behaviour and the streaming
+    path can be unit-tested without wiring up a full interactive REPL loop.
+    Returns normally after the turn completes (including on Ctrl-C abort).
+    """
+    transcript.add("user", raw_arg)
+    if seat.tools:
+        try:
+            try:
+                answer = _tool_turn(seat, cast("list[dict[str, object]]", transcript.messages()))
+            except KeyboardInterrupt:
+                console.print("\n[dim](turn aborted)[/]")
+                transcript.add("assistant", "(turn aborted)")
+                return
+            answer = answer if answer else "(no answer)"
+            # Markup-safe answer printing: nameplate via markup, answer as plain Text
+            nameplate = Text.from_markup(f"[{seat.style}]{seat.label}:[/] ")
+            console.print(nameplate.append_text(Text(answer)), soft_wrap=True)
+            transcript.add("assistant", answer)
+            return
+        except ToolsRejected:
+            console.print("[dim](seat's model declines tools — chat only this turn)[/]")
+            # Fall through to the streaming path with unarmed persona
+        except Exception as e:
+            console.print(f"[red]⚠ {e}[/]")
+            transcript.add("assistant", "(seat unavailable)")
+            return
+
+    # streaming path — runs when unarmed OR after ToolsRejected
+    # Pass armed=False when degrading from ToolsRejected so the model gets
+    # the honest unarmed persona rather than the instruments clause.
+    persona_system = _persona(seat, armed=False) if seat.tools else _persona(seat)
+    chunks: list[str] = []
+    try:
+        # _stream is lazy — the request fires on the first pull, so the
+        # status animates exactly across the model's thinking dead-air
+        # and vanishes the moment the first word lands.
+        stream = _stream(seat, transcript.messages(), system=persona_system)
+        try:
+            with console.status(
+                thinking_markup(seat), spinner="simpleDotsScrolling", spinner_style=seat.style
+            ):
+                first = next(stream, None)
+        except KeyboardInterrupt:
+            console.print("\n[dim](turn aborted)[/]")
+            transcript.add("assistant", "(turn aborted)")
+            return
+        console.print(f"[{seat.style}]{seat.label}:[/] ", end="")
+        if first is not None:
+            chunks.append(first)
+            console.print(first, end="", soft_wrap=True)
+            try:
+                for delta in stream:
+                    chunks.append(delta)
+                    console.print(delta, end="", soft_wrap=True)
+            except KeyboardInterrupt:
+                console.print("\n[dim](turn aborted)[/]")
+                answer = "".join(chunks) if chunks else "(turn aborted)"
+                transcript.add("assistant", answer)
+                return
+        console.print()
+    except Exception as e:
+        console.print(f"\n[red]⚠ {e}[/]")
+        transcript.add("assistant", "(seat unavailable)")
+        return
+    answer = "".join(chunks)
+    answer = answer if answer else "(no answer)"
+    transcript.add("assistant", answer)
+
+
 def _repl() -> None:
     active = DEFAULT_SEAT
     transcript = Transcript()
@@ -566,46 +745,9 @@ def _repl() -> None:
             continue
         if action.kind == "switch_say":
             active = line.strip()[1:].split(" ")[0].lower()
-        # say / switch_say → armed seats try the tool loop first; unarmed
-        # (and armed seats whose bridge rejects tools) fall through to stream.
+        # say / switch_say → delegate to _say_turn
         seat = SEATS[active]
-        transcript.add("user", action.arg)
-        if seat.tools:
-            try:
-                answer = _tool_turn(seat, cast("list[dict[str, object]]", transcript.messages()))
-                console.print(f"[{seat.style}]{seat.label}:[/] {answer}", soft_wrap=True)
-                transcript.add("assistant", answer)
-                continue
-            except ToolsRejected:
-                console.print("[dim](seat's model declines tools — chat only this turn)[/]")
-            except Exception as e:
-                console.print(f"[red]⚠ {e}[/]")
-                transcript.add("assistant", "(seat unavailable)")
-                continue
-        # streaming path — runs when unarmed OR after ToolsRejected
-        chunks: list[str] = []
-        try:
-            # _stream is lazy — the request fires on the first pull, so the
-            # status animates exactly across the model's thinking dead-air
-            # and vanishes the moment the first word lands.
-            stream = _stream(seat, transcript.messages(), system=_persona(seat))
-            with console.status(
-                thinking_markup(seat), spinner="simpleDotsScrolling", spinner_style=seat.style
-            ):
-                first = next(stream, None)
-            console.print(f"[{seat.style}]{seat.label}:[/] ", end="")
-            if first is not None:
-                chunks.append(first)
-                console.print(first, end="", soft_wrap=True)
-                for delta in stream:
-                    chunks.append(delta)
-                    console.print(delta, end="", soft_wrap=True)
-            console.print()
-        except Exception as e:
-            console.print(f"\n[red]⚠ {e}[/]")
-            transcript.add("assistant", "(seat unavailable)")
-            continue
-        transcript.add("assistant", "".join(chunks))
+        _say_turn(seat, transcript, action.arg)
 
 
 def council_command(
