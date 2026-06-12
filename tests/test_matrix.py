@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import random
 
+import pytest  # noqa: TC002
 from rich.style import Style
 
 from sanctum_cli.commands import matrix as m
@@ -99,7 +100,14 @@ class TestFrame:
 
 
 class TestCommandGate:
-    def test_matrix_refuses_without_a_tty(self) -> None:
+    def test_matrix_refuses_without_a_tty(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # scrub every env override that could force the gate open
+        # (FORCE_COLOR) or short-circuit it for the wrong reason
+        # (NO_COLOR / SANCTUM_NO_ANIM), so this pins the no-TTY path
+        # specifically — and can never enter the infinite Live loop
+        # under a colored CI shell
+        for var in ("FORCE_COLOR", "NO_COLOR", "SANCTUM_NO_ANIM", "TTY_COMPATIBLE"):
+            monkeypatch.delenv(var, raising=False)
         from typer.testing import CliRunner
 
         from sanctum_cli.cli import app

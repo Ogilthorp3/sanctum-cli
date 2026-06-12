@@ -10,6 +10,7 @@ pipes and NO_COLOR get a polite refusal, not frames.
 from __future__ import annotations
 
 import random
+import signal
 import time
 from dataclasses import dataclass, replace
 
@@ -115,6 +116,15 @@ def matrix_command() -> None:
         console.print("[red]The Matrix needs a real terminal[/] — not a pipe.")
         raise typer.Exit(1)
     rng = random.Random()
+
+    # SIGTERM must unwind the Live context like Ctrl-C does, or the user's
+    # shell comes back stranded on the alternate screen with a hidden
+    # cursor. SystemExit propagates from the main thread, runs Live's
+    # __exit__ restore chain, and preserves the conventional 128+15 code.
+    def _terminate(_signum: int, _frame: object) -> None:
+        raise SystemExit(143)
+
+    signal.signal(signal.SIGTERM, _terminate)
     columns: list[ColumnState] = []
     try:
         with Live(console=console, screen=True, refresh_per_second=20, transient=True) as live:
