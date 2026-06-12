@@ -30,6 +30,7 @@ from sanctum_cli.commands import devices as devices_cmd
 from sanctum_cli.commands import keychain_cmd as keychain_command
 from sanctum_cli.commands import keys_backup as keys_backup_cmd
 from sanctum_cli.commands import logs as logs_cmd
+from sanctum_cli.commands import matrix as matrix_cmd
 from sanctum_cli.commands import onboard as onboard_cmd
 from sanctum_cli.commands import proxy as proxy_cmd
 from sanctum_cli.commands import schedule as schedule_cmd
@@ -53,7 +54,9 @@ config_app = typer.Typer(help="Configuration commands.")
 app.add_typer(config_app, name="config")
 
 
-@config_app.command("validate", help="Schema-check ~/.sanctum/instance.yaml against the cli schema.")
+@config_app.command(
+    "validate", help="Schema-check ~/.sanctum/instance.yaml against the cli schema."
+)
 def config_validate_top(
     json_output: Annotated[bool, typer.Option("--json", help="Emit JSON.")] = False,
 ) -> None:
@@ -62,6 +65,7 @@ def config_validate_top(
     except SanctumError as exc:
         _report(exc)
         raise typer.Exit(code=int(exc.exit_code)) from exc
+
 
 err_console = Console(stderr=True)
 
@@ -121,8 +125,12 @@ def _stdio_is_tty() -> bool:
 # Register status as a top-level command too (`sanctum status [--json]`)
 @app.command("status", help="Health snapshot — backup age, providers, disk, telemetry summary.")
 def status_top(
-    json_output: Annotated[bool, typer.Option("--json", help="Emit JSON instead of human-readable.")] = False,
-    oneline: Annotated[bool, typer.Option("--oneline", help="Force one-line summary even if errors exist.")] = False,
+    json_output: Annotated[
+        bool, typer.Option("--json", help="Emit JSON instead of human-readable.")
+    ] = False,
+    oneline: Annotated[
+        bool, typer.Option("--oneline", help="Force one-line summary even if errors exist.")
+    ] = False,
 ) -> None:
     try:
         status.status_command(json_output=json_output, oneline=oneline)
@@ -138,9 +146,7 @@ def chat_top(
     ] = None,
     provider: Annotated[
         str | None,
-        typer.Option(
-            "--provider", "-p", help="Force provider: claude | gemini | mlx_local."
-        ),
+        typer.Option("--provider", "-p", help="Force provider: claude | gemini | mlx_local."),
     ] = None,
     file: Annotated[
         Path | None, typer.Option("--file", "-f", help="Read prompt from a file.")
@@ -173,9 +179,7 @@ def chat_top(
 
 @app.command("doctor", help="Health probes — LaunchAgents, providers, backup repos.")
 def doctor_top(
-    full: Annotated[
-        bool, typer.Option("--full", help="Always print full per-row detail.")
-    ] = False,
+    full: Annotated[bool, typer.Option("--full", help="Always print full per-row detail.")] = False,
     json_output: Annotated[
         bool, typer.Option("--json", help="Emit JSON (full report regardless of --full).")
     ] = False,
@@ -240,9 +244,7 @@ def uninstall_top(
 
 @app.command("logs", help="Tail the log file for a sanctum service.")
 def logs_top(
-    service: Annotated[
-        str, typer.Argument(help="Service name. Use 'list' to see what's known.")
-    ],
+    service: Annotated[str, typer.Argument(help="Service name. Use 'list' to see what's known.")],
     follow: Annotated[bool, typer.Option("--follow/--once", "-f")] = True,
     lines: Annotated[int, typer.Option("--lines", "-n")] = 50,
     list_services: Annotated[bool, typer.Option("--list")] = False,
@@ -255,6 +257,11 @@ def devices_top() -> None:
     devices_cmd.devices_command()
 
 
+@app.command("matrix", help="Follow the white rabbit — digital rain until Ctrl-C.")
+def matrix_top() -> None:
+    matrix_cmd.matrix_command()
+
+
 @app.command(
     "council",
     help="Convene the Jedi Council: interactive chamber, or one-shot fan-out with a question.",
@@ -262,7 +269,9 @@ def devices_top() -> None:
 def council_top(
     question: Annotated[
         str | None,
-        typer.Argument(help="Ask the full council once and exit; omit for the interactive chamber."),
+        typer.Argument(
+            help="Ask the full council once and exit; omit for the interactive chamber."
+        ),
     ] = None,
 ) -> None:
     council_cmd.council_command(question)
@@ -432,9 +441,7 @@ def backup_estimate_top(
 
 @backup_app.command("snapshots", help="List restic snapshots from configured repos.")
 def backup_snapshots_top(
-    repo: Annotated[
-        str, typer.Option("--repo", help="primary | secondary | all.")
-    ] = "all",
+    repo: Annotated[str, typer.Option("--repo", help="primary | secondary | all.")] = "all",
     json_output: Annotated[bool, typer.Option("--json", help="Emit JSON.")] = False,
 ) -> None:
     try:
@@ -446,9 +453,7 @@ def backup_snapshots_top(
 
 @backup_app.command("verify", help="restic check on configured repos.")
 def backup_verify_top(
-    repo: Annotated[
-        str, typer.Option("--repo", help="primary | secondary | all.")
-    ] = "all",
+    repo: Annotated[str, typer.Option("--repo", help="primary | secondary | all.")] = "all",
 ) -> None:
     try:
         backup_cmd.backup_verify(repo=repo)
@@ -461,9 +466,7 @@ def backup_verify_top(
 def backup_restore_top(
     snapshot: Annotated[str, typer.Argument(help="Snapshot id (short or full).")],
     target: Annotated[Path, typer.Argument(help="Directory to restore into.")],
-    repo: Annotated[
-        str, typer.Option("--repo", help="primary | secondary.")
-    ] = "primary",
+    repo: Annotated[str, typer.Option("--repo", help="primary | secondary.")] = "primary",
 ) -> None:
     try:
         backup_cmd.backup_restore(snapshot=snapshot, target=target, repo=repo)
@@ -490,7 +493,9 @@ def cloud_setup_top(
             help="Backend: r2 (egress-free, recommended) | b2 | gdrive | github (Tier 0).",
         ),
     ] = "r2",
-    no_open: Annotated[bool, typer.Option("--no-open", help="Don't auto-open browser tabs.")] = False,
+    no_open: Annotated[
+        bool, typer.Option("--no-open", help="Don't auto-open browser tabs.")
+    ] = False,
     no_persist: Annotated[
         bool,
         typer.Option("--no-persist", help="Print YAML instead of editing instance.yaml."),
@@ -517,7 +522,9 @@ def deadman_beat_top(
     check: Annotated[str, typer.Argument(help="Check id, e.g. backup-fresh | restore-drill.")],
     max_hours: Annotated[
         int | None,
-        typer.Option("--max-hours", help="Override the staleness threshold (hours) for this check."),
+        typer.Option(
+            "--max-hours", help="Override the staleness threshold (hours) for this check."
+        ),
     ] = None,
 ) -> None:
     try:
@@ -546,9 +553,7 @@ def onboard_top(
     yes: Annotated[bool, typer.Option("--yes", "-y")] = False,
 ) -> None:
     try:
-        onboard_cmd.onboard_command(
-            recipe=recipe, backend=backend, no_open=no_open, yes=yes
-        )
+        onboard_cmd.onboard_command(recipe=recipe, backend=backend, no_open=no_open, yes=yes)
     except SanctumError as exc:
         _report(exc)
         raise typer.Exit(code=int(exc.exit_code)) from exc
@@ -656,7 +661,9 @@ def agent_logs_top(
 
 # ─── proxy subcommands ─────────────────────────────────────────────
 
-proxy_app = typer.Typer(help="Manage local provider proxies (claude-cli-proxy / sanctum-server / lmstudio).")
+proxy_app = typer.Typer(
+    help="Manage local provider proxies (claude-cli-proxy / sanctum-server / lmstudio)."
+)
 app.add_typer(proxy_app, name="proxy")
 
 
@@ -733,9 +740,7 @@ def keychain_rotate_top(
     yes: Annotated[bool, typer.Option("--yes", "-y")] = False,
 ) -> None:
     try:
-        keychain_command.keychain_rotate(
-            service=service, account=account, new_value=value, yes=yes
-        )
+        keychain_command.keychain_rotate(service=service, account=account, new_value=value, yes=yes)
     except SanctumError as exc:
         _report(exc)
         raise typer.Exit(code=int(exc.exit_code)) from exc
@@ -743,9 +748,7 @@ def keychain_rotate_top(
 
 # ─── bridge subcommands ────────────────────────────────────────────
 
-bridge_app = typer.Typer(
-    help="Talk to the Sanctum Bridge gateway (CF Access + HMAC + SharePoint)."
-)
+bridge_app = typer.Typer(help="Talk to the Sanctum Bridge gateway (CF Access + HMAC + SharePoint).")
 app.add_typer(bridge_app, name="bridge")
 
 
@@ -760,7 +763,9 @@ def bridge_health_top(
         raise typer.Exit(code=int(exc.exit_code)) from exc
 
 
-@bridge_app.command("whoami", help="Show effective bridge config (host + Keychain creds, redacted).")
+@bridge_app.command(
+    "whoami", help="Show effective bridge config (host + Keychain creds, redacted)."
+)
 def bridge_whoami_top() -> None:
     try:
         bridge_cmd.whoami_command()
@@ -804,9 +809,13 @@ def bridge_children_top(
         raise typer.Exit(code=int(exc.exit_code)) from exc
 
 
-@bridge_app.command("download", help="Download a SharePoint file (read), optionally extracting text.")
+@bridge_app.command(
+    "download", help="Download a SharePoint file (read), optionally extracting text."
+)
 def bridge_download_top(
-    path: Annotated[str, typer.Argument(help="Tenant-relative file path, e.g. Deals/Calder/memo.docx")],
+    path: Annotated[
+        str, typer.Argument(help="Tenant-relative file path, e.g. Deals/Calder/memo.docx")
+    ],
     out: Annotated[
         Path | None,
         typer.Option("--out", "-o", help="Write decoded bytes to this path.", dir_okay=False),
@@ -981,7 +990,9 @@ def soak_top(
     ] = 7.0,
     interval_sec: Annotated[
         int,
-        typer.Option("--interval-sec", help="Seconds between samples (ignored with --once).", min=1),
+        typer.Option(
+            "--interval-sec", help="Seconds between samples (ignored with --once).", min=1
+        ),
     ] = 3600,
     once: Annotated[
         bool,
@@ -1006,7 +1017,9 @@ def _report(exc: SanctumError) -> None:
         err_console.print(f"[dim]fix:[/] {exc.fix}")
 
 
-def _excepthook(_exc_type: type[BaseException], exc: BaseException, _tb: object) -> None:  # pragma: no cover
+def _excepthook(
+    _exc_type: type[BaseException], exc: BaseException, _tb: object
+) -> None:  # pragma: no cover
     """Catch-all for non-Sanctum exceptions; map to LOCAL_ERROR exit code."""
     err_console.print(f"[bold red]internal error:[/] {exc!r}")
     err_console.print("[dim]rerun with --traceback for details[/]")

@@ -9,12 +9,20 @@ pipes and NO_COLOR get a polite refusal, not frames.
 
 from __future__ import annotations
 
-import random  # noqa: TC003 - the Task 5 command shell constructs random.Random() at runtime
+import random
+import time
 from dataclasses import dataclass, replace
 
+import typer
 from rich.color import Color
+from rich.console import Console
+from rich.live import Live
 from rich.style import Style
 from rich.text import Text
+
+from sanctum_cli.commands.banner import should_animate
+
+console = Console()
 
 # Phosphor palette: head glyph → bright trail → the deep.
 _HEAD = (204, 255, 204)
@@ -99,3 +107,34 @@ def step_column(col: ColumnState, height: int, rng: random.Random) -> ColumnStat
     if col.head - col.trail > height:
         return spawn_column(height, rng)
     return replace(col, head=col.head + 1, phase=phase)
+
+
+def matrix_command() -> None:
+    """``sanctum matrix`` — there is no spoon, only launchd."""
+    if not should_animate(console.is_terminal):
+        console.print("[red]The Matrix needs a real terminal[/] — not a pipe.")
+        raise typer.Exit(1)
+    rng = random.Random()
+    columns: list[ColumnState] = []
+    try:
+        with Live(console=console, screen=True, refresh_per_second=20, transient=True) as live:
+            while True:
+                # re-read the size every frame so a resize reshapes the rain
+                # instead of crashing it; clamp so a pathological 0-row
+                # terminal can't blow up spawn_column. compose_frame indexes
+                # columns[x] for x < width, so the reconcile below MUST keep
+                # len(columns) >= width — that ordering is a hard contract.
+                width = max(1, console.size.width)
+                height = max(1, console.size.height)
+                if len(columns) < width:
+                    columns.extend(spawn_column(height, rng) for _ in range(width - len(columns)))
+                elif len(columns) > width:
+                    columns = columns[:width]
+                columns = [step_column(c, height, rng) for c in columns]
+                live.update(compose_frame(columns, width, height, rng))
+                time.sleep(0.05)
+    except KeyboardInterrupt:
+        # Live(screen=True) restores the terminal on context exit; the rain
+        # leaves no residue, only the parting line.
+        pass
+    console.print("[dim]Wake up, Neo… the chamber awaits.[/]")

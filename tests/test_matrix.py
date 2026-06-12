@@ -96,3 +96,14 @@ class TestFrame:
         style = head_span.style
         assert isinstance(style, Style)
         assert style.bold, "the head wears the bold phosphor highlight"
+
+
+class TestCommandGate:
+    def test_matrix_refuses_without_a_tty(self) -> None:
+        from typer.testing import CliRunner
+
+        from sanctum_cli.cli import app
+
+        result = CliRunner().invoke(app, ["matrix"])
+        assert result.exit_code == 1
+        assert "terminal" in result.output.lower()
