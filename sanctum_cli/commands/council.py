@@ -21,7 +21,7 @@ import os
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Annotated, cast
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -32,7 +32,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 
-from sanctum_cli.commands import banner
+from sanctum_cli.commands import banner, council_tools
 
 console = Console()
 
@@ -44,6 +44,12 @@ _ANTHROPIC_VERSION = "2023-06-01"
 _MAX_TOKENS = 1200
 DEFAULT_SEAT = "yoda"
 
+TOOL_CALL_CAP = 8
+
+
+class ToolsRejected(RuntimeError):  # noqa: N818
+    """Raised when the bridge rejects a tools-bearing request (4xx)."""
+
 
 @dataclass(frozen=True)
 class Seat:
@@ -54,6 +60,7 @@ class Seat:
     persona: str
     style: str  # rich color for the nameplate
     verb: str  # what the seat does while it thinks ("ponders", …)
+    tools: tuple[str, ...] = ()
 
 
 SEATS: dict[str, Seat] = {
@@ -66,17 +73,15 @@ SEATS: dict[str, Seat] = {
             " platform on a Mac Mini ('manoir') guarding a family network."
             " Speak with inverted Yoda syntax sparingly (one or two phrases,"
             " never a parody), favour wisdom, trade-offs, and the long view."
-            " Be concise: a council chamber, not a lecture hall. You are a chat"
-            " seat with NO tools — never claim to have run a command, read a"
-            " file, or observed live state. On a system-health question (e.g."
-            " 'is the Signal link working?'), do NOT improvise a diagnosis from"
-            " memory or old relics: name the authoritative check the operator"
-            " should run (for Signal that is `yoda-chat status` on the VM) and"
-            " say plainly that you cannot observe it from this chamber. Crying"
-            " wolf from guesswork is worse than admitting you must check."
+            " Be concise: a council chamber, not a lecture hall. On a"
+            " system-health question (e.g. 'is the Signal link working?'),"
+            " do NOT improvise a diagnosis from memory or old relics: use"
+            " your instruments to observe live state, or name the authoritative"
+            " check the operator should run and say plainly what you observed."
         ),
         style="green",
         verb="ponders",
+        tools=("sanctum_status", "sanctum_doctor", "agent_list", "logs_tail"),
     ),
     "windu": Seat(
         label="Windu",
@@ -155,6 +160,7 @@ SEATS: dict[str, Seat] = {
         ),
         style="red",
         verb="checks the runbook",
+        tools=("sanctum_status", "sanctum_doctor", "agent_list", "logs_tail"),
     ),
 }
 
@@ -309,6 +315,129 @@ def _complete(seat: Seat, messages: list[dict[str, str]], *, system: str) -> str
     return "".join(parts).strip()
 
 
+def _post_with_tools(
+    seat: Seat,
+    messages: list[dict[str, object]],
+    *,
+    system: str,
+    tools: list[dict[str, object]],
+) -> dict[str, object]:
+    """Buffered POST with a tools array; returns the raw response dict.
+
+    On 400-499 raises ToolsRejected so the caller can degrade to the
+    streaming path (the primary bridge can't tool yet — phase-0 finding).
+    """
+    payload: dict[str, object] = {
+        "model": seat.model,
+        "max_tokens": _MAX_TOKENS,
+        "system": system,
+        "messages": messages,
+        "tools": tools,
+    }
+    with httpx.Client(timeout=httpx.Timeout(180.0, connect=10.0)) as client:
+        resp = client.post(f"{_proxyd_url()}/v1/messages", headers=_headers(), json=payload)
+    status = resp.status_code
+    if 400 <= status <= 499:
+        raise ToolsRejected(f"HTTP {status}: {resp.text[:160]}")
+    if status != 200:
+        raise RuntimeError(f"{seat.label} seat HTTP {status}: {resp.text[:160]}")
+    result: dict[str, object] = resp.json()
+    return result
+
+
+def _persona(seat: Seat) -> str:
+    """Compose the system prompt for a seat.
+
+    Armed seats get an instruments clause enumerating their tools plus the
+    live-state contract. Unarmed seats get an honest no-tools declaration.
+    """
+    if seat.tools:
+        mounted = council_tools.mount_tools(seat.tools, is_tty=True)
+        tool_lines = "\n".join(f"- {t.name} — {t.description}" for t in mounted)
+        return (
+            seat.persona
+            + "\n\nInstruments you have:\n"
+            + tool_lines
+            + "\n\nClaims about live state must come from a tool result in this"
+            " conversation, not from memory. A capability you lack, name the"
+            " operator's command instead. Tool inputs are plain JSON — no"
+            " styling, no inversion."
+        )
+    return (
+        seat.persona + "\n\nYou are a chat seat with NO tools — never claim to have run a"
+        " command, read a file, or observed live state."
+    )
+
+
+def _tool_turn(seat: Seat, messages: list[dict[str, object]]) -> str:
+    """Buffered Anthropic tool-use loop for armed seats. The cap and the
+    breaker keep a confused model from sawing at the instruments all
+    night (council #6). Statuses run sequentially — verb dots while the
+    model thinks, instrument dots while a tool runs — never nested."""
+    mounted = council_tools.mount_tools(seat.tools, is_tty=console.is_terminal)
+    specs: list[dict[str, object]] = [
+        {"name": t.name, "description": t.description, "input_schema": t.input_schema}
+        for t in mounted
+    ]
+    convo: list[dict[str, object]] = list(messages)
+    session = f"repl-{os.getpid()}"
+    calls = 0
+    consecutive_errors = 0
+    while True:
+        with console.status(
+            thinking_markup(seat), spinner="simpleDotsScrolling", spinner_style=seat.style
+        ):
+            data = _post_with_tools(seat, convo, system=_persona(seat), tools=specs)
+        blocks = data.get("content", [])
+        if not isinstance(blocks, list):
+            blocks = []
+        tool_uses = [b for b in blocks if isinstance(b, dict) and b.get("type") == "tool_use"]
+        if data.get("stop_reason") != "tool_use" or not tool_uses:
+            return "".join(
+                b.get("text", "") for b in blocks if isinstance(b, dict) and b.get("type") == "text"
+            ).strip()
+        results: list[dict[str, object]] = []
+        budget_hit = False
+        for block in tool_uses:
+            calls += 1
+            if calls > TOOL_CALL_CAP or consecutive_errors >= 2:
+                budget_hit = True
+                results.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": block["id"],
+                        "content": "tool budget exhausted — answer with what you have",
+                        "is_error": True,
+                    }
+                )
+                continue
+            with console.status(
+                f"[{seat.style}]{seat.label} consults the instruments… ({block['name']})[/]",
+                spinner="simpleDotsScrolling",
+                spinner_style=seat.style,
+            ):
+                result = council_tools.run_tool(
+                    str(block["name"]),
+                    dict(block.get("input") or {}),
+                    seat=seat.label,
+                    session=session,
+                )
+            consecutive_errors = consecutive_errors + 1 if result.is_error else 0
+            results.append(
+                {
+                    "type": "tool_result",
+                    "tool_use_id": block["id"],
+                    "content": result.content,
+                    "is_error": result.is_error,
+                }
+            )
+        if budget_hit:
+            # Don't loop back to the model — return a capped fallback.
+            return "(tool call cap reached — partial answer only)"
+        convo.append({"role": "assistant", "content": blocks})
+        convo.append({"role": "user", "content": results})
+
+
 # ── Fan-out: the full council deliberates ─────────────────────────────
 
 
@@ -437,15 +566,29 @@ def _repl() -> None:
             continue
         if action.kind == "switch_say":
             active = line.strip()[1:].split(" ")[0].lower()
-        # say / switch_say → stream from the active seat with shared history
+        # say / switch_say → armed seats try the tool loop first; unarmed
+        # (and armed seats whose bridge rejects tools) fall through to stream.
         seat = SEATS[active]
         transcript.add("user", action.arg)
+        if seat.tools:
+            try:
+                answer = _tool_turn(seat, cast("list[dict[str, object]]", transcript.messages()))
+                console.print(f"[{seat.style}]{seat.label}:[/] {answer}", soft_wrap=True)
+                transcript.add("assistant", answer)
+                continue
+            except ToolsRejected:
+                console.print("[dim](seat's model declines tools — chat only this turn)[/]")
+            except Exception as e:
+                console.print(f"[red]⚠ {e}[/]")
+                transcript.add("assistant", "(seat unavailable)")
+                continue
+        # streaming path — runs when unarmed OR after ToolsRejected
         chunks: list[str] = []
         try:
             # _stream is lazy — the request fires on the first pull, so the
             # status animates exactly across the model's thinking dead-air
             # and vanishes the moment the first word lands.
-            stream = _stream(seat, transcript.messages(), system=seat.persona)
+            stream = _stream(seat, transcript.messages(), system=_persona(seat))
             with console.status(
                 thinking_markup(seat), spinner="simpleDotsScrolling", spinner_style=seat.style
             ):
