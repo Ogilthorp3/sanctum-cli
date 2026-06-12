@@ -35,6 +35,12 @@ instance:
   slug: manoir
   timezone: America/New_York
 
+notifications:
+  owner_name: Test Operator
+  signal:
+    enabled: true
+    target: '+15555550100'
+
 cli:
   default_provider: claude
   routing:

@@ -267,6 +267,7 @@ def test_onboard_family_interview_writes_child_with_normalized_phone(
         "child\n"  # role
         "(514) 555-0142\n"  # loosely formatted NA number
         "y\n"  # confirm the +1 assumption
+        "\n"  # no device MAC → done with devices
         "\n"  # empty name → done
     )
     assert code == 0, out
@@ -305,6 +306,7 @@ def test_onboard_family_interview_merge_never_clobbers_existing_member(
     code, out = _invoke_family_onboard_interactive(
         "\n\n"
         "Maya\nchild\n\n"  # same slug, no phone — must be skipped, not merged
+        "\n"  # no device MAC → done with Maya's devices
         "Theo\nparent\n"  # parents are never asked for a phone
         "\n"  # done
     )
@@ -350,6 +352,7 @@ def test_onboard_family_interview_bad_phone_reprompts_then_accepts(
         "Noa\nchild\n"
         "555-0142\n"  # too short — must re-prompt, never store
         "+33 6 12 34 56 78\n"  # then a valid international number
+        "\n"  # no device MAC → done with devices
         "\n"
     )
     assert code == 0, out
@@ -363,3 +366,84 @@ def test_family_setup_gate_listed_before_firewalla_compat() -> None:
     gates = onboard.RECIPE_GATES["family"]
     assert "family-setup" in gates
     assert gates.index("family-setup") < gates.index("firewalla-compat")
+
+
+# ── Per-setup identity collection (beta portability) ──────────────────
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("AA:BB:CC:DD:EE:FF", "AA:BB:CC:DD:EE:FF"),
+        ("aa:bb:cc:dd:ee:ff", "AA:BB:CC:DD:EE:FF"),
+        ("aa-bb-cc-dd-ee-ff", "AA:BB:CC:DD:EE:FF"),
+        ("aabb.ccdd.eeff", "AA:BB:CC:DD:EE:FF"),
+        ("aabbccddeeff", "AA:BB:CC:DD:EE:FF"),
+        ("  AA:BB:CC:DD:EE:FF  ", "AA:BB:CC:DD:EE:FF"),
+        ("AA:BB:CC:DD:EE", None),
+        ("AA:BB:CC:DD:EE:FF:00", None),
+        ("ZZ:BB:CC:DD:EE:FF", None),
+        ("", None),
+    ],
+)
+def test_normalize_mac(raw: str, expected: str | None) -> None:
+    """Any common MAC spelling -> canonical upper colon form; junk -> None."""
+    assert onboard.normalize_mac(raw) == expected
+
+
+def test_parse_device_selection() -> None:
+    """A picker selection string resolves to chosen device dicts, in order, deduped."""
+    devs = [
+        {"name": "iPhone", "mac": "A1"},
+        {"name": "iPad", "mac": "B2"},
+        {"name": "Mac", "mac": "C3"},
+    ]
+    assert onboard.parse_device_selection("", devs) == []
+    assert onboard.parse_device_selection("2", devs) == [devs[1]]
+    assert onboard.parse_device_selection("1,3", devs) == [devs[0], devs[2]]
+    assert onboard.parse_device_selection("3 1", devs) == [devs[2], devs[0]]
+    assert onboard.parse_device_selection("all", devs) == devs
+    assert onboard.parse_device_selection("9", devs) == []
+    assert onboard.parse_device_selection("2,2", devs) == [devs[1]]
+
+
+def test_set_instance_identity_writes_owner_and_signal_preserving_other_blocks(
+    tmp_path: Path,
+) -> None:
+    """Owner name + Signal target land under notifications; sibling blocks survive."""
+    inst = tmp_path / "instance.yaml"
+    inst.write_text(
+        "instance:\n  name: X\n  slug: x\nservices:\n  proxyd:\n    port: 4040\n",
+        encoding="utf-8",
+    )
+    onboard.set_instance_identity("Alice", "+15551234567", path=inst)
+    data = yaml.safe_load(inst.read_text(encoding="utf-8"))
+    assert data["notifications"]["owner_name"] == "Alice"
+    assert data["notifications"]["signal"]["target"] == "+15551234567"
+    assert data["notifications"]["signal"]["enabled"] is True
+    assert data["services"]["proxyd"]["port"] == 4040  # untouched
+    assert data["instance"]["slug"] == "x"
+    assert (tmp_path / "instance.yaml.bak").exists()
+
+
+def test_onboard_family_interview_collects_child_device_mac(
+    full_instance_yaml: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A child's manually entered MAC lands in personal_devices, canonicalized."""
+    monkeypatch.setenv("SANCTUM_INSTANCE_FILE", str(full_instance_yaml))
+    devices = tmp_path / "devices.yaml"
+    monkeypatch.setenv("SANCTUM_DEVICES_FILE", str(devices))
+    code, out = _invoke_family_onboard_interactive(
+        "\n\n"
+        "Maya\nchild\n"  # name, role
+        "\n"  # no phone
+        "aa:bb:cc:dd:ee:ff\n"  # one device MAC (bridge unreachable -> manual)
+        "Maya iPhone\n"  # device label
+        "\n"  # empty MAC -> done with devices
+        "\n"  # empty name -> done with members
+    )
+    assert code == 0, out
+    data = yaml.safe_load(devices.read_text(encoding="utf-8"))
+    assert data["family"]["maya"]["personal_devices"] == [
+        {"name": "Maya iPhone", "mac": "AA:BB:CC:DD:EE:FF"}
+    ]

@@ -226,6 +226,29 @@ def instance_path() -> Path:
     return Path(override).expanduser() if override else DEFAULT_INSTANCE_FILE
 
 
+def instance_value(dotted_key: str, default: object = None, path: Path | None = None) -> Any:
+    """Read an arbitrary dotted key from instance.yaml.
+
+    For per-setup blocks that :class:`Config` deliberately does not model
+    (``vcs.*``, ``services.*``, ``notifications.*``) but that need to stop being
+    hardcoded — e.g. the GitHub owner, the deadman repo, the bridge URL. Returns
+    ``default`` on any read/parse miss or absent key, so callers keep a safe
+    fallback and never hard-fail on a fresh box.
+    """
+    target = path or instance_path()
+    try:
+        raw = yaml.safe_load(target.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError):
+        return default
+    cur: Any = raw
+    for key in dotted_key.split("."):
+        if isinstance(cur, dict) and key in cur:
+            cur = cur[key]
+        else:
+            return default
+    return cur
+
+
 def load(path: Path | None = None) -> Config:
     """Read and validate the instance config.
 

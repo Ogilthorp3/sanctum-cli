@@ -22,9 +22,16 @@ import socket
 import subprocess
 import time
 
+from sanctum_cli import config
 from sanctum_cli.errors import UserError
 
-DEFAULT_REPO = "Ogilthorp3/sanctum-backup-deadman"
+DEFAULT_REPO = "Ogilthorp3/sanctum-backup-deadman"  # fallback; SoT key vcs.deadman_repo
+
+
+def default_repo() -> str:
+    """Deadman heartbeat repo — instance.yaml ``vcs.deadman_repo``, else fallback.
+    Per-setup: a beta operator can't push to Ogilthorp3's repo."""
+    return str(config.instance_value("vcs.deadman_repo", DEFAULT_REPO))
 DEFAULT_PATH = "heartbeats.json"
 DEFAULT_MAX_HOURS: dict[str, int] = {"backup-fresh": 26, "restore-drill": 192}
 GH_TIMEOUT_S = 30
@@ -78,7 +85,7 @@ def beat(
     check: str,
     *,
     max_hours: int | None = None,
-    repo: str = DEFAULT_REPO,
+    repo: str | None = None,
     path: str = DEFAULT_PATH,
 ) -> str:
     """Record a success heartbeat for ``check`` and push it off-box via ``gh``.
@@ -87,6 +94,7 @@ def beat(
     backup wrapper can surface it — a silently-dropped heartbeat would make the
     off-box Action false-alarm.
     """
+    repo = repo or default_repo()
     mh = max_hours if max_hours is not None else DEFAULT_MAX_HOURS.get(check, 26)
     key = f"{host_slug()}:{check}"
     now = int(time.time())
