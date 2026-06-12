@@ -50,7 +50,7 @@ console = Console()
 # misconfiguration (fix included) before relying on it. Listed as data so
 # tests can assert membership and ordering.
 RECIPE_GATES: dict[str, tuple[str, ...]] = {
-    "family": ("identity-setup", "family-setup", "firewalla-compat"),
+    "family": ("identity-setup", "family-setup", "firewalla-pairing", "firewalla-compat"),
 }
 
 # ── Surface polish ────────────────────────────────────────────────────
@@ -188,6 +188,9 @@ def onboard_command(
         elif gate == "family-setup":
             console.print(f"\n[bold]Step {step_no}.[/] Family setup")
             _run_family_setup(yes=yes)
+        elif gate == "firewalla-pairing":
+            console.print(f"\n[bold]Step {step_no}.[/] Firewalla pairing")
+            _run_firewalla_pairing(yes=yes)
         elif gate == "firewalla-compat":
             console.print(f"\n[bold]Step {step_no}.[/] Firewalla compatibility")
             _run_firewalla_compat()
@@ -643,6 +646,111 @@ def _run_identity_setup(*, yes: bool) -> None:
         if bit
     )
     console.print(f"  [green]✓[/] saved operator identity ({summary or 'nothing entered'})")
+
+
+def set_firewalla_bridge(
+    *,
+    token: str,
+    device_ip: str,
+    device_mac: str,
+    port: int,
+    path: Path | None = None,
+    token_file: Path | None = None,
+) -> None:
+    """Persist a VALIDATED Firewalla bridge pairing.
+
+    Writes ``services.firewalla_bridge`` (enabled + port + device_ip/mac) into
+    instance.yaml via raw read-modify-write (sibling blocks preserved), and the
+    token into the mode-600 secrets file — NEVER into instance.yaml (which is
+    world-readable config, not a secret store). Callers must only invoke this
+    after :func:`screen_time.validate_firewalla_pairing` returns ``ok``.
+    """
+    target = Path(path) if path else config.instance_path()
+    data: dict[str, Any] = {}
+    if target.exists():
+        loaded = yaml.safe_load(target.read_text(encoding="utf-8"))
+        if isinstance(loaded, dict):
+            data = loaded
+    services = data.get("services")
+    if not isinstance(services, dict):
+        services = data["services"] = {}
+    services["firewalla_bridge"] = {
+        "enabled": True,
+        "port": port,
+        "device_ip": device_ip,
+        "device_mac": device_mac,
+    }
+    if target.exists():
+        backup = target.parent / (target.name + ".bak")
+        backup.write_text(target.read_text(encoding="utf-8"), encoding="utf-8")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True), encoding="utf-8")
+
+    # Token → secrets file, fail-closed perms (600). Created before write so the
+    # token never lands on disk world-readable even briefly.
+    tf = Path(token_file) if token_file else (Path.home() / ".sanctum/secrets/firewalla-bridge-token")
+    tf.parent.mkdir(parents=True, exist_ok=True)
+    tf.touch(mode=0o600, exist_ok=True)
+    tf.chmod(0o600)
+    tf.write_text(token.strip() + "\n", encoding="utf-8")
+
+
+def _run_firewalla_pairing(*, yes: bool) -> None:
+    """Interactive Firewalla bridge pairing — fail-closed.
+
+    Collects the bridge URL/token + device IP/MAC, runs an AUTHENTICATED probe
+    (:func:`screen_time.validate_firewalla_pairing`), and persists the pairing
+    ONLY on a genuine authenticated 200. A wrong token, an unreachable bridge,
+    or a malformed response is surfaced with the precise reason and the pairing
+    is NOT written — because a curfew engine pointed at an unpaired bridge
+    enforces nothing, and a false "paired" hides that until the first missed
+    bedtime. ``--yes`` skips (interactive); re-run later via the same gate.
+    """
+    from sanctum_cli.commands import screen_time
+
+    if yes:
+        console.print(
+            "  [yellow]skipped[/] — interactive step; run `sanctum onboard` without "
+            "--yes to pair the Firewalla bridge"
+        )
+        return
+    if not Confirm.ask("  pair the Firewalla screen-time bridge now?", default=True):
+        console.print("  [dim]skipped — curfews stay inert until the bridge is paired[/]")
+        return
+
+    url = Prompt.ask("  bridge URL", default="http://127.0.0.1:1984").strip()
+    for attempt in range(3):
+        token = Prompt.ask("  bridge token", password=True).strip()
+        result = screen_time.validate_firewalla_pairing(url, token)
+        if result.ok:
+            device_ip = Prompt.ask("  Firewalla device IP (LAN gateway)", default="").strip()
+            device_mac = Prompt.ask("  Firewalla device MAC", default="").strip()
+            set_firewalla_bridge(
+                token=token,
+                device_ip=device_ip,
+                device_mac=device_mac,
+                port=_port_from_url(url),
+            )
+            console.print(f"  [green]✓[/] bridge paired — {result.detail}")
+            return
+        console.print(f"  [red]✗[/] not paired: {result.detail}")
+        if result.state == "auth_rejected" and attempt < 2:
+            console.print("  [dim]check the token and try again[/]")
+            continue
+        break
+    console.print(
+        "  [yellow]bridge NOT paired[/] — screen-time curfews will not enforce until you "
+        "complete pairing. Re-run `sanctum onboard` (or `sanctum screen-time compat`) after "
+        "fixing the bridge."
+    )
+
+
+def _port_from_url(url: str) -> int:
+    """Extract the port from a bridge URL; default 1984."""
+    import urllib.parse
+
+    parsed = urllib.parse.urlparse(url)
+    return parsed.port or 1984
 
 
 def _run_firewalla_compat() -> None:

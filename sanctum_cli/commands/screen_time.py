@@ -394,6 +394,50 @@ def _fetch_bridge_json(path: str) -> dict[str, Any] | None:
         return None
 
 
+class PairingResult(NamedTuple):
+    """Outcome of an authenticated bridge probe. ``ok`` is True ONLY for a
+    genuine authenticated 200 — every other state is fail-closed (not paired)."""
+
+    state: str  # paired | auth_rejected | unreachable | bad_response | no_token
+    ok: bool
+    detail: str
+
+
+def validate_firewalla_pairing(url: str, token: str, *, timeout: float = 10.0) -> PairingResult:
+    """Probe the bridge with the candidate token and classify the result.
+
+    Fail-closed: onboarding writes ``enabled: true`` ONLY when this returns
+    ``ok``. A wrong token (401/403), an unreachable bridge (connect error /
+    timeout), or a 200 that isn't the expected host list all return ``ok=False``
+    with a precise, actionable ``state`` — never a silent "looks fine".
+    """
+    import httpx
+
+    token = (token or "").strip()
+    if not token:
+        return PairingResult("no_token", False, "no token provided — cannot authenticate")
+    try:
+        resp = httpx.get(
+            f"{url.rstrip('/')}/hosts",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=timeout,
+        )
+    except httpx.HTTPError as exc:
+        return PairingResult("unreachable", False, f"bridge unreachable at {url}: {exc}")
+    if resp.status_code in (401, 403):
+        return PairingResult("auth_rejected", False, f"bridge rejected the token (HTTP {resp.status_code})")
+    if resp.status_code != 200:
+        return PairingResult("bad_response", False, f"bridge returned HTTP {resp.status_code}")
+    try:
+        data = resp.json()
+    except ValueError:
+        return PairingResult("bad_response", False, "bridge returned 200 but the body was not JSON")
+    if not isinstance(data, (list, dict)):
+        return PairingResult("bad_response", False, "bridge /hosts returned an unexpected shape")
+    n = len(data)
+    return PairingResult("paired", True, f"authenticated — bridge sees {n} device(s)")
+
+
 def _managed_macs(config: dict[str, Any]) -> list[str]:
     """Every MAC the engine can be asked to enforce (family + shared + screens)."""
     macs: set[str] = set()
