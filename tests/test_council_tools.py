@@ -166,6 +166,35 @@ class TestRegistry:
         line = json.loads((tmp_path / "a.jsonl").read_text().splitlines()[0])
         assert line["outcome"] == "error"
 
+    def test_dispatch_layer_mutate_gate_dormant(self, tmp_path: Path) -> None:
+        # register a stub mutate tool; run_tool must refuse it structurally
+        def no_op(params: dict[str, object]) -> str:
+            return "should not run"
+
+        stub_mutate = ct.CouncilTool(
+            name="mutate_stub",
+            description="d",
+            input_schema={"type": "object"},
+            kind="mutate",
+            run=no_op,
+        )
+        result = ct.run_tool(
+            "mutate_stub",
+            {},
+            seat="Yoda",
+            session="s",
+            ledger=tmp_path / "a.jsonl",
+            registry={"mutate_stub": stub_mutate},
+        )
+        # must fail with the dormancy message
+        assert result.is_error
+        assert "not wired in phase 1" in result.content
+        # must be audited with outcome error
+        line = json.loads((tmp_path / "a.jsonl").read_text().splitlines()[0])
+        assert line["outcome"] == "error"
+        assert line["tool"] == "mutate_stub"
+        assert line["kind"] == "mutate"
+
 
 class TestLogsRuntimeClamp:
     """Fix 2a — the CODE clamp runs at runtime, not just in the schema."""
@@ -318,6 +347,19 @@ class TestMutateGateDormant:
         assert ct.confirm_mutation("restart LaunchAgent com.sanctum.vault") is False  # 'yes' != y
         assert ct.confirm_mutation("restart LaunchAgent com.sanctum.vault") is True  # y
         assert ct.confirm_mutation("restart LaunchAgent com.sanctum.vault") is True  # Y
+
+    def test_ctrl_c_and_eof_decline(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def interrupt(prompt: str) -> str:
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(ct, "_read_confirmation", interrupt)
+        assert ct.confirm_mutation("restart com.sanctum.vault") is False
+
+        def eof(prompt: str) -> str:
+            raise EOFError
+
+        monkeypatch.setattr(ct, "_read_confirmation", eof)
+        assert ct.confirm_mutation("restart com.sanctum.vault") is False
 
 
 class TestRealReadTools:

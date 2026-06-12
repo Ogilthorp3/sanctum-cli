@@ -136,6 +136,24 @@ def run_tool(
         return ToolResult(content=msg, is_error=True)
 
     tool = resolved_registry[name]
+
+    if tool.kind == "mutate":
+        # phase 1 dispatch refuses mutations structurally — dormancy is
+        # enforced here too, not only by what the registry contains
+        duration_ms = int((time.perf_counter() - t0) * 1000)
+        audit(
+            resolved_ledger,
+            seat=seat,
+            session=session,
+            tool=name,
+            params=params,
+            kind=tool.kind,
+            mode="auto",
+            outcome="error",
+            duration_ms=duration_ms,
+        )
+        return ToolResult("mutate path not wired in phase 1", is_error=True)
+
     try:
         raw = tool.run(params)
         content = redact(raw)
@@ -189,10 +207,19 @@ def _read_confirmation(prompt: str) -> str:
 
 def confirm_mutation(resolved_action: str) -> bool:
     """Show the RESOLVED action, not a paraphrase; only a literal y/Y
-    proceeds. Enter is no. 'yes' is no — the gate is strict on purpose
+    proceeds. Enter is no. 'yes' is no. Ctrl-C is no. A closed stdin is
+    no — every exit from this prompt that is not a literal yes declines
     (council #3, #7).
+
+    Spec delta, recorded: the spec also demands timeout=no; a blocking
+    prompt is still fail-closed (nothing fires while it waits), so the
+    timeout lands with phase 2's verbs, where the input primitive may
+    change anyway.
     """
-    answer = _read_confirmation(f"⚠ mutation: {resolved_action} — proceed? [y/N] ")
+    try:
+        answer = _read_confirmation(f"⚠ mutation: {resolved_action} — proceed? [y/N] ")
+    except (EOFError, KeyboardInterrupt):
+        return False
     return answer.strip() in ("y", "Y")
 
 
