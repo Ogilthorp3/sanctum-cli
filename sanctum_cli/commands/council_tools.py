@@ -161,6 +161,41 @@ def run_tool(
     return ToolResult(content=content, is_error=is_error)
 
 
+# ─── Mutate gate (dormant) ──────────────────────────────────────────
+
+
+def mount_tools(
+    allowed: tuple[str, ...],
+    *,
+    registry: dict[str, CouncilTool] | None = None,
+    is_tty: bool,
+) -> list[CouncilTool]:
+    """The seat's allowlist intersected with what this session may hold.
+
+    Mutations are simply not mounted when no human is at the REPL — a
+    confirm gate with no one to confirm fails closed (council #8).
+    """
+    reg = REGISTRY if registry is None else registry
+    tools = [reg[name] for name in allowed if name in reg]
+    if not is_tty:
+        tools = [t for t in tools if t.kind == "read"]
+    return tools
+
+
+def _read_confirmation(prompt: str) -> str:
+    """Separated for tests; the REPL's stdin is the only authority."""
+    return input(prompt)
+
+
+def confirm_mutation(resolved_action: str) -> bool:
+    """Show the RESOLVED action, not a paraphrase; only a literal y/Y
+    proceeds. Enter is no. 'yes' is no — the gate is strict on purpose
+    (council #3, #7).
+    """
+    answer = _read_confirmation(f"⚠ mutation: {resolved_action} — proceed? [y/N] ")
+    return answer.strip() in ("y", "Y")
+
+
 # ─── Executors ───────────────────────────────────────────────────────
 
 
@@ -277,9 +312,7 @@ def _run_logs_tail(params: dict[str, object]) -> str:
             dropped += 1
         trimmed = headers + content_only
         if dropped:
-            trimmed.insert(
-                0, f"[truncated: {dropped} older lines dropped to fit the tool budget]"
-            )
+            trimmed.insert(0, f"[truncated: {dropped} older lines dropped to fit the tool budget]")
         return "\n".join(trimmed)
 
     return content

@@ -282,6 +282,44 @@ class TestStatusNoRestic:
         )
 
 
+class TestMutateGateDormant:
+    def test_no_mutate_tool_ships_in_phase_one(self) -> None:
+        assert not [t for t in ct.REGISTRY.values() if t.kind == "mutate"]
+
+    def test_mount_excludes_mutations_without_tty(self) -> None:
+        stub_read = ct.CouncilTool(
+            name="r",
+            description="d",
+            input_schema={"type": "object"},
+            kind="read",
+            run=lambda p: "",
+        )
+        stub_mut = ct.CouncilTool(
+            name="m",
+            description="d",
+            input_schema={"type": "object"},
+            kind="mutate",
+            run=lambda p: "",
+        )
+        reg = {"r": stub_read, "m": stub_mut}
+        assert {t.name for t in ct.mount_tools(("r", "m"), registry=reg, is_tty=True)} == {
+            "r",
+            "m",
+        }
+        assert {t.name for t in ct.mount_tools(("r", "m"), registry=reg, is_tty=False)} == {"r"}, (
+            "fail closed: no human at the REPL, no mutations mounted"
+        )
+
+    def test_confirm_requires_explicit_yes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        answers = iter(["", "n", "yes", "y", "Y"])
+        monkeypatch.setattr(ct, "_read_confirmation", lambda prompt: next(answers))
+        assert ct.confirm_mutation("restart LaunchAgent com.sanctum.vault") is False  # Enter
+        assert ct.confirm_mutation("restart LaunchAgent com.sanctum.vault") is False  # n
+        assert ct.confirm_mutation("restart LaunchAgent com.sanctum.vault") is False  # 'yes' != y
+        assert ct.confirm_mutation("restart LaunchAgent com.sanctum.vault") is True  # y
+        assert ct.confirm_mutation("restart LaunchAgent com.sanctum.vault") is True  # Y
+
+
 class TestRealReadTools:
     @pytest.mark.skipif(
         not any(
