@@ -440,12 +440,23 @@ def _repl() -> None:
         # say / switch_say → stream from the active seat with shared history
         seat = SEATS[active]
         transcript.add("user", action.arg)
-        console.print(f"[{seat.style}]{seat.label}:[/] ", end="")
         chunks: list[str] = []
         try:
-            for delta in _stream(seat, transcript.messages(), system=seat.persona):
-                chunks.append(delta)
-                console.print(delta, end="", soft_wrap=True)
+            # _stream is lazy — the request fires on the first pull, so the
+            # status animates exactly across the model's thinking dead-air
+            # and vanishes the moment the first word lands.
+            stream = _stream(seat, transcript.messages(), system=seat.persona)
+            with console.status(
+                thinking_markup(seat), spinner="simpleDotsScrolling", spinner_style=seat.style
+            ):
+                first = next(stream, None)
+            console.print(f"[{seat.style}]{seat.label}:[/] ", end="")
+            if first is not None:
+                chunks.append(first)
+                console.print(first, end="", soft_wrap=True)
+                for delta in stream:
+                    chunks.append(delta)
+                    console.print(delta, end="", soft_wrap=True)
             console.print()
         except Exception as e:
             console.print(f"\n[red]⚠ {e}[/]")
