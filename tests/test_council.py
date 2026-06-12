@@ -94,7 +94,9 @@ class TestSseParsing:
 
 
 class TestFanOut:
-    def test_council_ask_collects_every_seat_and_synthesizes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_council_ask_collects_every_seat_and_synthesizes(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         calls: list[tuple[str, str]] = []
 
         def fake_complete(seat: cc.Seat, messages: list[dict[str, str]], *, system: str) -> str:
@@ -125,3 +127,18 @@ class TestFanOut:
         assert result.answers["Cilghal"].startswith("⚠")
         assert result.answers["Windu"] == "aye"
         assert result.synthesis  # synthesis still runs on the survivors
+
+
+class TestThinkingIndicator:
+    def test_every_seat_waits_in_character(self) -> None:
+        # every seat has a verb, and the verb composes cleanly with the
+        # ellipsis the markup helper appends
+        for seat in cc.SEATS.values():
+            assert seat.verb, f"{seat.label} has no thinking verb"
+            assert seat.verb[-1] not in ".…!?", f"{seat.label} verb carries punctuation"
+
+    def test_thinking_markup_carries_label_verb_and_colour(self) -> None:
+        seat = cc.SEATS["yoda"]
+        line = cc.thinking_markup(seat)
+        assert "Yoda ponders…" in line
+        assert f"[{seat.style}]" in line

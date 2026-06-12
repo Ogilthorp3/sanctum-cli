@@ -53,6 +53,7 @@ class Seat:
     model: str
     persona: str
     style: str  # rich color for the nameplate
+    verb: str  # what the seat does while it thinks ("ponders", …)
 
 
 SEATS: dict[str, Seat] = {
@@ -75,6 +76,7 @@ SEATS: dict[str, Seat] = {
             " wolf from guesswork is worse than admitting you must check."
         ),
         style="green",
+        verb="ponders",
     ),
     "windu": Seat(
         label="Windu",
@@ -86,6 +88,7 @@ SEATS: dict[str, Seat] = {
             " it has been searched for weapons. Direct, short sentences."
         ),
         style="magenta",
+        verb="deliberates",
     ),
     "quigon": Seat(
         label="Qui-Gon",
@@ -97,6 +100,7 @@ SEATS: dict[str, Seat] = {
             " step, not the grand refactor."
         ),
         style="cyan",
+        verb="builds",
     ),
     "mundi": Seat(
         label="Ki-Adi-Mundi",
@@ -108,6 +112,7 @@ SEATS: dict[str, Seat] = {
             " have them, ranges when you don't, never vibes dressed as data."
         ),
         style="yellow",
+        verb="computes",
     ),
     "cilghal": Seat(
         label="Cilghal",
@@ -119,6 +124,7 @@ SEATS: dict[str, Seat] = {
             " not observed."
         ),
         style="blue",
+        verb="examines",
     ),
     "jocasta": Seat(
         label="Jocasta",
@@ -132,6 +138,7 @@ SEATS: dict[str, Seat] = {
             " Precise, archival, a touch wry."
         ),
         style="bright_white",
+        verb="consults the archives",
     ),
     "mothma": Seat(
         label="Mon Mothma",
@@ -146,9 +153,15 @@ SEATS: dict[str, Seat] = {
             " is the runbook, and what breaks under load or at 3 a.m. Calm,"
             " organized, procedural."
         ),
-        style="bright_blue",
+        style="red",
+        verb="checks the runbook",
     ),
 }
+
+
+def thinking_markup(seat: Seat) -> str:
+    """The status line shown while a seat thinks — in character, in colour."""
+    return f"[{seat.style}]{seat.label} {seat.verb}…[/]"
 
 
 # ── Pure REPL parsing ─────────────────────────────────────────────────
@@ -220,7 +233,10 @@ def _proxy_key() -> str:
     try:
         out = subprocess.run(
             ["security", "find-generic-password", "-s", _KEYCHAIN_SERVICE, "-w"],
-            capture_output=True, text=True, timeout=5, check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
         )
         if out.returncode == 0 and out.stdout.strip():
             return out.stdout.strip()
@@ -261,9 +277,12 @@ def _stream(seat: Seat, messages: list[dict[str, str]], *, system: str) -> Itera
         "messages": messages,
         "stream": True,
     }
-    with httpx.Client(timeout=httpx.Timeout(120.0, connect=10.0)) as client, client.stream(
-        "POST", f"{_proxyd_url()}/v1/messages", headers=_headers(), json=payload
-    ) as resp:
+    with (
+        httpx.Client(timeout=httpx.Timeout(120.0, connect=10.0)) as client,
+        client.stream(
+            "POST", f"{_proxyd_url()}/v1/messages", headers=_headers(), json=payload
+        ) as resp,
+    ):
         if resp.status_code != 200:
             resp.read()
             raise RuntimeError(f"{seat.label} seat HTTP {resp.status_code}: {resp.text[:160]}")
@@ -320,7 +339,8 @@ def council_ask(question: str) -> CouncilResult:
             result.answers[label] = answer
 
     voices = "\n\n".join(
-        f"## {label}\n{answer}" for label, answer in result.answers.items()
+        f"## {label}\n{answer}"
+        for label, answer in result.answers.items()
         if not answer.startswith("⚠")
     )
     yoda = SEATS["yoda"]
@@ -346,11 +366,23 @@ def _render_council(question: str, result: CouncilResult) -> None:
     console.print(f"[bold dim]The council considers:[/] {question}")
     for seat in SEATS.values():
         answer = result.answers.get(seat.label, "")
-        console.print(Panel(Text(answer), title=f"[{seat.style}]{seat.label}[/]",
-                            title_align="left", border_style=seat.style))
+        console.print(
+            Panel(
+                Text(answer),
+                title=f"[{seat.style}]{seat.label}[/]",
+                title_align="left",
+                border_style=seat.style,
+            )
+        )
     if result.synthesis:
-        console.print(Panel(Text(result.synthesis), title="[bold green]⚖ Council synthesis (Yoda)[/]",
-                            title_align="left", border_style="green"))
+        console.print(
+            Panel(
+                Text(result.synthesis),
+                title="[bold green]⚖ Council synthesis (Yoda)[/]",
+                title_align="left",
+                border_style="green",
+            )
+        )
 
 
 def _print_seats(active: str) -> None:
@@ -363,9 +395,11 @@ def _repl() -> None:
     active = DEFAULT_SEAT
     transcript = Transcript()
     banner.render_banner(console)
-    console.print("[dim]The chamber is in session. "
-                  "/yoda /windu /quigon /mundi /cilghal /jocasta /mothma switch seats · "
-                  "/council <q> asks everyone · /new clears · /quit leaves[/]")
+    console.print(
+        "[dim]The chamber is in session. "
+        "/yoda /windu /quigon /mundi /cilghal /jocasta /mothma switch seats · "
+        "/council <q> asks everyone · /new clears · /quit leaves[/]"
+    )
     while True:
         seat = SEATS[active]
         try:
