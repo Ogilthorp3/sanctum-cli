@@ -24,6 +24,10 @@ from sanctum_cli.secret_scanner import CONTENT_PATTERNS
 
 AUDIT_LEDGER = Path.home() / ".sanctum" / "logs" / "council-tools-audit.jsonl"
 
+# ~24KB ≈ 6k tokens — a tool_result is re-sent every later turn, so the
+# budget is per-conversation, not per-call.
+LOGS_TAIL_MAX_BYTES = 24_000
+
 
 def redact(text: str) -> str:
     """Scrub known secret shapes before any model reads tool output.
@@ -105,6 +109,9 @@ def run_tool(
     Resolution order for optional args defers to module-level defaults so
     that tests which monkeypatch AUDIT_LEDGER or REGISTRY see the right
     value at call time, not at import time.
+
+    Fail-closed contract: if the audit line cannot be written, the tool
+    call fails — an unaudited result must never reach a model.
     """
     resolved_ledger: Path = ledger if ledger is not None else AUDIT_LEDGER
     resolved_registry: dict[str, CouncilTool] = registry if registry is not None else REGISTRY
@@ -158,12 +165,21 @@ def run_tool(
 
 
 def _run_sanctum_status(params: dict[str, object]) -> str:  # noqa: ARG001
-    """Brief health summary — one line, brevity-gated."""
+    """Brief health summary — agents and providers only; no restic probes.
+
+    Backups and repos are doctor's domain. Status must return in well
+    under 5s; restic serial probes measured at 11.3s and must not run here.
+    """
     from sanctum_cli import config
     from sanctum_cli.commands import doctor
 
-    cfg = config.load()
-    report = doctor.collect(cfg)
+    try:
+        cfg = config.load()
+    except Exception as exc:
+        return f"config error: {exc}"
+    agents = doctor._agents()
+    providers = doctor._providers(cfg)
+    report = doctor.Report(agents=agents, providers=providers, repos=[])
     return doctor.render_brief(report)
 
 
@@ -212,9 +228,11 @@ def _run_logs_tail(params: dict[str, object]) -> str:
 
     service = str(params.get("service", ""))
     raw_lines = params.get("lines", 50)
-    # Clamp to the published maximum regardless of what the model passed.
-    # raw_lines is object; coerce via str→int to satisfy mypy.
-    n = min(int(str(raw_lines)) if raw_lines is not None else 50, 200)
+    # Coerce robustly: float/str/int all accepted; garbage → error result.
+    try:
+        n = max(1, min(int(float(str(raw_lines))), 200)) if raw_lines is not None else 50
+    except (ValueError, TypeError) as exc:
+        return f"invalid lines value {raw_lines!r}: {exc}"
 
     paths = LOG_MAP.get(service.lower())
     if not paths:
@@ -237,8 +255,34 @@ def _run_logs_tail(params: dict[str, object]) -> str:
                 buf.append(line)
                 if len(buf) > n:
                     buf.pop(0)
-            out_lines.extend(line.rstrip() for line in buf)
-    return "\n".join(out_lines)
+            if buf:
+                out_lines.extend(line.rstrip() for line in buf)
+            else:
+                out_lines.append("(empty)")
+
+    # Apply byte budget: drop OLDEST content lines until the joined output
+    # fits within LOGS_TAIL_MAX_BYTES.  Header lines (── path ──) are kept
+    # as structural anchors; only content lines are candidates for removal.
+    content = "\n".join(out_lines)
+    if len(content.encode("utf-8", errors="replace")) > LOGS_TAIL_MAX_BYTES:
+        # Separate headers from content so we can trim content independently.
+        headers: list[str] = [ln for ln in out_lines if ln.startswith("── ")]
+        content_only: list[str] = [ln for ln in out_lines if not ln.startswith("── ")]
+        dropped = 0
+        while content_only:
+            candidate = "\n".join(headers + content_only)
+            if len(candidate.encode("utf-8", errors="replace")) <= LOGS_TAIL_MAX_BYTES:
+                break
+            content_only.pop(0)  # drop oldest content line
+            dropped += 1
+        trimmed = headers + content_only
+        if dropped:
+            trimmed.insert(
+                0, f"[truncated: {dropped} older lines dropped to fit the tool budget]"
+            )
+        return "\n".join(trimmed)
+
+    return content
 
 
 # ─── Registry ────────────────────────────────────────────────────────
@@ -250,7 +294,9 @@ REGISTRY: dict[str, CouncilTool] = {
             name="sanctum_status",
             description=(
                 "Return a one-line health summary: overall status, agent count, "
-                "provider count, repo count, and degraded/failed tally."
+                "provider count, and degraded/failed tally. "
+                "Probes agents and providers only — backups and repos are "
+                "sanctum_doctor's domain."
             ),
             input_schema={"type": "object", "properties": {}},
             kind="read",
@@ -281,7 +327,8 @@ REGISTRY: dict[str, CouncilTool] = {
             name="logs_tail",
             description=(
                 "Return the last N lines (default 50, max 200) from a named "
-                "service log. Raises an error for unknown service names."
+                "service log, capped at 24KB. Raises an error for unknown "
+                "service names."
             ),
             input_schema={
                 "type": "object",
@@ -307,3 +354,4 @@ REGISTRY: dict[str, CouncilTool] = {
         ),
     )
 }
+assert len(REGISTRY) == 4, "duplicate tool name collapsed the registry"

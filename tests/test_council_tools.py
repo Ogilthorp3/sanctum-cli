@@ -9,7 +9,10 @@ model, and no mutation runs without a human y/N at a real REPL.
 from __future__ import annotations
 
 import json
+import subprocess
 from typing import TYPE_CHECKING
+
+import pytest
 
 from sanctum_cli.commands import council_tools as ct
 
@@ -37,6 +40,21 @@ class TestRedact:
     def test_clean_text_passes_unchanged(self) -> None:
         clean = "agents: 12 running, 0 failed — disk 77%"
         assert ct.redact(clean) == clean
+
+    def test_kebab_word_containing_sk_not_redacted(self) -> None:
+        # Fix 5 regression: kebab-case words like task-scheduler-... that
+        # contain "sk-" followed by 40+ chars must NOT be flagged as keys.
+        safe = "task-scheduler-watchdog-relaunch-attempt-counter-overflow detected"
+        assert ct.redact(safe) == safe, (
+            "kebab-case internal sk- substring must pass redact() unchanged"
+        )
+
+    def test_real_openai_shaped_key_at_line_start_is_redacted(self) -> None:
+        # A real-shaped sk- 48-char key at line start must still be caught.
+        key_line = "sk-" + "A" * 48 + "\nsome other line"
+        out = ct.redact(key_line)
+        assert "sk-" + "A" * 48 not in out, "bare sk- key must be redacted"
+        assert "[REDACTED:" in out
 
 
 class TestAuditLedger:
@@ -149,7 +167,131 @@ class TestRegistry:
         assert line["outcome"] == "error"
 
 
+class TestLogsRuntimeClamp:
+    """Fix 2a — the CODE clamp runs at runtime, not just in the schema."""
+
+    def test_10000_lines_param_yields_at_most_200_content_lines(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Write a tmp log with 300 lines of distinct content.
+        log_file = tmp_path / "svc.log"
+        log_file.write_text("\n".join(f"line-{i:04d}" for i in range(300)) + "\n", encoding="utf-8")
+
+        # Monkeypatch LOG_MAP so the executor picks up our tmp file.
+        import sanctum_cli.commands.logs as logs_mod
+
+        monkeypatch.setattr(logs_mod, "LOG_MAP", {"testsvc": [log_file]})
+
+        result = ct.run_tool(
+            "logs_tail",
+            {"service": "testsvc", "lines": 10000},
+            seat="Yoda",
+            session="s",
+            ledger=tmp_path / "a.jsonl",
+        )
+        assert not result.is_error, result.content
+
+        # Count actual content lines (exclude header and truncation notice lines).
+        content_lines = [
+            ln
+            for ln in result.content.splitlines()
+            if not ln.startswith("──") and not ln.startswith("[truncated:")
+        ]
+        assert len(content_lines) <= 200, (
+            f"runtime clamp must enforce ≤200 lines; got {len(content_lines)}"
+        )
+        # The NEWEST line (line-0299) must survive.
+        assert "line-0299" in result.content, "newest line must survive the clamp"
+
+
+class TestLogsBytebudget:
+    """Fix 1 — 24KB byte budget: oversized output is truncated with a marker."""
+
+    def test_300_fat_lines_fit_within_byte_budget(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        log_file = tmp_path / "fat.log"
+        # 300 lines x 500 chars each = 150KB raw; must be cut to <=24KB.
+        log_file.write_text("\n".join("X" * 500 for _ in range(300)) + "\n", encoding="utf-8")
+
+        import sanctum_cli.commands.logs as logs_mod
+
+        monkeypatch.setattr(logs_mod, "LOG_MAP", {"fatsvc": [log_file]})
+
+        result = ct.run_tool(
+            "logs_tail",
+            {"service": "fatsvc", "lines": 200},
+            seat="Yoda",
+            session="s",
+            ledger=tmp_path / "a.jsonl",
+        )
+        assert not result.is_error, result.content
+
+        byte_len = len(result.content.encode("utf-8", errors="replace"))
+        slack = 256
+        assert byte_len <= ct.LOGS_TAIL_MAX_BYTES + slack, (
+            f"output {byte_len} bytes exceeds budget {ct.LOGS_TAIL_MAX_BYTES} + {slack} slack"
+        )
+        assert "[truncated:" in result.content, "truncation marker must be present"
+        # Newest line (last written) must survive.
+        # The last written line is 500 X's; it must appear in the output.
+        assert "X" * 500 in result.content, "newest (last) line must survive truncation"
+
+
+class TestStatusNoRestic:
+    """Fix 3 — sanctum_status must NOT invoke restic probes."""
+
+    def test_status_does_not_call_restic_check(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Monkeypatch _restic_check to raise so any call poisons the result.
+        from sanctum_cli.commands import doctor
+
+        def restic_must_not_run(repo: str, password: str) -> doctor.RepoRow:
+            raise AssertionError("restic must not run for status")
+
+        monkeypatch.setattr(doctor, "_restic_check", restic_must_not_run)
+
+        # Point SANCTUM_INSTANCE_FILE at a valid minimal config.
+        inst = tmp_path / "instance.yaml"
+        inst.write_text("instance:\n  name: Test\n  slug: test\n", encoding="utf-8")
+        monkeypatch.setenv("SANCTUM_INSTANCE_FILE", str(inst))
+
+        result = ct.run_tool(
+            "sanctum_status", {}, seat="Yoda", session="s", ledger=tmp_path / "a.jsonl"
+        )
+        # The tool must not have crashed from the AssertionError.
+        assert not result.is_error, (
+            f"sanctum_status must succeed without restic; got: {result.content}"
+        )
+
+    def test_status_with_missing_config_returns_error_result_not_crash(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Point SANCTUM_INSTANCE_FILE at a non-existent path.
+        monkeypatch.setenv("SANCTUM_INSTANCE_FILE", str(tmp_path / "missing.yaml"))
+
+        result = ct.run_tool(
+            "sanctum_status", {}, seat="Yoda", session="s", ledger=tmp_path / "a.jsonl"
+        )
+        # Must return an error result (or a config-error string), never an exception.
+        # Either is_error=True or the content mentions config/missing.
+        mentions_config = "config" in result.content.lower() or "missing" in result.content.lower()
+        assert result.is_error or mentions_config, (
+            f"missing config must surface gracefully; got: {result.content!r}"
+        )
+
+
 class TestRealReadTools:
+    @pytest.mark.skipif(
+        not any(
+            b"com.sanctum." in line
+            for line in subprocess.run(
+                ["launchctl", "list"], capture_output=True
+            ).stdout.splitlines()
+        ),
+        reason="needs a live sanctum host with com.sanctum.* agents loaded",
+    )
     def test_agent_list_runs_against_this_mac(self, tmp_path: Path) -> None:
         # real executor, real launchctl — this box runs com.sanctum agents
         result = ct.run_tool(

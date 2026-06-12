@@ -29,7 +29,7 @@ CONTENT_PATTERNS: list[tuple[str, re.Pattern[bytes]]] = [
         re.compile(rb"AWS_SECRET_ACCESS_KEY\s*=\s*['\"]?[A-Za-z0-9/+]{40}"),
     ),
     ("anthropic-api-key", re.compile(rb"sk-ant-(?:api03-)?[A-Za-z0-9_\-]{40,}")),
-    ("openai-api-key", re.compile(rb"sk-(?:proj-)?[A-Za-z0-9_\-]{40,}")),
+    ("openai-api-key", re.compile(rb"(?<![A-Za-z0-9])sk-(?:proj-)?[A-Za-z0-9_\-]{40,}")),
     ("github-token", re.compile(rb"gh[pousr]_[A-Za-z0-9_]{36,}")),
     ("google-oauth-client-secret", re.compile(rb"GOCSPX-[A-Za-z0-9_\-]{20,}")),
     ("google-api-key", re.compile(rb"AIza[0-9A-Za-z_\-]{35}")),

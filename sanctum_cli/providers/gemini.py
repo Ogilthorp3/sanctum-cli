@@ -32,9 +32,13 @@ class GeminiProvider(Provider):
 
     def __init__(self, cfg: GeminiProviderConfig, api_key: str) -> None:
         from google import genai
+        from google.genai import types as genai_types
 
         self._cfg = cfg
-        self._client = genai.Client(api_key=api_key)
+        self._client = genai.Client(
+            api_key=api_key,
+            http_options=genai_types.HttpOptions(timeout=int(cfg.timeout_s * 1000)),
+        )
 
     @staticmethod
     def _gemini_role(role: str) -> str:
@@ -95,7 +99,9 @@ class GeminiProvider(Provider):
             iterator = self._client.models.list()
             next(iter(iterator), None)
             latency_ms = (time.perf_counter_ns() - t0) // 1_000_000
-            return HealthSnapshot(ok=True, latency_ms=int(latency_ms), quota_remaining=None, detail=None)
+            return HealthSnapshot(
+                ok=True, latency_ms=int(latency_ms), quota_remaining=None, detail=None
+            )
         except Exception as exc:
             return HealthSnapshot(
                 ok=False, latency_ms=None, quota_remaining=None, detail=str(exc)[:160]
