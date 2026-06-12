@@ -50,7 +50,7 @@ console = Console()
 # misconfiguration (fix included) before relying on it. Listed as data so
 # tests can assert membership and ordering.
 RECIPE_GATES: dict[str, tuple[str, ...]] = {
-    "family": ("family-setup", "firewalla-compat"),
+    "family": ("identity-setup", "family-setup", "firewalla-compat"),
 }
 
 # ── Surface polish ────────────────────────────────────────────────────
@@ -182,7 +182,10 @@ def onboard_command(
     # (family: interview → screen-time registry, then Firewalla compat)
     step_no = 6
     for gate in RECIPE_GATES.get(recipe, ()):
-        if gate == "family-setup":
+        if gate == "identity-setup":
+            console.print(f"\n[bold]Step {step_no}.[/] Operator identity")
+            _run_identity_setup(yes=yes)
+        elif gate == "family-setup":
             console.print(f"\n[bold]Step {step_no}.[/] Family setup")
             _run_family_setup(yes=yes)
         elif gate == "firewalla-compat":
@@ -299,6 +302,83 @@ def merge_family_members(
     return new, added, skipped
 
 
+# ── Per-setup identity (beta portability) ─────────────────────────────
+# Curfews key entirely on a child's device MACs (`c_<mac>_set`), and every
+# alert/briefing needs an operator name + a number to reach. None of that is
+# derivable — onboarding must collect it, or a beta haus finishes setup with
+# nothing to enforce and no one to notify. These helpers are pure (no TTY) so
+# the parsing/merge logic is unit-tested without a terminal.
+
+_MAC_SEP_RE = re.compile(r"[\s:.\-]")
+
+
+def normalize_mac(raw: str) -> str | None:
+    """Any common MAC spelling → canonical ``AA:BB:CC:DD:EE:FF``; junk → None.
+
+    Accepts colon/dash/dot/cisco/bare forms, strips whitespace, uppercases.
+    Returns None for anything that isn't exactly 12 hex digits.
+    """
+    hexs = _MAC_SEP_RE.sub("", raw.strip()).upper()
+    if len(hexs) != 12 or any(c not in "0123456789ABCDEF" for c in hexs):
+        return None
+    return ":".join(hexs[i : i + 2] for i in range(0, 12, 2))
+
+
+def parse_device_selection(raw: str, devices: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Resolve a picker selection ('1,3' / '2 1' / 'all' / '') to chosen devices.
+
+    1-indexed, order-preserving, deduped. Out-of-range and non-numeric tokens
+    are ignored. Empty input → no selection (caller falls back to manual entry).
+    """
+    raw = raw.strip().lower()
+    if not raw:
+        return []
+    if raw in ("all", "*"):
+        return list(devices)
+    picks: list[dict[str, Any]] = []
+    for tok in re.split(r"[,\s]+", raw):
+        if tok.isdigit():
+            i = int(tok) - 1
+            if 0 <= i < len(devices) and devices[i] not in picks:
+                picks.append(devices[i])
+    return picks
+
+
+def set_instance_identity(
+    owner_name: str | None, signal_target: str | None, path: Path | None = None
+) -> None:
+    """Write owner name + Signal alert number into ``notifications`` in instance.yaml.
+
+    Raw read-modify-write (matching ``r2._persist``): every other block is
+    preserved. Backs up to ``<file>.bak`` first. Empty args are no-ops, so a
+    user who skips one field doesn't clobber an existing value.
+    """
+    target = Path(path) if path else config.instance_path()
+    data: dict[str, Any] = {}
+    if target.exists():
+        loaded = yaml.safe_load(target.read_text(encoding="utf-8"))
+        if isinstance(loaded, dict):
+            data = loaded
+    notif = data.get("notifications")
+    if not isinstance(notif, dict):
+        notif = data["notifications"] = {}
+    if owner_name:
+        notif["owner_name"] = owner_name
+    if signal_target:
+        sig = notif.get("signal")
+        if not isinstance(sig, dict):
+            sig = notif["signal"] = {}
+        sig.setdefault("enabled", True)
+        sig["target"] = signal_target
+    if target.exists():
+        backup = target.parent / (target.name + ".bak")
+        backup.write_text(target.read_text(encoding="utf-8"), encoding="utf-8")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        yaml.safe_dump(data, sort_keys=False, allow_unicode=True), encoding="utf-8"
+    )
+
+
 def _prompt_phone(name: str) -> str | None:
     """Optional smartphone number for a child — loops until valid or skipped."""
     while True:
@@ -323,6 +403,69 @@ def _prompt_phone(name: str) -> str | None:
         ):
             continue
         return phone
+
+
+def _fetch_firewalla_devices() -> list[dict[str, Any]] | None:
+    """Live device inventory from the paired Firewalla, normalized to ``{name, mac}``.
+
+    None when the bridge isn't reachable/paired — onboarding then falls back to
+    manual MAC entry. Best-effort: any shape surprise yields None, never raises.
+    """
+    from sanctum_cli.commands import screen_time
+
+    hosts = screen_time._fetch_bridge_json("/hosts")
+    if not isinstance(hosts, list):
+        return None
+    out: list[dict[str, Any]] = []
+    for h in hosts:
+        if not isinstance(h, dict):
+            continue
+        mac = normalize_mac(str(h.get("mac") or h.get("macAddress") or ""))
+        if not mac:
+            continue
+        label = str(h.get("name") or h.get("hostname") or h.get("localDomain") or mac)
+        out.append({"name": label, "mac": mac})
+    return out or None
+
+
+def _collect_child_devices(name: str) -> list[dict[str, Any]]:
+    """Collect a child's device MACs for curfew enforcement → ``[{name, mac}]``.
+
+    Prefers a live picker against the paired Firewalla (re-runs on a configured
+    haus); falls back to manual MAC entry when the bridge isn't reachable (the
+    common first-run case).
+    """
+    fleet = _fetch_firewalla_devices()
+    if fleet:
+        console.print(
+            f"  [dim]Devices on your network — pick {name}'s (e.g. 1,3 or 'all', enter to skip):[/]"
+        )
+        for i, dev in enumerate(fleet, 1):
+            console.print(f"    {i}. {dev['name']}  [dim]{dev['mac']}[/]")
+        picked = parse_device_selection(
+            Prompt.ask(f"  which are {name}'s?", default="", show_default=False), fleet
+        )
+        if picked:
+            return [{"name": d["name"], "mac": d["mac"]} for d in picked]
+        # nothing picked → fall through to manual entry
+
+    devices: list[dict[str, Any]] = []
+    console.print(
+        f"  Add {name}'s device MAC addresses so curfews can enforce on them "
+        "(enter an empty MAC when done)."
+    )
+    while True:
+        raw_mac = Prompt.ask(
+            f"  {name}'s device MAC (enter when done)", default="", show_default=False
+        ).strip()
+        if not raw_mac:
+            return devices
+        mac = normalize_mac(raw_mac)
+        if not mac:
+            console.print("  [red]not a MAC[/] — use AA:BB:CC:DD:EE:FF")
+            continue
+        label = Prompt.ask("  device label", default=f"{name}'s device").strip()
+        devices.append({"name": label or f"{name}'s device", "mac": mac})
 
 
 def _interview_family() -> dict[str, dict[str, Any]]:
@@ -352,7 +495,10 @@ def _interview_family() -> dict[str, dict[str, Any]]:
         if role == "child":
             phone = _prompt_phone(name)
             if phone:
-                member = {"role": role, "notify_imessage": phone, "personal_devices": []}
+                member["notify_imessage"] = phone
+            # The curfew engine enforces on these MACs — without them the whole
+            # screen-time feature is inert. Collect them at interview time.
+            member["personal_devices"] = _collect_child_devices(name)
         members[slug] = member
 
 
@@ -428,6 +574,75 @@ def _run_family_setup(*, yes: bool) -> None:
             yaml.safe_dump(skeleton, sort_keys=False, allow_unicode=True), encoding="utf-8"
         )
         console.print(f"  [green]✓[/] wrote {len(members)} member(s) to new {path}")
+
+
+def _prompt_signal_target() -> str | None:
+    """Operator's own Signal/iMessage number for alerts — loops until valid or skipped."""
+    while True:
+        raw = Prompt.ask(
+            "  your phone number for Sanctum alerts (Signal/iMessage; enter to skip)",
+            default="",
+            show_default=False,
+        ).strip()
+        if not raw:
+            return None
+        normalized = normalize_phone(raw)
+        if normalized is None:
+            console.print("  [red]couldn't parse that[/] — try +<country><number> or 10 digits")
+            continue
+        phone, assumed_na = normalized
+        if assumed_na and not Confirm.ask(
+            f"  assuming North America → {phone} — correct?", default=True
+        ):
+            continue
+        return phone
+
+
+def _identity_configured(path: Path | None = None) -> bool:
+    """True when notifications.owner_name AND signal.target are both already set."""
+    target = path or config.instance_path()
+    try:
+        data = yaml.safe_load(target.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError):
+        return False
+    notif = data.get("notifications") if isinstance(data, dict) else None
+    if not isinstance(notif, dict):
+        return False
+    sig = notif.get("signal")
+    number = sig.get("target") if isinstance(sig, dict) else None
+    return bool(notif.get("owner_name")) and bool(number)
+
+
+def _run_identity_setup(*, yes: bool) -> None:
+    """Collect operator name + Signal alert number → instance.yaml notifications.
+
+    Interactive (``--yes`` skips). Skips silently when already configured so
+    re-runs don't re-prompt. Without it a fresh haus has no one to address in
+    briefings and nowhere to send alerts (they'd otherwise have to fall back to
+    a baked-in number — exactly the per-setup leak we're closing).
+    """
+    if yes:
+        console.print(
+            "  [yellow]skipped[/] — interactive step; run `sanctum onboard` "
+            "without --yes to set your name + alert number"
+        )
+        return
+    if _identity_configured():
+        console.print("  [dim]operator identity already configured — skipping[/]")
+        return
+    try:
+        who = os.getlogin()
+    except OSError:
+        who = os.environ.get("USER", "")
+    owner = Prompt.ask("  your name (how Sanctum addresses you)", default=who or "Operator").strip()
+    number = _prompt_signal_target()
+    set_instance_identity(owner or None, number)
+    summary = ", ".join(
+        bit
+        for bit in (f"name={owner}" if owner else "", f"alerts→{number}" if number else "")
+        if bit
+    )
+    console.print(f"  [green]✓[/] saved operator identity ({summary or 'nothing entered'})")
 
 
 def _run_firewalla_compat() -> None:

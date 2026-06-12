@@ -33,7 +33,7 @@ from typing import Any, cast
 
 import httpx
 
-from sanctum_cli import keychain
+from sanctum_cli import config, keychain
 from sanctum_cli.errors import NetworkError, ProviderError, UserError
 
 DEFAULT_BASE_URL = "https://bridge.nepveu.name"
@@ -265,7 +265,15 @@ def encode_file(path: Path | str) -> tuple[str, str]:
 
 
 def base_url_from_env(default: str = DEFAULT_BASE_URL) -> str:
-    return os.environ.get("SANCTUM_BRIDGE_URL", default).rstrip("/")
+    """Bridge URL: env override → instance.yaml (secrets.cloudflare_bridge_domain)
+    → the hard fallback. Per-setup: a beta operator's bridge host is their own."""
+    env = os.environ.get("SANCTUM_BRIDGE_URL")
+    if env:
+        return env.rstrip("/")
+    domain = config.instance_value("secrets.cloudflare_bridge_domain", None)
+    if domain:
+        return f"https://{domain}".rstrip("/")
+    return default.rstrip("/")
 
 
 def _fix_for(status: int, body: dict[str, Any]) -> str:

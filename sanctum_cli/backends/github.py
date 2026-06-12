@@ -32,7 +32,7 @@ from rich.panel import Panel
 from rich.prompt import Confirm
 from rich.table import Table
 
-from sanctum_cli import secret_scanner
+from sanctum_cli import config, secret_scanner
 from sanctum_cli.errors import LocalError, UserError
 
 console = Console()
@@ -40,8 +40,14 @@ console = Console()
 GH_BIN = "gh"
 GIT_BIN = "git"
 GH_TIMEOUT_S = 30
-DEFAULT_OWNER = "Ogilthorp3"  # TODO: surface in instance.yaml
+DEFAULT_OWNER = "Ogilthorp3"  # hard fallback; real value is instance.yaml vcs.github_owner
 LOCAL_CLONE_DIR = Path("~/.sanctum/cli/github-tier-0").expanduser()
+
+
+def default_owner() -> str:
+    """GitHub owner for host-backup repos — instance.yaml ``vcs.github_owner``,
+    else the fallback. Per-setup: a beta operator's org is not Ogilthorp3."""
+    return str(config.instance_value("vcs.github_owner", DEFAULT_OWNER))
 
 # Curated list of dotfiles + inventories that are safe-by-design. Anything
 # in this list still gets secret-scanned before it lands in git, but the
@@ -278,7 +284,8 @@ def _commit_and_push(target: Path, message: str) -> bool:
 # ─── Wizard ─────────────────────────────────────────────────────────
 
 
-def run_wizard(*, persist: bool = True, owner: str = DEFAULT_OWNER) -> _SetupResult:
+def run_wizard(*, persist: bool = True, owner: str | None = None) -> _SetupResult:
+    owner = owner or default_owner()
     _preflight()
     hostname = _hostname_slug()
     repo = _repo_name(owner, hostname)
