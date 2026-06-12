@@ -37,7 +37,7 @@ _SEATS: tuple[tuple[str, str], ...] = (
     ("Ki-Adi-Mundi", "yellow"),
     ("Cilghal", "blue"),
     ("Jocasta", "bright_white"),
-    ("Mon Mothma", "bright_blue"),
+    ("Mon Mothma", "red"),
 )
 
 
@@ -45,16 +45,21 @@ _SEATS: tuple[tuple[str, str], ...] = (
 
 
 def diamond_lines(h: int) -> list[str]:
-    """A faceted kyber diamond, 2*h-1 rows, apex-to-apex symmetric."""
+    """A faceted kyber diamond, 2*h-1 rows, apex-to-apex symmetric.
+
+    Every row has odd width (1, 3, 5, ...) so the 1-cell ◆ apexes share
+    the exact same centre column as the facet rows — even-width facets
+    would leave the tips half a cell off on a monospace grid.
+    """
     lines: list[str] = []
     for i in range(h):
         pad = " " * (h - 1 - i)
-        body = "◢" + "█" * (2 * i) + "◣" if i else "◆"
+        body = "◢" + "█" * (2 * i - 1) + "◣" if i else "◆"
         lines.append(pad + body)
     for j in range(h - 1):
         k = h - 2 - j
         pad = " " * (h - 1 - k)
-        body = "◥" + "█" * (2 * k) + "◤" if k else "◆"
+        body = "◥" + "█" * (2 * k - 1) + "◤" if k else "◆"
         lines.append(pad + body)
     return lines
 
@@ -90,8 +95,12 @@ def shimmer_row(phase: float, rows: int) -> int:
 # ── Styling helpers ───────────────────────────────────────────────────
 
 
-def _diamond_text(lines: list[str], rows: int, shimmer: int | None) -> Text:
-    out = Text(justify="center")
+def _diamond_text(lines: list[str], shimmer: int | None) -> Text:
+    # No per-line justify: diamond_lines() already encodes the geometry in
+    # its left pads, and Align.center positions the block as a whole. A
+    # justify="center" here would re-center each line by its own odd/even
+    # total width, skewing rows by one cell (the leaning-diamond bug).
+    out = Text()
     drawn = [ln for ln in lines if ln.strip()]
     n = max(1, len(drawn))
     di = 0
@@ -118,14 +127,34 @@ def _wordmark() -> Text:
     return t
 
 
+_SEAT_SEP = "   "
+
+
 def _seat_line(lit: int) -> Text:
-    """The five seats; the first `lit` are illuminated, the rest dim."""
-    t = Text(justify="center")
+    """The seven seats; the first `lit` are illuminated, the rest dim.
+
+    Hand-padded so the middle seat sits on the banner's centre axis —
+    apex ◆, the C of SANCTUM, and Ki-Adi-Mundi share one column. (No
+    per-line justify here either — see _diamond_text. A block-centred
+    line would drift off-axis because the right wing of the council is
+    wider than the left.)
+    """
+    units = [f"◆ {label}" for label, _ in _SEATS]
+    mid = len(_SEATS) // 2
+    start = sum(len(u) + len(_SEAT_SEP) for u in units[:mid])
+    centre = start + len(units[mid]) // 2  # axis column within the bare line
+    total = sum(len(u) for u in units) + len(_SEAT_SEP) * (len(units) - 1)
+    left, right = centre, total - centre - 1
+    t = Text()
+    t.append(" " * max(0, right - left))
     for idx, (label, colour) in enumerate(_SEATS):
+        if idx:
+            t.append(_SEAT_SEP)
         glyph = "◆" if idx < lit else "◇"
         style = Style(color=colour, bold=True) if idx < lit else Style(color="grey39")
         t.append(glyph + " ", style)
-        t.append(label + "   ", style if idx < lit else Style(color="grey39"))
+        t.append(label, style)
+    t.append(" " * max(0, left - right))
     return t
 
 
@@ -144,9 +173,7 @@ def should_animate(is_tty: bool) -> bool:
         return False
     if os.environ.get("NO_COLOR"):
         return False
-    if os.environ.get("SANCTUM_NO_ANIM"):
-        return False
-    return True
+    return not os.environ.get("SANCTUM_NO_ANIM")
 
 
 # ── Render ────────────────────────────────────────────────────────────
@@ -172,7 +199,7 @@ def render_banner(console: Console, *, animate: bool | None = None) -> None:
 
     if not animate:
         console.print()
-        console.print(_compose(_diamond_text(full, rows, None), len(_SEATS), True))
+        console.print(_compose(_diamond_text(full, None), len(_SEATS), True))
         console.print()
         return
 
@@ -180,16 +207,16 @@ def render_banner(console: Console, *, animate: bool | None = None) -> None:
     with Live(console=console, refresh_per_second=60, transient=False) as live:
         # 1) materialize from the apex
         for frame in reveal_frames(DIAMOND_H):
-            live.update(_compose(_diamond_text(frame, rows, None), 0, False))
+            live.update(_compose(_diamond_text(frame, None), 0, False))
             time.sleep(0.045)
         # 2) shimmer sweep down the facets
         steps = 14
         for s in range(steps):
             band = shimmer_row(s / (steps - 1), rows)
-            live.update(_compose(_diamond_text(full, rows, band), 0, False))
+            live.update(_compose(_diamond_text(full, band), 0, False))
             time.sleep(0.03)
         # 3) wordmark settles, seats ignite one by one
         for lit in range(len(_SEATS) + 1):
-            live.update(_compose(_diamond_text(full, rows, None), lit, True))
+            live.update(_compose(_diamond_text(full, None), lit, True))
             time.sleep(0.11)
     console.print()
