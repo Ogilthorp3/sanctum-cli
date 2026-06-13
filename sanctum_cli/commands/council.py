@@ -29,6 +29,7 @@ if TYPE_CHECKING:
 import httpx
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.panel import Panel
 from rich.text import Text
 
@@ -45,6 +46,13 @@ _MAX_TOKENS = 1200
 DEFAULT_SEAT = "yoda"
 
 TOOL_CALL_CAP = 8
+# Absolute backstop on tool-loop POSTs. Every legitimate path returns within
+# TOOL_CALL_CAP + 1 iterations; this hard bound exists purely so a malformed,
+# looping, or adversarial model can never drive the buffered loop unbounded and
+# balloon memory. Earned the hard way 2026-06-12: a missing-`name` tool_use
+# block looped the turn — growing `convo` each pass — until the Mini OOM'd and
+# panicked. Defense-in-depth, independent of the per-call cap.
+MAX_TOOL_LOOP_ITERATIONS = TOOL_CALL_CAP * 2
 
 
 class ToolsRejected(RuntimeError):  # noqa: N818
@@ -393,8 +401,17 @@ def _tool_turn(seat: Seat, messages: list[dict[str, object]]) -> str:
     session = f"repl-{os.getpid()}"
     calls = 0
     consecutive_errors = 0
+    synth_counter = 0
     first_post = True
+    iterations = 0
     while True:
+        # Absolute backstop: no model — malformed, looping, or adversarial —
+        # may drive this loop past a bounded number of POSTs. Every legitimate
+        # path returns well within MAX_TOOL_LOOP_ITERATIONS; this guard is pure
+        # defense-in-depth against a future logic slip re-opening the balloon.
+        iterations += 1
+        if iterations > MAX_TOOL_LOOP_ITERATIONS:
+            return "(tool loop bound reached — answering without further tools)"
         with console.status(
             thinking_markup(seat), spinner="simpleDotsScrolling", spinner_style=seat.style
         ):
@@ -403,9 +420,7 @@ def _tool_turn(seat: Seat, messages: list[dict[str, object]]) -> str:
             except ToolsRejected:
                 if first_post:
                     raise
-                raise RuntimeError(
-                    "mid-turn tools failure: seat rejected tools mid-loop"
-                ) from None
+                raise RuntimeError("mid-turn tools failure: seat rejected tools mid-loop") from None
         first_post = False
         blocks = data.get("content", [])
         if not isinstance(blocks, list):
@@ -416,9 +431,19 @@ def _tool_turn(seat: Seat, messages: list[dict[str, object]]) -> str:
                 b.get("text", "") for b in blocks if isinstance(b, dict) and b.get("type") == "text"
             ).strip()
             return answer if answer else "(no answer)"
+
         results: list[dict[str, object]] = []
+        echo_tool_blocks: list[dict[str, object]] = []
         budget_hit = False
         for block in tool_uses:
+            # The breaker is checked for EVERY block — malformed ones included —
+            # so an all-error stream (a failing tool OR a malformed block) can
+            # never loop unbounded. This is the gate the 2026-06-12 balloon
+            # slipped past: malformed blocks used to skip it entirely.
+            if consecutive_errors >= 2:
+                budget_hit = True
+                break
+
             # ── Extract fields with per-block malformation handling ──────
             block_id: str | None = None
             block_name: str | None = None
@@ -436,7 +461,7 @@ def _tool_turn(seat: Seat, messages: list[dict[str, object]]) -> str:
                 if block_name is None:
                     parse_error = "tool_use block missing 'name'"
                 elif block_id is None:
-                    parse_error = "tool_use block missing 'id' — cannot form tool_result"
+                    parse_error = "tool_use block missing 'id'"
 
                 raw_input = block.get("input")
                 if isinstance(raw_input, str):
@@ -461,7 +486,6 @@ def _tool_turn(seat: Seat, messages: list[dict[str, object]]) -> str:
                     )
 
             if parse_error is not None:
-                # Audit malformed attempt; feed error result back if we have an id
                 audit_tool = block_name if block_name else "<malformed>"
                 council_tools.audit(
                     council_tools.AUDIT_LEDGER,
@@ -474,43 +498,43 @@ def _tool_turn(seat: Seat, messages: list[dict[str, object]]) -> str:
                     outcome="error",
                     duration_ms=0,
                 )
-                if block_id is not None:
-                    results.append(
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": block_id,
-                            "content": f"malformed tool call: {parse_error}",
-                            "is_error": True,
-                        }
-                    )
-                # continue to next block — don't abort the turn
                 consecutive_errors += 1
+                # A block with no 'name' is unrecoverable: it can't be run, and
+                # echoing a nameless tool_use is a protocol 400. Drop it — no
+                # echo, no tool_result. If the whole batch drops away, the
+                # empty-results guard below ends the turn (no loop-back).
+                if block_name is None:
+                    continue
+                # Recoverable malformation (bad input, or missing id with a name):
+                # synthesize an id when absent so the echoed assistant block and
+                # its paired error tool_result reference the same id, keeping the
+                # next POST a valid Anthropic exchange.
+                if block_id is None:
+                    synth_counter += 1
+                    block_id = f"toolu_synth_{synth_counter}"
+                echo_tool_blocks.append(
+                    {
+                        "type": "tool_use",
+                        "id": block_id,
+                        "name": block_name,
+                        "input": block_input or {},
+                    }
+                )
+                results.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": block_id,
+                        "content": f"malformed tool call: {parse_error}",
+                        "is_error": True,
+                    }
+                )
                 continue
 
-            # ── Normal block — apply cap / breaker ───────────────────────
+            # ── Well-formed block — apply the per-call cap ───────────────
             calls += 1
             if calls > TOOL_CALL_CAP:
                 budget_hit = True
-                results.append(
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": block_id,
-                        "content": "tool budget exhausted — answer with what you have",
-                        "is_error": True,
-                    }
-                )
-                continue
-            if consecutive_errors >= 2:
-                budget_hit = True
-                results.append(
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": block_id,
-                        "content": "instrument error budget exceeded — answer with what you have",
-                        "is_error": True,
-                    }
-                )
-                continue
+                break
             with console.status(
                 f"[{seat.style}]{seat.label} consults the instruments… ({block_name})[/]",
                 spinner="simpleDotsScrolling",
@@ -523,6 +547,16 @@ def _tool_turn(seat: Seat, messages: list[dict[str, object]]) -> str:
                     session=session,
                 )
             consecutive_errors = consecutive_errors + 1 if result.is_error else 0
+            # Echo the NORMALIZED block (rescued input as a dict), paired 1:1
+            # with its tool_result by id.
+            echo_tool_blocks.append(
+                {
+                    "type": "tool_use",
+                    "id": block_id,
+                    "name": block_name,
+                    "input": block_input or {},
+                }
+            )
             results.append(
                 {
                     "type": "tool_result",
@@ -531,13 +565,24 @@ def _tool_turn(seat: Seat, messages: list[dict[str, object]]) -> str:
                     "is_error": result.is_error,
                 }
             )
+
         if budget_hit:
-            # Breaker or cap hit — return distinctive strings so the caller
-            # can distinguish the two failure modes (Fix 5).
+            # Distinct strings so the caller can tell the two failure modes apart.
             if consecutive_errors >= 2:
                 return "(instrument errors — answering without further tools)"
             return "(tool call cap reached — partial answer only)"
-        convo.append({"role": "assistant", "content": blocks})
+
+        # Nothing to feed back — every block was a nameless drop. Do NOT loop:
+        # a user message with an empty content array is a protocol 400, and
+        # re-POSTing the identical context invites the model to repeat the same
+        # malformed batch forever (the balloon). End the turn honestly instead.
+        if not results:
+            return "(no usable tool calls — answering without tools)"
+
+        # Echo the normalized assistant turn — original text blocks plus the
+        # normalized tool_use blocks — then the paired tool_results.
+        text_blocks = [b for b in blocks if isinstance(b, dict) and b.get("type") == "text"]
+        convo.append({"role": "assistant", "content": text_blocks + echo_tool_blocks})
         convo.append({"role": "user", "content": results})
 
 
@@ -653,7 +698,7 @@ def _say_turn(
             console.print("[dim](seat's model declines tools — chat only this turn)[/]")
             # Fall through to the streaming path with unarmed persona
         except Exception as e:
-            console.print(f"[red]⚠ {e}[/]")
+            console.print(f"[red]⚠ {escape(str(e))}[/]")
             transcript.add("assistant", "(seat unavailable)")
             return
 
@@ -679,11 +724,13 @@ def _say_turn(
         console.print(f"[{seat.style}]{seat.label}:[/] ", end="")
         if first is not None:
             chunks.append(first)
-            console.print(first, end="", soft_wrap=True)
+            # Deltas are model output — print them as Text so a stray ``[/bad]``
+            # in the stream can't raise MarkupError and crash the REPL turn.
+            console.print(Text(first), end="", soft_wrap=True)
             try:
                 for delta in stream:
                     chunks.append(delta)
-                    console.print(delta, end="", soft_wrap=True)
+                    console.print(Text(delta), end="", soft_wrap=True)
             except KeyboardInterrupt:
                 console.print("\n[dim](turn aborted)[/]")
                 answer = "".join(chunks) if chunks else "(turn aborted)"
@@ -691,7 +738,10 @@ def _say_turn(
                 return
         console.print()
     except Exception as e:
-        console.print(f"\n[red]⚠ {e}[/]")
+        # Escape the error text: a network/HTTP message can itself carry markup
+        # (``[/bad]``), and an unescaped interpolation would raise a SECOND
+        # MarkupError out of the handler and take down the whole REPL.
+        console.print(f"\n[red]⚠ {escape(str(e))}[/]")
         transcript.add("assistant", "(seat unavailable)")
         return
     answer = "".join(chunks)

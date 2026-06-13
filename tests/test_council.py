@@ -403,6 +403,206 @@ class TestToolLoop:
         assert first_entry["tool"] == "agent_list"
         assert first_entry["outcome"] == "error"
 
+    def test_rescued_input_echoed_as_dict_not_string(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """After a rescued-input turn, the SECOND POST's convo must carry the
+        parsed dict as ``input`` (not the original string).  The echo-back of
+        the assistant block is what feeds the next request — if it still holds
+        a string the Anthropic protocol rejects it with a 400."""
+        monkeypatch.setattr(cc.council_tools, "AUDIT_LEDGER", tmp_path / "a.jsonl")
+
+        captured_convos: list[list] = []
+
+        def capturing_post(seat, messages, *, system, tools):  # type: ignore[misc]
+            captured_convos.append([m for m in messages])
+            call_n = len(captured_convos)
+            if call_n == 1:
+                return {
+                    "stop_reason": "tool_use",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "tu_rescue",
+                            "name": "logs_tail",
+                            "input": '{"service": "r2d2"}',  # stringified
+                        }
+                    ],
+                }
+            return {
+                "stop_reason": "end_turn",
+                "content": [{"type": "text", "text": "Done."}],
+            }
+
+        monkeypatch.setattr(cc, "_post_with_tools", capturing_post)
+        seat = cc.SEATS["yoda"]
+        answer = cc._tool_turn(seat, [{"role": "user", "content": "check r2d2"}])
+        assert answer == "Done."
+        # The second POST must have been made
+        assert len(captured_convos) == 2, "expected exactly 2 POSTs"
+        # Find the echoed assistant block in the second POST's messages
+        second_convo = captured_convos[1]
+        assistant_msgs = [m for m in second_convo if m.get("role") == "assistant"]
+        assert assistant_msgs, "no assistant message in second POST"
+        asst_content = assistant_msgs[-1]["content"]
+        assert isinstance(asst_content, list), "assistant content must be a list"
+        tool_use_blocks = [b for b in asst_content if b.get("type") == "tool_use"]
+        assert tool_use_blocks, "no tool_use block in echoed assistant content"
+        echoed_block = tool_use_blocks[0]
+        assert isinstance(echoed_block["input"], dict), (
+            f"echoed input must be a dict, got {type(echoed_block['input']).__name__!r}: "
+            f"{echoed_block['input']!r}"
+        )
+        assert echoed_block["input"] == {"service": "r2d2"}
+
+    def test_missing_id_synthesized_in_echo_and_pairs_tool_result(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A tool_use block with no ``id`` must get a synthesized id before
+        the echo-back so the echoed assistant block and the paired tool_result
+        in the user message reference the same id — keeping the protocol valid."""
+        monkeypatch.setattr(cc.council_tools, "AUDIT_LEDGER", tmp_path / "a.jsonl")
+
+        captured_convos: list[list] = []
+
+        def capturing_post(seat, messages, *, system, tools):  # type: ignore[misc]
+            captured_convos.append([m for m in messages])
+            call_n = len(captured_convos)
+            if call_n == 1:
+                return {
+                    "stop_reason": "tool_use",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            # deliberately no "id" key
+                            "name": "agent_list",
+                            "input": {},
+                        }
+                    ],
+                }
+            return {
+                "stop_reason": "end_turn",
+                "content": [{"type": "text", "text": "Synthesized id worked."}],
+            }
+
+        monkeypatch.setattr(cc, "_post_with_tools", capturing_post)
+        seat = cc.SEATS["yoda"]
+        answer = cc._tool_turn(seat, [{"role": "user", "content": "q"}])
+        assert answer == "Synthesized id worked."
+        assert len(captured_convos) == 2, "expected exactly 2 POSTs"
+        second_convo = captured_convos[1]
+        # Find the echoed assistant block
+        assistant_msgs = [m for m in second_convo if m.get("role") == "assistant"]
+        assert assistant_msgs, "no assistant message in second POST"
+        asst_content = assistant_msgs[-1]["content"]
+        assert isinstance(asst_content, list)
+        tool_use_blocks = [b for b in asst_content if b.get("type") == "tool_use"]
+        assert tool_use_blocks, "no tool_use block in echoed assistant content"
+        echoed_id = tool_use_blocks[0].get("id")
+        assert echoed_id, "echoed tool_use block must have a synthesized id"
+        # The user message (tool_result) must pair the same id
+        user_msgs = [m for m in second_convo if m.get("role") == "user"]
+        assert user_msgs, "no user message in second POST"
+        last_user = user_msgs[-1]
+        user_content = last_user["content"]
+        assert isinstance(user_content, list), "user content must be a list"
+        tool_results = [b for b in user_content if b.get("type") == "tool_result"]
+        assert tool_results, "no tool_result in user message"
+        assert tool_results[0]["tool_use_id"] == echoed_id, (
+            f"tool_result id {tool_results[0]['tool_use_id']!r} does not match "
+            f"echoed id {echoed_id!r}"
+        )
+
+    def test_missing_name_only_no_empty_content_array_posted(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A tool_use block with no ``name`` (but otherwise present id) must be
+        dropped entirely from the echo-back.  If that leaves no tool_results to
+        send, the assistant+user pair must NOT be appended and a second POST must
+        NOT be made — an empty ``content: []`` POSTed as a user message is a
+        protocol 400."""
+        monkeypatch.setattr(cc.council_tools, "AUDIT_LEDGER", tmp_path / "a.jsonl")
+
+        post_calls: list[list] = []
+
+        def capturing_post(seat, messages, *, system, tools):  # type: ignore[misc]
+            post_calls.append(list(messages))
+            return {
+                "stop_reason": "tool_use",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "tu_noname",
+                        # deliberately no "name" key
+                        "input": {},
+                    }
+                ],
+            }
+
+        monkeypatch.setattr(cc, "_post_with_tools", capturing_post)
+        seat = cc.SEATS["yoda"]
+        # Only one POST should be made; the result must be the honest fallback string
+        answer = cc._tool_turn(seat, [{"role": "user", "content": "q"}])
+        assert len(post_calls) == 1, (
+            f"expected exactly 1 POST (no looping on all-malformed batch), got {len(post_calls)}"
+        )
+        # Must not have posted an empty content array
+        for convo in post_calls:
+            for msg in convo:
+                if msg.get("role") == "user":
+                    content = msg.get("content")
+                    if isinstance(content, list):
+                        assert content, (
+                            "empty user content list was included — protocol 400 territory"
+                        )
+        # Answer must be the honest fallback, not a crash
+        assert isinstance(answer, str)
+        assert answer  # not empty
+
+    def test_malformed_block_loop_cannot_balloon(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Regression for the 2026-06-12 kernel panic: a model that returns a
+        malformed-but-id'd tool_use block on EVERY call must NOT loop forever.
+
+        The old loop skipped the cap and breaker for malformed blocks, so it
+        appended to ``convo`` every pass and grew until the box OOM'd. The
+        breaker (and the MAX_TOOL_LOOP_ITERATIONS backstop) must end the turn
+        within a handful of POSTs. The fake raises past a safety ceiling so a
+        future regression can't re-balloon the machine while this test runs.
+        """
+        monkeypatch.setattr(cc.council_tools, "AUDIT_LEDGER", tmp_path / "a.jsonl")
+        posts = {"n": 0}
+        safety_ceiling = 100  # far above any legitimate bound; a tripwire, not a limit
+
+        def forever_malformed(seat, messages, *, system, tools):  # type: ignore[misc]
+            posts["n"] += 1
+            if posts["n"] > safety_ceiling:
+                raise AssertionError(
+                    f"_tool_turn made {posts['n']} POSTs without terminating — "
+                    "the unbounded-loop balloon has regressed"
+                )
+            return {
+                "stop_reason": "tool_use",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "tu_loop",
+                        "name": "logs_tail",
+                        "input": "not valid json{",  # unparseable → recoverable malformation
+                    }
+                ],
+            }
+
+        monkeypatch.setattr(cc, "_post_with_tools", forever_malformed)
+        answer = cc._tool_turn(cc.SEATS["yoda"], [{"role": "user", "content": "loop forever"}])
+        assert isinstance(answer, str) and answer
+        assert posts["n"] <= cc.MAX_TOOL_LOOP_ITERATIONS, (
+            f"loop must terminate within {cc.MAX_TOOL_LOOP_ITERATIONS} POSTs, made {posts['n']}"
+        )
+        # The error breaker should end it well before the hard backstop.
+        assert answer == "(instrument errors — answering without further tools)"
+
 
 class TestSeatTools:
     def test_yoda_and_mothma_are_armed_others_are_not(self) -> None:
@@ -502,3 +702,47 @@ class TestSayTurn:
         cc._say_turn(seat, transcript, "q")
         msgs = transcript.messages()
         assert msgs[-1]["content"] == "(no answer)"
+
+    def test_streaming_delta_with_markup_completes_without_raise(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Deltas containing raw Rich markup like ``[/bad]`` and ``[red]x``
+        must not raise MarkupError.  The transcript must hold the verbatim
+        concatenated text (no exceptions propagated)."""
+        seat = cc.SEATS["windu"]  # unarmed → streaming path
+
+        def fake_stream(s, messages, *, system):  # type: ignore[misc]
+            yield "[/bad]"
+            yield "[red]x"
+            yield " hello"
+
+        monkeypatch.setattr(cc, "_stream", fake_stream)
+        transcript = cc.Transcript()
+        # Must complete without raising
+        cc._say_turn(seat, transcript, "q")
+        msgs = transcript.messages()
+        assert msgs[-1]["role"] == "assistant"
+        # The verbatim text must be in the transcript
+        assert msgs[-1]["content"] == "[/bad][red]x hello"
+
+    def test_streaming_error_with_markup_message_does_not_raise(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An exception raised from the streaming path whose message contains
+        Rich markup (e.g. ``[/bad]``) must be printed safely — the error
+        handler itself must not raise a second MarkupError."""
+        seat = cc.SEATS["windu"]  # unarmed → streaming path
+
+        def exploding_stream(s, messages, *, system):  # type: ignore[misc]
+            msg = "network error: [/bad] in response"
+            raise RuntimeError(msg)
+            yield  # make it a generator
+
+        monkeypatch.setattr(cc, "_stream", exploding_stream)
+        transcript = cc.Transcript()
+        # Must complete without raising — the error is printed safely
+        cc._say_turn(seat, transcript, "q")
+        msgs = transcript.messages()
+        # The error path adds a placeholder to the transcript
+        assert msgs[-1]["role"] == "assistant"
+        assert msgs[-1]["content"] == "(seat unavailable)"
