@@ -57,7 +57,7 @@ A typed registry; each tool is a frozen dataclass:
 | `logs_tail` | agent.py plist log-path resolution | `service` required, `lines` capped at 200 |
 
 **Secret redaction (council #9):** every tool's output passes through
-`redact(text) -> str` before the model sees it, built on the same 16
+`redact(text) -> str` before the model sees it, built on the same 14
 secret patterns as the v0.7.1 backup gate (the implementation plan locates
 the canonical pattern list and reuses it — lifted into a shared module if
 its current home doesn't import cleanly). Redaction is tested with hostile
@@ -192,3 +192,35 @@ window) adds verbs one at a time, most-reversible first (`agent_restart`).
 - **Long-lived VM session resists persona reload** → acceptance test (D.3)
   is the gate; if the bounce doesn't take, that's a finding to report, not
   to paper over.
+
+## Phase-0 outcome (2026-06-12)
+
+- **Transport probe.** The `council-max-thinking` → `:3456` bridge
+  (`claude-max-api-proxy` 1.0.0, a Node wrapper over `claude --print`)
+  **strips the `tools` array** — it cannot carry tool-use. proxyd's
+  `translate.rs` **does** forward `tools` and return `tool_use`; tooling was
+  verified end-to-end against `qwen36-plus`, `glm-51`, and `gemini-25-flash`.
+  So the design's gate is met *through proxyd*, not through the Max bridge.
+- **Decision (Bert).** Fix the `:3456` bridge so Opus stays the one brain,
+  rather than route CLI Yoda to a different tooling model. That bridge patch
+  is a **separate spec/plan** (the established
+  `patch-claude-max-proxy-content-flatten.sh` mechanism; upstream frozen at
+  1.0.0). Everything in THIS plan was built transport-agnostic and tested
+  against protocol fakes, degrading to chat on a first-POST 4xx — so it lands
+  now and lights up the day the bridge tools.
+- **Live interactive smoke deferred** to that bridge plan (the loop is proven
+  against Anthropic-protocol fakes; a real tool_use round-trip waits on a
+  tooling transport for the `council-max-thinking` seat).
+- **Shipped per this plan:** the read-only registry + redaction + audit
+  ledger; the dormant mutate gate; the buffered tool loop (capped, breaker,
+  degrade-to-chat); Yoda's May-31 canon persona; and the VM TOOLS.md +
+  persona-drift cleanup (gateway already canon-aligned post-reboot —
+  acceptance reply was English movie-voice).
+- **Implementation finding (CT Task 4).** The tool loop's malformed-block
+  path originally skipped the cap *and* breaker and looped unbounded, growing
+  `convo` until OOM — it reproduced as an ~11 GB balloon and was a confirmed
+  contributor to the 2026-06-12 Mac Mini watchdog panics. Fixed: breaker on
+  every block, nameless-block drop, missing-id synthesis, empty-results early
+  return, and a hard `MAX_TOOL_LOOP_ITERATIONS` backstop, with a
+  forever-malformed regression test. A buffered agent loop is a memory hazard
+  unless *every* block class hits the same bounds.
