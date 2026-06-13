@@ -368,10 +368,11 @@ class TestToolLoop:
     def test_missing_id_turn_survives_with_audit_line(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """A tool_use block with no ``id`` field must not abort the turn.
-        The block is audited (directly via council_tools.audit) but no
-        tool_result is appended (no id to reference the result back to).
-        The turn continues and the model's final answer is returned."""
+        """A tool_use block with no ``id`` (but a valid name) must not abort
+        the turn. It is audited as an error and given a synthesized id so an
+        error tool_result can be paired back into the conversation; the tool
+        itself is NOT executed (the block is malformed). The turn continues
+        and the model's final answer is returned."""
         monkeypatch.setattr(cc.council_tools, "AUDIT_LEDGER", tmp_path / "a.jsonl")
 
         # Block with no 'id' — has a name but missing the required id field
@@ -399,8 +400,9 @@ class TestToolLoop:
         import json as _json
 
         first_entry = _json.loads(audit_lines[0])
-        # The name is known (agent_list) so it should be recorded; outcome is error
-        # because the block is malformed (no id means we can't loop correctly)
+        # The name is known (agent_list) so it is recorded; outcome is error
+        # because the block was malformed (missing id) — even though a
+        # synthesized id let the turn continue.
         assert first_entry["tool"] == "agent_list"
         assert first_entry["outcome"] == "error"
 
@@ -897,6 +899,60 @@ class TestSayTurn:
         assert "agent_list" in blob
         assert "Instruments you have" not in seen["system"]
         assert transcript.messages()[-1]["content"] == "Healthy, the agents are."
+
+    def test_gather_then_voice_flattens_all_findings_into_voice_prompt(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """End-to-end: a multi-call gather must flatten EVERY finding into the
+        voice prompt, not just the last. A regression that reset `exchanges`
+        mid-loop would pass every single-call test but fail here."""
+        monkeypatch.setattr(cc.council_tools, "AUDIT_LEDGER", tmp_path / "a.jsonl")
+        seat = cc.Seat(
+            label="Yoda",
+            model="opus-voice",
+            persona="P",
+            style="green",
+            verb="ponders",
+            tools=("agent_list", "logs_tail"),
+            tool_model="gemini-hands",
+        )
+        monkeypatch.setattr(
+            cc,
+            "_post_with_tools",
+            self._fake_responses(
+                {
+                    "stop_reason": "tool_use",
+                    "content": [
+                        {"type": "tool_use", "id": "t1", "name": "agent_list", "input": {}}
+                    ],
+                },
+                {
+                    "stop_reason": "tool_use",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "t2",
+                            "name": "logs_tail",
+                            "input": {"service": "r2d2"},
+                        }
+                    ],
+                },
+                {"stop_reason": "end_turn", "content": [{"type": "text", "text": "gemini text"}]},
+            ),
+        )
+        seen: dict = {}
+
+        def fake_stream(s, messages, *, system):  # type: ignore[misc]
+            seen["messages"] = messages
+            yield "Both, I checked."
+
+        monkeypatch.setattr(cc, "_stream", fake_stream)
+        transcript = cc.Transcript()
+        cc._say_turn(seat, transcript, "agents and logs?")
+        voice_prompt = seen["messages"][-1]["content"]
+        # BOTH findings must reach the voice model — not just the last call.
+        assert "agent_list" in voice_prompt and "logs_tail" in voice_prompt
+        assert transcript.messages()[-1]["content"] == "Both, I checked."
 
     def test_no_tool_turn_is_voice_only(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
