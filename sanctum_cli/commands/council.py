@@ -69,6 +69,10 @@ class Seat:
     style: str  # rich color for the nameplate
     verb: str  # what the seat does while it thinks ("ponders", …)
     tools: tuple[str, ...] = ()
+    # When set on an armed seat, tool turns run the tool loop on THIS model
+    # (which can tool) and the final answer is voiced on `model` (which may
+    # not). Unset → the armed loop runs entirely on `model`.
+    tool_model: str | None = None
 
 
 SEATS: dict[str, Seat] = {

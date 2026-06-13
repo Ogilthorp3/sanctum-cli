@@ -616,6 +616,22 @@ class TestSeatTools:
                 "logs_tail",
             }
 
+    def test_tool_model_defaults_none_and_is_optional(self) -> None:
+        # Unarmed seats carry no tool_model.
+        assert cc.SEATS["windu"].tool_model is None
+        # The field exists and is constructible.
+        s = cc.Seat(label="X", model="m", persona="p", style="white", verb="thinks")
+        assert s.tool_model is None
+        s2 = cc.Seat(
+            label="X",
+            model="m",
+            persona="p",
+            style="white",
+            verb="thinks",
+            tool_model="gemini-31-pro",
+        )
+        assert s2.tool_model == "gemini-31-pro"
+
 
 class TestPersonaComposition:
     def test_armed_seats_get_instruments_clause(self) -> None:
