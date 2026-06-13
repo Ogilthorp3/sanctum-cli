@@ -782,7 +782,7 @@ class TestSayTurn:
 
         monkeypatch.setattr(cc, "_tool_turn", fake_tool_turn)
         transcript = cc.Transcript()
-        seat = cc.SEATS["yoda"]
+        seat = replace(cc.SEATS["yoda"], tool_model=None)  # single-model _tool_turn path
         # Must not raise despite malformed markup in the answer
         cc._say_turn(seat, transcript, "q")
         msgs = transcript.messages()
@@ -801,7 +801,7 @@ class TestSayTurn:
 
         monkeypatch.setattr(cc, "_tool_turn", fake_tool_turn)
         transcript = cc.Transcript()
-        seat = cc.SEATS["yoda"]
+        seat = replace(cc.SEATS["yoda"], tool_model=None)  # single-model _tool_turn path
         cc._say_turn(seat, transcript, "q")
         msgs = transcript.messages()
         assert msgs[-1]["content"] == "(no answer)"
