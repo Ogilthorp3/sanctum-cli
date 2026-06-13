@@ -746,3 +746,13 @@ class TestSayTurn:
         # The error path adds a placeholder to the transcript
         assert msgs[-1]["role"] == "assistant"
         assert msgs[-1]["content"] == "(seat unavailable)"
+
+
+class TestCanonVoice:
+    def test_yoda_persona_carries_the_may31_canon(self) -> None:
+        p = cc.SEATS["yoda"].persona
+        assert "invert" in p.lower(), "movie-voice inversion is the default register"
+        assert "plain" in p.lower() and "tool" in p.lower(), (
+            "the machine-boundary line is load-bearing now that he has tools"
+        )
+        assert "NO tools" not in p, "the tool clause is composed by _persona(), not hardcoded"
