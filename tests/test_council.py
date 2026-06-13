@@ -638,6 +638,42 @@ class TestToolLoop:
         assert ex.params == {"service": "r2d2"}
         assert isinstance(ex.result, str) and ex.result  # the (redacted) tool output
 
+    def test_run_tool_loop_accumulates_multiple_exchanges(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Exchanges accumulate across every tool call in the turn — the list
+        is initialized once before the loop, not per iteration. The voice
+        phase (Task 4) flattens ALL findings, so a regression that reset the
+        list each pass would silently drop every finding but the last."""
+        monkeypatch.setattr(cc.council_tools, "AUDIT_LEDGER", tmp_path / "a.jsonl")
+        monkeypatch.setattr(
+            cc,
+            "_post_with_tools",
+            self._fake_responses(
+                {
+                    "stop_reason": "tool_use",
+                    "content": [
+                        {"type": "tool_use", "id": "t1", "name": "agent_list", "input": {}}
+                    ],
+                },
+                {
+                    "stop_reason": "tool_use",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "t2",
+                            "name": "logs_tail",
+                            "input": {"service": "r2d2"},
+                        }
+                    ],
+                },
+                {"stop_reason": "end_turn", "content": [{"type": "text", "text": "Both checked."}]},
+            ),
+        )
+        result = cc._run_tool_loop(cc.SEATS["yoda"], [{"role": "user", "content": "check both"}])
+        assert result.answer == "Both checked."
+        assert [e.tool for e in result.exchanges] == ["agent_list", "logs_tail"]
+
 
 class TestSeatTools:
     def test_yoda_and_mothma_are_armed_others_are_not(self) -> None:
