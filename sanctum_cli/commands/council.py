@@ -143,6 +143,9 @@ SEATS: dict[str, Seat] = {
         style="green",
         verb="ponders",
         tools=("sanctum_status", "sanctum_doctor", "agent_list", "logs_tail"),
+        # Gather on Gemini 3.1 Pro (tools work via proxyd translation), voice on
+        # council-max-thinking (Opus/Max). See the 2026-06-13 hybrid-transport spec.
+        tool_model="gemini-31-pro",
     ),
     "windu": Seat(
         label="Windu",
@@ -222,6 +225,7 @@ SEATS: dict[str, Seat] = {
         style="red",
         verb="checks the runbook",
         tools=("sanctum_status", "sanctum_doctor", "agent_list", "logs_tail"),
+        tool_model="gemini-31-pro",
     ),
 }
 

@@ -704,6 +704,15 @@ class TestSeatTools:
         )
         assert s2.tool_model == "gemini-31-pro"
 
+    def test_armed_seats_use_gemini_hands(self) -> None:
+        for k in ("yoda", "mothma"):
+            assert cc.SEATS[k].tools, f"{k} should be armed"
+            assert cc.SEATS[k].tool_model == "gemini-31-pro", f"{k} gathers on Gemini"
+        # Unarmed seats never get a tool_model.
+        for k, s in cc.SEATS.items():
+            if not s.tools:
+                assert s.tool_model is None, f"{k} is unarmed; no tool_model"
+
 
 class TestPersonaComposition:
     def test_armed_seats_get_instruments_clause(self) -> None:
