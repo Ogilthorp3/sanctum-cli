@@ -898,6 +898,11 @@ class TestSayTurn:
         assert "tool_use" not in blob and "tool_result" not in blob
         assert "agent_list" in blob
         assert "Instruments you have" not in seen["system"]
+        # The voice persona frames the findings as already-consulted instruments,
+        # NOT the blunt no-tools clause — which made Yoda say "tools I have none"
+        # while reporting real tool data (observed in the 2026-06-13 live smoke).
+        assert "no tools" not in seen["system"].lower()
+        assert "consulted" in seen["system"].lower()
         assert transcript.messages()[-1]["content"] == "Healthy, the agents are."
 
     def test_gather_then_voice_flattens_all_findings_into_voice_prompt(
@@ -1085,3 +1090,47 @@ class TestFlattenFindings:
 
     def test_empty_exchanges_is_empty_string(self) -> None:
         assert cc._flatten_findings(()) == ""
+
+
+class TestVoicePersona:
+    def test_voice_persona_reports_from_instruments_not_no_tools(self) -> None:
+        """The voice phase persona keeps the canon prose but frames findings as
+        already-consulted instruments — it must NOT carry the blunt no-tools
+        clause that made the voice model contradict itself."""
+        v = cc._voice_persona(cc.SEATS["yoda"])
+        assert cc.SEATS["yoda"].persona in v  # canon prose preserved
+        assert "no tools" not in v.lower()
+        assert "never claim to have" not in v.lower()
+        assert "instrument" in v.lower() and "consulted" in v.lower()
+
+    def test_no_tool_turn_voice_uses_honest_no_tools_clause(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """When the gather called NO tools (empty findings), the voice phase
+        has nothing to report from, so it falls back to the honest no-tools
+        persona — not the instruments-consulted framing."""
+        monkeypatch.setattr(cc.council_tools, "AUDIT_LEDGER", tmp_path / "a.jsonl")
+        seat = cc.Seat(
+            label="Yoda",
+            model="opus-voice",
+            persona="P",
+            style="green",
+            verb="ponders",
+            tools=("agent_list",),
+            tool_model="gemini-hands",
+        )
+
+        def fake_post(seat_, messages, *, system, tools):  # type: ignore[misc]
+            return {"stop_reason": "end_turn", "content": [{"type": "text", "text": "x"}]}
+
+        monkeypatch.setattr(cc, "_post_with_tools", fake_post)
+        seen: dict = {}
+
+        def fake_stream(s, messages, *, system):  # type: ignore[misc]
+            seen["system"] = system
+            yield "Quiet, it is."
+
+        monkeypatch.setattr(cc, "_stream", fake_stream)
+        cc._say_turn(seat, cc.Transcript(), "how is it?")
+        # No findings → honest no-tools clause, not the instruments framing.
+        assert "consulted" not in seen["system"].lower()

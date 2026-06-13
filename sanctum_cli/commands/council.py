@@ -789,6 +789,23 @@ def _stream_and_print(seat: Seat, messages: list[dict[str, str]], *, system: str
     return answer if answer else "(no answer)"
 
 
+def _voice_persona(seat: Seat) -> str:
+    """System prompt for the voice phase when the gather model already ran
+    tools: the canon persona plus a clause framing the findings as real
+    observations to report. NOT the blunt no-tools clause — that made the
+    voice model contradict itself ('tools I have none' while reporting real
+    tool data, seen in the 2026-06-13 live smoke). The don't-invent guardrail
+    is kept: for anything the instruments did not show, name the command.
+    """
+    return (
+        seat.persona + "\n\nThe instruments were consulted for you this turn; their results"
+        " appear below as real observations — report from them plainly, in your"
+        " own voice. You do not call tools yourself, so for anything the"
+        " instruments did not show, name the check the operator should run"
+        " rather than guess or claim to have looked further."
+    )
+
+
 def _gather_then_voice(seat: Seat, transcript: Transcript, raw_arg: str) -> None:
     """Two-stage armed turn: gather facts on seat.tool_model (which can tool),
     then voice the answer on seat.model (the canon voice). The voice model
@@ -823,8 +840,13 @@ def _gather_then_voice(seat: Seat, transcript: Transcript, raw_arg: str) -> None
     block = _flatten_findings(findings.exchanges)
     if block:
         voice_msgs = [*voice_msgs[:-1], {"role": "user", "content": f"{raw_arg}\n\n{block}"}]
+        voice_system = _voice_persona(seat)
+    else:
+        # No tools were called — nothing to report from, so the honest
+        # no-tools clause is correct (this turn was effectively voice-only).
+        voice_system = _persona(seat, armed=False)
     try:
-        answer = _stream_and_print(seat, voice_msgs, system=_persona(seat, armed=False))
+        answer = _stream_and_print(seat, voice_msgs, system=voice_system)
     except Exception:
         answer = findings.answer or "(no answer)"
         console.print(Text(f"{seat.label}: {answer}"), soft_wrap=True)
