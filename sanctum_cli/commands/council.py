@@ -75,6 +75,24 @@ class Seat:
     tool_model: str | None = None
 
 
+@dataclass(frozen=True)
+class ToolExchange:
+    """One executed instrument call, kept so the voice phase can summarize it."""
+
+    tool: str
+    params: dict[str, object]
+    result: str  # already redacted by run_tool
+    is_error: bool
+
+
+@dataclass(frozen=True)
+class ToolLoopResult:
+    """The gather phase's output: the model's final text plus what it gathered."""
+
+    answer: str
+    exchanges: tuple[ToolExchange, ...]
+
+
 SEATS: dict[str, Seat] = {
     "yoda": Seat(
         label="Yoda",
@@ -392,7 +410,7 @@ def _persona(seat: Seat, *, armed: bool | None = None) -> str:
     )
 
 
-def _tool_turn(seat: Seat, messages: list[dict[str, object]]) -> str:
+def _run_tool_loop(seat: Seat, messages: list[dict[str, object]]) -> ToolLoopResult:
     """Buffered Anthropic tool-use loop for armed seats. The cap and the
     breaker keep a confused model from sawing at the instruments all
     night (council #6). Statuses run sequentially — verb dots while the
@@ -401,6 +419,9 @@ def _tool_turn(seat: Seat, messages: list[dict[str, object]]) -> str:
     Per-block extraction is hardened: malformed tool_use blocks (stringified
     JSON input, missing id, missing name) degrade per-block with an audited
     error result fed back to the model rather than aborting the turn.
+
+    Returns a ToolLoopResult with the final answer string and every executed
+    ToolExchange (for the voice phase to summarize).
     """
     mounted = council_tools.mount_tools(seat.tools, is_tty=console.is_terminal)
     specs: list[dict[str, object]] = [
@@ -414,6 +435,7 @@ def _tool_turn(seat: Seat, messages: list[dict[str, object]]) -> str:
     synth_counter = 0
     first_post = True
     iterations = 0
+    exchanges: list[ToolExchange] = []
     while True:
         # Absolute backstop: no model — malformed, looping, or adversarial —
         # may drive this loop past a bounded number of POSTs. Every legitimate
@@ -421,7 +443,10 @@ def _tool_turn(seat: Seat, messages: list[dict[str, object]]) -> str:
         # defense-in-depth against a future logic slip re-opening the balloon.
         iterations += 1
         if iterations > MAX_TOOL_LOOP_ITERATIONS:
-            return "(tool loop bound reached — answering without further tools)"
+            return ToolLoopResult(
+                answer="(tool loop bound reached — answering without further tools)",
+                exchanges=tuple(exchanges),
+            )
         with console.status(
             thinking_markup(seat), spinner="simpleDotsScrolling", spinner_style=seat.style
         ):
@@ -440,7 +465,10 @@ def _tool_turn(seat: Seat, messages: list[dict[str, object]]) -> str:
             answer = "".join(
                 b.get("text", "") for b in blocks if isinstance(b, dict) and b.get("type") == "text"
             ).strip()
-            return answer if answer else "(no answer)"
+            return ToolLoopResult(
+                answer=answer if answer else "(no answer)",
+                exchanges=tuple(exchanges),
+            )
 
         results: list[dict[str, object]] = []
         echo_tool_blocks: list[dict[str, object]] = []
@@ -557,6 +585,14 @@ def _tool_turn(seat: Seat, messages: list[dict[str, object]]) -> str:
                     session=session,
                 )
             consecutive_errors = consecutive_errors + 1 if result.is_error else 0
+            exchanges.append(
+                ToolExchange(
+                    tool=str(block_name),
+                    params=dict(block_input or {}),
+                    result=result.content,
+                    is_error=result.is_error,
+                )
+            )
             # Echo the NORMALIZED block (rescued input as a dict), paired 1:1
             # with its tool_result by id.
             echo_tool_blocks.append(
@@ -579,21 +615,36 @@ def _tool_turn(seat: Seat, messages: list[dict[str, object]]) -> str:
         if budget_hit:
             # Distinct strings so the caller can tell the two failure modes apart.
             if consecutive_errors >= 2:
-                return "(instrument errors — answering without further tools)"
-            return "(tool call cap reached — partial answer only)"
+                return ToolLoopResult(
+                    answer="(instrument errors — answering without further tools)",
+                    exchanges=tuple(exchanges),
+                )
+            return ToolLoopResult(
+                answer="(tool call cap reached — partial answer only)",
+                exchanges=tuple(exchanges),
+            )
 
         # Nothing to feed back — every block was a nameless drop. Do NOT loop:
         # a user message with an empty content array is a protocol 400, and
         # re-POSTing the identical context invites the model to repeat the same
         # malformed batch forever (the balloon). End the turn honestly instead.
         if not results:
-            return "(no usable tool calls — answering without tools)"
+            return ToolLoopResult(
+                answer="(no usable tool calls — answering without tools)",
+                exchanges=tuple(exchanges),
+            )
 
         # Echo the normalized assistant turn — original text blocks plus the
         # normalized tool_use blocks — then the paired tool_results.
         text_blocks = [b for b in blocks if isinstance(b, dict) and b.get("type") == "text"]
         convo.append({"role": "assistant", "content": text_blocks + echo_tool_blocks})
         convo.append({"role": "user", "content": results})
+
+
+def _tool_turn(seat: Seat, messages: list[dict[str, object]]) -> str:
+    """Back-compat: armed seats without a tool_model run the loop on
+    seat.model and want just the final answer string."""
+    return _run_tool_loop(seat, messages).answer
 
 
 # ── Fan-out: the full council deliberates ─────────────────────────────

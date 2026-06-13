@@ -603,6 +603,41 @@ class TestToolLoop:
         # The error breaker should end it well before the hard backstop.
         assert answer == "(instrument errors — answering without further tools)"
 
+    def test_run_tool_loop_records_exchanges(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """_run_tool_loop returns both the final answer and the executed
+        tool exchanges (name, params, result) for the voice phase to use."""
+        monkeypatch.setattr(cc.council_tools, "AUDIT_LEDGER", tmp_path / "a.jsonl")
+        monkeypatch.setattr(
+            cc,
+            "_post_with_tools",
+            self._fake_responses(
+                {
+                    "stop_reason": "tool_use",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "tu_1",
+                            "name": "logs_tail",
+                            "input": {"service": "r2d2"},
+                        }
+                    ],
+                },
+                {
+                    "stop_reason": "end_turn",
+                    "content": [{"type": "text", "text": "Checked, I have."}],
+                },
+            ),
+        )
+        result = cc._run_tool_loop(cc.SEATS["yoda"], [{"role": "user", "content": "logs?"}])
+        assert result.answer == "Checked, I have."
+        assert len(result.exchanges) == 1
+        ex = result.exchanges[0]
+        assert ex.tool == "logs_tail"
+        assert ex.params == {"service": "r2d2"}
+        assert isinstance(ex.result, str) and ex.result  # the (redacted) tool output
+
 
 class TestSeatTools:
     def test_yoda_and_mothma_are_armed_others_are_not(self) -> None:
