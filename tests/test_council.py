@@ -13,6 +13,7 @@ is exercised against a stub — never a live proxyd.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import pytest
@@ -737,21 +738,27 @@ class TestSayTurn:
     placeholder without wiring up an interactive REPL loop.
     """
 
-    def test_ctrl_c_aborts_tool_turn_not_session(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """KeyboardInterrupt from _tool_turn must result in '(turn aborted)'
-        in the transcript, not a propagated exception."""
+    @staticmethod
+    def _fake_responses(*responses: dict) -> object:
+        seq = iter(responses)
 
-        def raising_tool_turn(seat, messages):  # type: ignore[misc]
+        def fake_post(seat, messages, *, system, tools):  # type: ignore[misc]
+            return next(seq)
+
+        return fake_post
+
+    def test_ctrl_c_aborts_tool_turn_not_session(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """KeyboardInterrupt from the armed (no-tool_model) loop must yield
+        '(turn aborted)' in the transcript, not a propagated exception."""
+
+        def raising(seat, messages):  # type: ignore[misc]
             raise KeyboardInterrupt
 
-        monkeypatch.setattr(cc, "_tool_turn", raising_tool_turn)
+        monkeypatch.setattr(cc, "_tool_turn", raising)
         transcript = cc.Transcript()
-        seat = cc.SEATS["yoda"]
-        # Must not raise — the abort is swallowed and logged
+        seat = replace(cc.SEATS["yoda"], tool_model=None)  # force the single-model path
         cc._say_turn(seat, transcript, "what is status?")
-        msgs = transcript.messages()
-        assert msgs[-1]["role"] == "assistant"
-        assert msgs[-1]["content"] == "(turn aborted)"
+        assert transcript.messages()[-1]["content"] == "(turn aborted)"
 
     def test_markup_in_answer_does_not_raise(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -833,6 +840,153 @@ class TestSayTurn:
         # The error path adds a placeholder to the transcript
         assert msgs[-1]["role"] == "assistant"
         assert msgs[-1]["content"] == "(seat unavailable)"
+
+    def test_gather_then_voice_opus_voices_gemini_findings(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """An armed seat with a tool_model gathers on the tool_model then
+        voices on seat.model. The voice model must receive the flattened
+        findings as TEXT (never tool_use/tool_result blocks) and its streamed
+        text is the answer."""
+        monkeypatch.setattr(cc.council_tools, "AUDIT_LEDGER", tmp_path / "a.jsonl")
+        seat = cc.Seat(
+            label="Yoda",
+            model="opus-voice",
+            persona="P",
+            style="green",
+            verb="ponders",
+            tools=("agent_list",),
+            tool_model="gemini-hands",
+        )
+        monkeypatch.setattr(
+            cc,
+            "_post_with_tools",
+            self._fake_responses(
+                {
+                    "stop_reason": "tool_use",
+                    "content": [
+                        {"type": "tool_use", "id": "t1", "name": "agent_list", "input": {}}
+                    ],
+                },
+                {"stop_reason": "end_turn", "content": [{"type": "text", "text": "gemini text"}]},
+            ),
+        )
+        seen: dict = {}
+
+        def fake_stream(s, messages, *, system):  # type: ignore[misc]
+            seen["model"] = s.model
+            seen["system"] = system
+            seen["messages"] = messages
+            yield "Healthy, the agents are."
+
+        monkeypatch.setattr(cc, "_stream", fake_stream)
+        transcript = cc.Transcript()
+        cc._say_turn(seat, transcript, "agents ok?")
+        assert seen["model"] == "opus-voice"
+        blob = repr(seen["messages"])
+        assert "tool_use" not in blob and "tool_result" not in blob
+        assert "agent_list" in blob
+        assert "Instruments you have" not in seen["system"]
+        assert transcript.messages()[-1]["content"] == "Healthy, the agents are."
+
+    def test_no_tool_turn_is_voice_only(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """When the tool_model calls no tools, it's effectively voice-only:
+        the voice model answers the bare question (no findings block)."""
+        monkeypatch.setattr(cc.council_tools, "AUDIT_LEDGER", tmp_path / "a.jsonl")
+        seat = cc.Seat(
+            label="Yoda",
+            model="opus-voice",
+            persona="P",
+            style="green",
+            verb="ponders",
+            tools=("agent_list",),
+            tool_model="gemini-hands",
+        )
+        monkeypatch.setattr(
+            cc,
+            "_post_with_tools",
+            self._fake_responses(
+                {"stop_reason": "end_turn", "content": [{"type": "text", "text": "no tools used"}]},
+            ),
+        )
+        captured: dict = {}
+
+        def fake_stream(s, messages, *, system):  # type: ignore[misc]
+            captured["messages"] = messages
+            yield "Quiet, the haus is."
+
+        monkeypatch.setattr(cc, "_stream", fake_stream)
+        transcript = cc.Transcript()
+        cc._say_turn(seat, transcript, "how is it?")
+        assert captured["messages"][-1]["content"] == "how is it?"
+        assert transcript.messages()[-1]["content"] == "Quiet, the haus is."
+
+    def test_voice_failure_falls_back_to_gathered_answer(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """If the voice model errors, return the tool_model's own final text
+        rather than nothing."""
+        monkeypatch.setattr(cc.council_tools, "AUDIT_LEDGER", tmp_path / "a.jsonl")
+        seat = cc.Seat(
+            label="Yoda",
+            model="opus-voice",
+            persona="P",
+            style="green",
+            verb="ponders",
+            tools=("agent_list",),
+            tool_model="gemini-hands",
+        )
+        monkeypatch.setattr(
+            cc,
+            "_post_with_tools",
+            self._fake_responses(
+                {
+                    "stop_reason": "end_turn",
+                    "content": [{"type": "text", "text": "gathered fallback"}],
+                },
+            ),
+        )
+
+        def boom_stream(s, messages, *, system):  # type: ignore[misc]
+            raise RuntimeError("voice bridge down [/bad]")
+            yield  # generator
+
+        monkeypatch.setattr(cc, "_stream", boom_stream)
+        transcript = cc.Transcript()
+        cc._say_turn(seat, transcript, "q")  # must not raise (markup-safe)
+        assert transcript.messages()[-1]["content"] == "gathered fallback"
+
+    def test_gather_tools_rejected_falls_back_to_chat(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """If the tool_model rejects tools (4xx), degrade to a plain chat
+        answer on the voice model with the unarmed persona."""
+        monkeypatch.setattr(cc.council_tools, "AUDIT_LEDGER", tmp_path / "a.jsonl")
+        seat = cc.Seat(
+            label="Yoda",
+            model="opus-voice",
+            persona="P",
+            style="green",
+            verb="ponders",
+            tools=("agent_list",),
+            tool_model="gemini-hands",
+        )
+
+        def reject(seat_, messages, *, system, tools):  # type: ignore[misc]
+            raise cc.ToolsRejected("HTTP 400")
+
+        monkeypatch.setattr(cc, "_post_with_tools", reject)
+
+        def fake_stream(s, messages, *, system):  # type: ignore[misc]
+            assert "Instruments you have" not in system
+            yield "Chat only, this turn."
+
+        monkeypatch.setattr(cc, "_stream", fake_stream)
+        transcript = cc.Transcript()
+        cc._say_turn(seat, transcript, "q")
+        assert transcript.messages()[-1]["content"] == "Chat only, this turn."
 
 
 class TestCanonVoice:

@@ -20,7 +20,7 @@ import json
 import os
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Annotated, cast
 
 if TYPE_CHECKING:
@@ -754,18 +754,93 @@ def _print_seats(active: str) -> None:
         console.print(f"  [{seat.style}]{marker} /{jedi:<8}[/] {seat.label} — {seat.model}")
 
 
+def _stream_and_print(seat: Seat, messages: list[dict[str, str]], *, system: str) -> str:
+    """Stream a seat's reply on seat.model, printing deltas markup-safe, and
+    return the joined text. KeyboardInterrupt prints '(turn aborted)' and
+    returns it. Transport errors propagate — the caller owns the fallback.
+    """
+    chunks: list[str] = []
+    stream = _stream(seat, messages, system=system)
+    try:
+        with console.status(
+            thinking_markup(seat), spinner="simpleDotsScrolling", spinner_style=seat.style
+        ):
+            first = next(stream, None)
+    except KeyboardInterrupt:
+        console.print("\n[dim](turn aborted)[/]")
+        return "(turn aborted)"
+    console.print(f"[{seat.style}]{seat.label}:[/] ", end="")
+    if first is not None:
+        chunks.append(first)
+        console.print(Text(first), end="", soft_wrap=True)
+        try:
+            for delta in stream:
+                chunks.append(delta)
+                console.print(Text(delta), end="", soft_wrap=True)
+        except KeyboardInterrupt:
+            console.print("\n[dim](turn aborted)[/]")
+            return "".join(chunks) if chunks else "(turn aborted)"
+    console.print()
+    answer = "".join(chunks)
+    return answer if answer else "(no answer)"
+
+
+def _gather_then_voice(seat: Seat, transcript: Transcript, raw_arg: str) -> None:
+    """Two-stage armed turn: gather facts on seat.tool_model (which can tool),
+    then voice the answer on seat.model (the canon voice). The voice model
+    never sees the tool protocol — findings are flattened to plain text.
+    """
+    gather_seat = replace(seat, model=seat.tool_model or seat.model)
+    try:
+        findings = _run_tool_loop(
+            gather_seat, cast("list[dict[str, object]]", transcript.messages())
+        )
+    except KeyboardInterrupt:
+        console.print("\n[dim](turn aborted)[/]")
+        transcript.add("assistant", "(turn aborted)")
+        return
+    except ToolsRejected:
+        try:
+            answer = _stream_and_print(
+                seat, transcript.messages(), system=_persona(seat, armed=False)
+            )
+        except Exception as e:
+            console.print(f"\n[red]⚠ {escape(str(e))}[/]")
+            transcript.add("assistant", "(seat unavailable)")
+            return
+        transcript.add("assistant", answer)
+        return
+    except Exception as e:
+        console.print(f"[red]⚠ {escape(str(e))}[/]")
+        transcript.add("assistant", "(seat unavailable)")
+        return
+
+    voice_msgs = transcript.messages()
+    block = _flatten_findings(findings.exchanges)
+    if block:
+        voice_msgs = [*voice_msgs[:-1], {"role": "user", "content": f"{raw_arg}\n\n{block}"}]
+    try:
+        answer = _stream_and_print(seat, voice_msgs, system=_persona(seat, armed=False))
+    except Exception:
+        answer = findings.answer or "(no answer)"
+        console.print(Text(f"{seat.label}: {answer}"), soft_wrap=True)
+    transcript.add("assistant", answer)
+
+
 def _say_turn(
     seat: Seat,
     transcript: Transcript,
     raw_arg: str,
 ) -> None:
-    """Execute one say/switch_say turn: tool loop (armed) or streaming.
-
-    Extracted from ``_repl`` so that Ctrl-C behaviour and the streaming
-    path can be unit-tested without wiring up a full interactive REPL loop.
-    Returns normally after the turn completes (including on Ctrl-C abort).
-    """
+    """Execute one say/switch_say turn. Three paths: two-stage gather+voice
+    (armed seat with a tool_model), single-model buffered tool loop (armed,
+    no tool_model), or plain streaming chat (unarmed)."""
     transcript.add("user", raw_arg)
+
+    if seat.tools and seat.tool_model:
+        _gather_then_voice(seat, transcript, raw_arg)
+        return
+
     if seat.tools:
         try:
             try:
@@ -775,63 +850,24 @@ def _say_turn(
                 transcript.add("assistant", "(turn aborted)")
                 return
             answer = answer if answer else "(no answer)"
-            # Markup-safe answer printing: nameplate via markup, answer as plain Text
             nameplate = Text.from_markup(f"[{seat.style}]{seat.label}:[/] ")
             console.print(nameplate.append_text(Text(answer)), soft_wrap=True)
             transcript.add("assistant", answer)
             return
         except ToolsRejected:
             console.print("[dim](seat's model declines tools — chat only this turn)[/]")
-            # Fall through to the streaming path with unarmed persona
         except Exception as e:
             console.print(f"[red]⚠ {escape(str(e))}[/]")
             transcript.add("assistant", "(seat unavailable)")
             return
 
-    # streaming path — runs when unarmed OR after ToolsRejected
-    # Pass armed=False when degrading from ToolsRejected so the model gets
-    # the honest unarmed persona rather than the instruments clause.
     persona_system = _persona(seat, armed=False) if seat.tools else _persona(seat)
-    chunks: list[str] = []
     try:
-        # _stream is lazy — the request fires on the first pull, so the
-        # status animates exactly across the model's thinking dead-air
-        # and vanishes the moment the first word lands.
-        stream = _stream(seat, transcript.messages(), system=persona_system)
-        try:
-            with console.status(
-                thinking_markup(seat), spinner="simpleDotsScrolling", spinner_style=seat.style
-            ):
-                first = next(stream, None)
-        except KeyboardInterrupt:
-            console.print("\n[dim](turn aborted)[/]")
-            transcript.add("assistant", "(turn aborted)")
-            return
-        console.print(f"[{seat.style}]{seat.label}:[/] ", end="")
-        if first is not None:
-            chunks.append(first)
-            # Deltas are model output — print them as Text so a stray ``[/bad]``
-            # in the stream can't raise MarkupError and crash the REPL turn.
-            console.print(Text(first), end="", soft_wrap=True)
-            try:
-                for delta in stream:
-                    chunks.append(delta)
-                    console.print(Text(delta), end="", soft_wrap=True)
-            except KeyboardInterrupt:
-                console.print("\n[dim](turn aborted)[/]")
-                answer = "".join(chunks) if chunks else "(turn aborted)"
-                transcript.add("assistant", answer)
-                return
-        console.print()
+        answer = _stream_and_print(seat, transcript.messages(), system=persona_system)
     except Exception as e:
-        # Escape the error text: a network/HTTP message can itself carry markup
-        # (``[/bad]``), and an unescaped interpolation would raise a SECOND
-        # MarkupError out of the handler and take down the whole REPL.
         console.print(f"\n[red]⚠ {escape(str(e))}[/]")
         transcript.add("assistant", "(seat unavailable)")
         return
-    answer = "".join(chunks)
-    answer = answer if answer else "(no answer)"
     transcript.add("assistant", answer)
 
 
