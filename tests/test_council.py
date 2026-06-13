@@ -843,3 +843,26 @@ class TestCanonVoice:
             "the machine-boundary line is load-bearing now that he has tools"
         )
         assert "NO tools" not in p, "the tool clause is composed by _persona(), not hardcoded"
+
+
+class TestFlattenFindings:
+    def test_flattens_to_labeled_block(self) -> None:
+        exchanges = (
+            cc.ToolExchange(tool="agent_list", params={}, result="3 agents OK", is_error=False),
+            cc.ToolExchange(
+                tool="logs_tail", params={"service": "r2d2"}, result="last line: ok", is_error=False
+            ),
+        )
+        text = cc._flatten_findings(exchanges)
+        assert "agent_list" in text and "3 agents OK" in text
+        assert "logs_tail" in text and "r2d2" in text and "last line: ok" in text
+
+    def test_byte_budget_truncates_long_results(self) -> None:
+        huge = "x" * 50_000
+        exchanges = (cc.ToolExchange(tool="logs_tail", params={}, result=huge, is_error=False),)
+        text = cc._flatten_findings(exchanges)
+        assert len(text.encode("utf-8")) <= cc.FINDINGS_MAX_BYTES + 200  # block + marker headroom
+        assert "truncated" in text.lower()
+
+    def test_empty_exchanges_is_empty_string(self) -> None:
+        assert cc._flatten_findings(()) == ""

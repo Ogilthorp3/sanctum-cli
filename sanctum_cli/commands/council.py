@@ -54,6 +54,10 @@ TOOL_CALL_CAP = 8
 # panicked. Defense-in-depth, independent of the per-call cap.
 MAX_TOOL_LOOP_ITERATIONS = TOOL_CALL_CAP * 2
 
+# Byte budget for the flattened findings block handed to the voice model.
+# Bounds the voice prompt so a chatty tool result can't blow it up.
+FINDINGS_MAX_BYTES = 8_000
+
 
 class ToolsRejected(RuntimeError):  # noqa: N818
     """Raised when the bridge rejects a tools-bearing request (4xx)."""
@@ -91,6 +95,27 @@ class ToolLoopResult:
 
     answer: str
     exchanges: tuple[ToolExchange, ...]
+
+
+def _flatten_findings(exchanges: tuple[ToolExchange, ...]) -> str:
+    """Render gathered tool results as a plain-text block for the voice model.
+
+    Results are already redacted by run_tool; this formats and byte-caps them
+    so the voice prompt stays bounded. Returns '' when nothing was gathered.
+    """
+    if not exchanges:
+        return ""
+    lines = ["The instruments returned (use these facts; do not invent others):"]
+    for ex in exchanges:
+        params = f"({ex.params})" if ex.params else ""
+        tag = " [error]" if ex.is_error else ""
+        lines.append(f"- {ex.tool}{params}{tag} → {ex.result}")
+    block = "\n".join(lines)
+    data = block.encode("utf-8", errors="replace")
+    if len(data) > FINDINGS_MAX_BYTES:
+        block = data[:FINDINGS_MAX_BYTES].decode("utf-8", errors="replace")
+        block += "\n[findings truncated to fit the voice budget]"
+    return block
 
 
 SEATS: dict[str, Seat] = {
