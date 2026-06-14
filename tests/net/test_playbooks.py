@@ -37,3 +37,12 @@ def test_match_cgnat_overrides() -> None:
 def test_match_falls_back_to_generic() -> None:
     pb = playbooks.match(gateway_ip="10.1.1.1", http_title="MysteryRouter", nat=Nat.DOUBLE)
     assert pb.id == "generic"
+
+
+def test_detect_only_returns_known_playbook_ids() -> None:
+    # The matcher must never return an id that isn't in BUILTINS (manifest contract).
+    from sanctum_cli.net.types import Nat
+
+    for nat in (Nat.SINGLE, Nat.DOUBLE, Nat.CGNAT, Nat.UNKNOWN):
+        pb = playbooks.match(gateway_ip="203.0.113.1", http_title="whatever", nat=nat)
+        assert pb.id in playbooks.BUILTINS
