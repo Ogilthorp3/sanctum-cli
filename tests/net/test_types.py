@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import dataclasses
+
 from sanctum_cli.net.types import Baseline, Nat, Playbook, TopologyReport, Verdict
 
 
@@ -29,8 +31,6 @@ def test_topology_report_is_frozen() -> None:
         reason="double-NAT behind Bell gateway",
     )
     assert r.isp == "bell"
-    import dataclasses
-
     try:
         r.isp = "rogers"  # type: ignore[misc]
         raise AssertionError("expected frozen dataclass")

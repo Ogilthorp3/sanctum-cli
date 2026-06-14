@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Literal
 
 
 class Nat(StrEnum):
@@ -35,7 +36,7 @@ class TopologyReport:
 class Playbook:
     id: str
     display_name: str
-    achieves: str  # "single_nat" | "not_possible"
+    achieves: Literal["single_nat", "not_possible"]
     gateway_ips: tuple[str, ...]
     title_contains: tuple[str, ...]
     admin_url_template: str
