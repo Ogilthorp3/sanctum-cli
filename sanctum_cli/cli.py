@@ -38,6 +38,7 @@ from sanctum_cli.commands import uninstall as uninstall_cmd
 from sanctum_cli.commands import update as update_cmd
 from sanctum_cli.commands import vision as vision_cmd
 from sanctum_cli.commands.module import module_app
+from sanctum_cli.commands.net import net_app
 from sanctum_cli.errors import ExitCode, SanctumError
 
 app = typer.Typer(
@@ -297,6 +298,7 @@ def schedule_top() -> None:
 
 
 app.add_typer(module_app, name="module")
+app.add_typer(net_app, name="net")
 
 keys_app = typer.Typer(help="Keychain-backed credential helpers.")
 app.add_typer(keys_app, name="keys")
