@@ -1,35 +1,37 @@
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from sanctum_cli.net.types import Playbook, TopologyReport
 
+_PLACEHOLDER = re.compile(r"\{(admin_url|gateway_ip|firewalla_wan_mac)\}")
 
-def _subst(template: str, *, gateway_ip: str, admin_url: str, mac: str) -> str:
-    """Single-pass substitution of ONLY our known keys.
 
-    We do NOT use str.format()/Template so that a hostile value containing
-    '{gateway_ip}' or Rich markup is inserted verbatim and never re-expanded.
+def _fill(template: str, repl: dict[str, str]) -> str:
+    """Single-pass placeholder substitution.
+
+    Uses re.sub so each placeholder is replaced exactly once from `repl`;
+    re.sub never rescans inserted text, so a value containing '{gateway_ip}'
+    or other placeholder-looking text (or Rich markup) is inserted verbatim
+    and can never trigger a second round of substitution.
     """
-    out = template
-    out = out.replace("{admin_url}", admin_url)
-    out = out.replace("{gateway_ip}", gateway_ip)
-    out = out.replace("{firewalla_wan_mac}", mac)
-    return out
+    return _PLACEHOLDER.sub(lambda m: repl[m.group(1)], template)
 
 
 def render_plan(report: TopologyReport, playbook: Playbook) -> str:
     gw = report.gateway_ip or "your router's address"
+    mac = report.firewalla_wan_mac or "your Firewalla's WAN MAC"
     admin_url = (
-        playbook.admin_url_template.replace("{gateway_ip}", gw)
+        _fill(playbook.admin_url_template, {"admin_url": "", "gateway_ip": gw, "firewalla_wan_mac": mac})
         if playbook.admin_url_template
         else ""
     )
-    mac = report.firewalla_wan_mac or "your Firewalla's WAN MAC"
+    repl = {"admin_url": admin_url, "gateway_ip": gw, "firewalla_wan_mac": mac}
 
     def sub(t: str) -> str:
-        return _subst(t, gateway_ip=gw, admin_url=admin_url, mac=mac)
+        return _fill(t, repl)
 
     lines: list[str] = []
     lines.append(f"Network optimization plan — {playbook.display_name}")
