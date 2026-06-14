@@ -60,11 +60,13 @@ def net_optimize(
         raise typer.Exit(code=0)
 
     pb = playbooks.BUILTINS.get(rep.isp, playbooks.BUILTINS["generic"])
-    safety.snapshot(rep, root=_SNAP_ROOT)
     console.print(render.render_plan(rep, pb))
 
     if plan_only:
         raise typer.Exit(code=0)
+
+    # Capture the rollback baseline only on the real flow, before the user acts.
+    safety.snapshot(rep, root=_SNAP_ROOT)
     if not assume_yes:
         console.print("\n[bold]This briefly drops your internet.[/] Are you at the box, not remote?")
         if not typer.confirm("Proceed?"):
