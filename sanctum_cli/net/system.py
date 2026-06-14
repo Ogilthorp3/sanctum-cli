@@ -27,8 +27,8 @@ def real_runner(tag: tuple[str, ...]) -> str:
     if argv is None:
         return ""
     try:
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=20, check=False)
-    except (subprocess.TimeoutExpired, OSError):
+        proc = subprocess.run(argv, capture_output=True, text=True, errors="replace", timeout=20, check=False)
+    except (subprocess.TimeoutExpired, OSError, ValueError):
         return ""
     return proc.stdout
 
@@ -75,8 +75,8 @@ def firewalla_wan_via_ssh(gateway: str, key: str, user: str = "pi") -> tuple[str
         f"{user}@{gateway}", remote,
     ]
     try:
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=12, check=False)
-    except (subprocess.TimeoutExpired, OSError):
+        proc = subprocess.run(argv, capture_output=True, text=True, errors="replace", timeout=12, check=False)
+    except (subprocess.TimeoutExpired, OSError, ValueError):
         return ("", "")
     mac, ip = "", ""
     for line in proc.stdout.splitlines():

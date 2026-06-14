@@ -85,3 +85,11 @@ def test_firewalla_wan_via_ssh_returns_empty_on_timeout() -> None:
 
     with patch("sanctum_cli.net.system.subprocess.run", side_effect=boom):
         assert system.firewalla_wan_via_ssh("10.0.0.1", "/tmp/k") == ("", "")
+
+
+def test_firewalla_wan_via_ssh_never_raises_on_decode_error() -> None:
+    def boom(*a, **k):  # simulate a non-decodable / ValueError path
+        raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "bad")
+
+    with patch("sanctum_cli.net.system.subprocess.run", side_effect=boom):
+        assert system.firewalla_wan_via_ssh("10.0.0.1", "/tmp/key") == ("", "")
