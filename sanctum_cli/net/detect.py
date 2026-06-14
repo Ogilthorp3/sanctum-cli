@@ -97,6 +97,7 @@ def detect(*, runner: Runner, http: HttpProbe, firewalla_present: bool) -> Topol
         public_ip=public_ip,
         applicable=applicable,
         reason=reason,
+        wan_ip=wan_ip,
     )
 
 

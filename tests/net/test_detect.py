@@ -67,6 +67,7 @@ def test_detect_double_nat_bell() -> None:
     assert rep.gateway_ip == "192.168.2.1"
     assert rep.isp == "bell"
     assert rep.applicable is True
+    assert rep.wan_ip == "192.168.2.10"
 
 
 def test_detect_single_nat_is_not_applicable() -> None:

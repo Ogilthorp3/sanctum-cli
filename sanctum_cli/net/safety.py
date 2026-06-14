@@ -17,7 +17,7 @@ def snapshot(report: TopologyReport, *, root: Path, stamp: str | None = None) ->
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / "baseline.json"
     data = {
-        "wan_ip": None,
+        "wan_ip": report.wan_ip,
         "gateway_ip": report.gateway_ip,
         "public_ip": report.public_ip,
         "mtu": report.firewalla_wan_mtu,

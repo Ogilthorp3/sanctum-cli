@@ -30,6 +30,7 @@ class TopologyReport:
     public_ip: str | None
     applicable: bool
     reason: str
+    wan_ip: str | None = None
 
 
 @dataclass(frozen=True)

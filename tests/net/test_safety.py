@@ -29,6 +29,24 @@ def test_snapshot_writes_and_reads_back(tmp_path: Path) -> None:
     assert loaded.mtu == 1500
 
 
+def test_snapshot_records_wan_ip(tmp_path: Path) -> None:
+    rep = TopologyReport(
+        firewalla_present=True,
+        firewalla_wan_mac="20:6d:31:51:67:82",
+        firewalla_wan_mtu=1500,
+        nat=Nat.DOUBLE,
+        gateway_ip="192.168.2.1",
+        isp="bell",
+        public_ip="70.53.241.21",
+        applicable=True,
+        reason="double",
+        wan_ip="192.168.2.10",
+    )
+    path = safety.snapshot(rep, root=tmp_path)
+    loaded = safety.load(path)
+    assert loaded.wan_ip == "192.168.2.10"
+
+
 def test_snapshot_path_is_under_root_timestamped(tmp_path: Path) -> None:
     rep = TopologyReport(
         firewalla_present=True, firewalla_wan_mac=None, firewalla_wan_mtu=None,
