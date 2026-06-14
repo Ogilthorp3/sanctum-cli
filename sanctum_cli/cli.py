@@ -19,6 +19,7 @@ from rich.console import Console
 from sanctum_cli import __version__
 from sanctum_cli.commands import agent as agent_cmd
 from sanctum_cli.commands import backup as backup_cmd
+from sanctum_cli.commands import brainstorm as brainstorm_cmd
 from sanctum_cli.commands import bridge as bridge_cmd
 from sanctum_cli.commands import chat as chat_cmd
 from sanctum_cli.commands import cloud as cloud_cmd
@@ -147,6 +148,59 @@ def chat_top(
             no_stream=no_stream,
             max_tokens=max_tokens,
             temperature=temperature,
+        )
+    except SanctumError as exc:
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code)) from exc
+
+
+@app.command(
+    "brainstorm",
+    help="Convene the heterogeneous Jedi Council on a topic; print each seat's take.",
+)
+def brainstorm_top(
+    topic: Annotated[
+        str | None, typer.Argument(help="Topic to brainstorm. Omit to read from stdin.")
+    ] = None,
+    file: Annotated[
+        Path | None, typer.Option("--file", "-f", help="Read the topic from a file.")
+    ] = None,
+    seats: Annotated[
+        str | None,
+        typer.Option("--seats", "-s", help="Comma list to subset seats (default: all five)."),
+    ] = None,
+    url: Annotated[
+        str, typer.Option("--url", help="proxyd base URL.", envvar="SANCTUM_COUNCIL_URL")
+    ] = brainstorm_cmd.DEFAULT_URL,
+    max_tokens: Annotated[
+        int, typer.Option("--max-tokens", "-t", help="Per-seat response cap.", min=1)
+    ] = 900,
+    timeout: Annotated[
+        int, typer.Option("--timeout", help="Per-seat timeout (seconds).", min=1)
+    ] = 240,
+    cacert: Annotated[
+        Path, typer.Option("--cacert", help="CA to verify proxyd's TLS chain.")
+    ] = brainstorm_cmd.DEFAULT_CACERT,
+    json_output: Annotated[bool, typer.Option("--json", help="Emit JSON instead of panels.")] = False,
+    min_families: Annotated[
+        int, typer.Option("--min-families", min=0, help="Warn/fail below N distinct own-model families; 0=auto.")
+    ] = 0,
+    strict: Annotated[
+        bool, typer.Option("--strict", help="Treat a duplicate-family fallback as a lost voice; exit 2 below floor.")
+    ] = False,
+) -> None:
+    try:
+        brainstorm_cmd.brainstorm_command(
+            topic=topic,
+            file=file,
+            seats=seats,
+            url=url,
+            max_tokens=max_tokens,
+            timeout=timeout,
+            cacert=cacert,
+            json_output=json_output,
+            min_families=min_families,
+            strict=strict,
         )
     except SanctumError as exc:
         _report(exc)
