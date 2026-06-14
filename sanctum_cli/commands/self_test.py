@@ -159,9 +159,10 @@ def probe_yoda_cathedral() -> ProbeResult:
 
 
 def probe_coder_cathedral() -> ProbeResult:
-    """Coder-14B cathedral listens on :1338."""
-    ok = _tcp_reachable("127.0.0.1", 1338, 1.5)
-    return ProbeResult(ok, "TLS port reachable" if ok else "no response on :1338")
+    """Codestral coder cathedral listens on :3301 — it replaced the retired
+    coder-14b on :1338 (booted out 2026-06-07, :1338 freed)."""
+    ok = _tcp_reachable("127.0.0.1", 3301, 1.5)
+    return ProbeResult(ok, "port reachable" if ok else "no response on :3301")
 
 
 def probe_proxyd() -> ProbeResult:
@@ -304,7 +305,7 @@ PROBES: list[Probe] = [
     # Haus-tier — only meaningful when the haus services are installed.
     # Each is wrapped to return n/a on CLI-only installs.
     Probe("Yoda cathedral (:1337)", _haus_only("yoda", probe_yoda_cathedral)),
-    Probe("Coder cathedral (:1338)", _haus_only("coder", probe_coder_cathedral)),
+    Probe("Coder cathedral (:3301)", _haus_only("coder", probe_coder_cathedral)),
     Probe("proxyd routing (:4040)", _haus_only("proxyd", probe_proxyd)),
     Probe("Force Flow (:4077)", _haus_only("force-flow", probe_force_flow)),
     Probe("chitti samskara (:2188)", _haus_only("chitti", probe_chitti_samskara)),
