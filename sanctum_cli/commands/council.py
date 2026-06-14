@@ -7,11 +7,14 @@ synthesis. Seats are proxyd :4040 council models (Anthropic dialect); each
 Jedi is a persona system prompt on top of a seat. Yoda and Mundi share a
 brain but never a voice — the neurodiversity doctrine in one line.
 
-Transport: plain httpx against proxyd's ``/v1/messages`` (SSE streaming in
-the REPL, buffered in fan-out). The key rides ``x-api-key`` — resolved from
-``$SANCTUM_PROXY_KEY``, then the keychain, then a CLI identifier (proxyd's
+Transport: httpx over **TLS** against proxyd's ``/v1/messages`` (SSE streaming
+in the REPL, buffered in fan-out). The server leaf is verified against the
+sanctum CA — endpoint + trust anchor come from :mod:`sanctum_cli.proxyd`, never
+a literal here. The key rides ``x-api-key`` *inside* the TLS tunnel — resolved
+from ``$SANCTUM_PROXY_KEY``, then the keychain, then a CLI identifier (proxyd's
 inference path is currently lenient; the resolution order means this keeps
-working the day it gets strict).
+working the day it gets strict). Wrapping the key in TLS is strictly better than
+the old plaintext :4040 — the header is no longer on the wire in the clear.
 """
 
 from __future__ import annotations
@@ -33,13 +36,16 @@ from rich.markup import escape
 from rich.panel import Panel
 from rich.text import Text
 
+from sanctum_cli import proxyd
 from sanctum_cli.commands import banner, council_tools
 
 console = Console()
 
-PROXYD_URL_ENV = "SANCTUM_PROXYD_URL"
+# Endpoint + TLS trust now live in sanctum_cli.proxyd (single source of truth,
+# crypto-agnostic). PROXYD_URL_ENV is re-exported here for back-compat with any
+# caller that imported it from this module.
+PROXYD_URL_ENV = proxyd.URL_ENV
 PROXYD_KEY_ENV = "SANCTUM_PROXY_KEY"
-_DEFAULT_PROXYD = "http://127.0.0.1:4040"
 _KEYCHAIN_SERVICE = "sanctum-proxy-client"
 _ANTHROPIC_VERSION = "2023-06-01"
 _MAX_TOKENS = 1200
@@ -294,7 +300,7 @@ class Transcript:
 
 
 def _proxyd_url() -> str:
-    return os.environ.get(PROXYD_URL_ENV, _DEFAULT_PROXYD).rstrip("/")
+    return proxyd.base_url()
 
 
 def _proxy_key() -> str:
@@ -349,7 +355,7 @@ def _stream(seat: Seat, messages: list[dict[str, str]], *, system: str) -> Itera
         "stream": True,
     }
     with (
-        httpx.Client(timeout=httpx.Timeout(120.0, connect=10.0)) as client,
+        httpx.Client(timeout=httpx.Timeout(120.0, connect=10.0), verify=proxyd.verify()) as client,
         client.stream(
             "POST", f"{_proxyd_url()}/v1/messages", headers=_headers(), json=payload
         ) as resp,
@@ -371,7 +377,7 @@ def _complete(seat: Seat, messages: list[dict[str, str]], *, system: str) -> str
         "system": system,
         "messages": messages,
     }
-    with httpx.Client(timeout=httpx.Timeout(180.0, connect=10.0)) as client:
+    with httpx.Client(timeout=httpx.Timeout(180.0, connect=10.0), verify=proxyd.verify()) as client:
         resp = client.post(f"{_proxyd_url()}/v1/messages", headers=_headers(), json=payload)
     if resp.status_code != 200:
         raise RuntimeError(f"{seat.label} seat HTTP {resp.status_code}: {resp.text[:160]}")
@@ -399,7 +405,7 @@ def _post_with_tools(
         "messages": messages,
         "tools": tools,
     }
-    with httpx.Client(timeout=httpx.Timeout(180.0, connect=10.0)) as client:
+    with httpx.Client(timeout=httpx.Timeout(180.0, connect=10.0), verify=proxyd.verify()) as client:
         resp = client.post(f"{_proxyd_url()}/v1/messages", headers=_headers(), json=payload)
     status = resp.status_code
     if 400 <= status <= 499:

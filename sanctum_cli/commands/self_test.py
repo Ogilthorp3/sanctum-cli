@@ -22,9 +22,11 @@ import importlib
 import json
 import socket
 import sqlite3
+import ssl
 import subprocess
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -35,7 +37,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 
-from sanctum_cli import config
+from sanctum_cli import config, proxyd
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -76,9 +78,9 @@ def _haus_tier_installed() -> bool:
     present on disk — cathedral manifests, proxyd config, or the R2D2
     classifier source. A friend's fresh install has none of these."""
     haus_markers = [
-        Path.home() / ".sanctum/manifests",          # cathedral model manifests
-        Path.home() / ".sanctum/sanctum-proxy",      # proxyd config dir
-        Path.home() / ".sanctum/r2d2",               # R2D2 classifier source
+        Path.home() / ".sanctum/manifests",  # cathedral model manifests
+        Path.home() / ".sanctum/sanctum-proxy",  # proxyd config dir
+        Path.home() / ".sanctum/r2d2",  # R2D2 classifier source
         Path("/Library/LaunchDaemons/com.sanctum.proxyd.plist"),
     ]
     return any(p.exists() for p in haus_markers)
@@ -89,6 +91,7 @@ def _haus_only(name: str, check_fn: Callable[[], ProbeResult]) -> Callable[[], P
     a CLI-only install. The wrapped function is only invoked on haus
     installs. ``name`` names the probe in the n/a diagnostic so an operator
     can tell at a glance which haus surface was skipped."""
+
     def wrapped() -> ProbeResult:
         if not _haus_tier_installed():
             return ProbeResult(
@@ -97,6 +100,7 @@ def _haus_only(name: str, check_fn: Callable[[], ProbeResult]) -> Callable[[], P
                 reason=f"CLI-only install: {name} probe skipped (no haus services configured)",
             )
         return check_fn()
+
     return wrapped
 
 
@@ -136,7 +140,9 @@ def probe_node_identity() -> ProbeResult:
     try:
         out = subprocess.run(
             ["codesign", "-dvv", str(node_path)],
-            capture_output=True, text=True, timeout=3,
+            capture_output=True,
+            text=True,
+            timeout=3,
         )
         signing = out.stderr + out.stdout
         if "HX7739G8FX" in signing:
@@ -159,20 +165,37 @@ def probe_coder_cathedral() -> ProbeResult:
 
 
 def probe_proxyd() -> ProbeResult:
-    """proxyd HTTP router on :4040. Any HTTP response means alive — 401 is
-    expected when no x-api-key header is supplied; the point is reachability."""
-    if not _tcp_reachable("127.0.0.1", 4040, 1.5):
-        return ProbeResult(False, "no listener on :4040")
+    """proxyd router on the resolved endpoint (TLS by default). Any HTTP
+    response means alive — 401 is expected when no x-api-key header is supplied;
+    the point is reachability *and*, over https, a CA-verified handshake.
+
+    Endpoint + trust anchor come from :mod:`sanctum_cli.proxyd` — no literal
+    host/port here. ``SANCTUM_PROXYD_URL=https://127.0.0.1:4041`` exercises the
+    exact TLS+CA path against the cutover TLS listener before :4040 flips.
+    """
+    url = proxyd.base_url()
+    parsed = urllib.parse.urlsplit(url)
+    host = parsed.hostname or "127.0.0.1"
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    if not _tcp_reachable(host, port, 1.5):
+        return ProbeResult(False, f"no listener on {host}:{port}")
+    # An https endpoint must pass a CA-verified TLS handshake; a plaintext one
+    # uses no context. proxyd.ssl_context() is the SAME trust object the council
+    # httpx client verifies through (CA-pinned by default; unverified only under
+    # the explicit dev insecure hatch).
+    ssl_ctx: ssl.SSLContext | None = None
+    if parsed.scheme == "https":
+        ssl_ctx = proxyd.ssl_context()
     # Get the actual HTTP status to display, but accept anything 100-599 as up.
     try:
-        req = urllib.request.Request("http://127.0.0.1:4040/v1/models")
-        urllib.request.urlopen(req, timeout=2.5)
+        req = urllib.request.Request(f"{url}/v1/models")
+        urllib.request.urlopen(req, timeout=2.5, context=ssl_ctx)
         return ProbeResult(True, "HTTP 200 (open route)")
     except urllib.error.HTTPError as e:
-        # 401, 403, 405 etc — service is up, just didn't like our request.
+        # 401, 403, 405 etc — service is up (TLS handshake already passed).
         return ProbeResult(True, f"HTTP {e.code} (service alive)")
-    except (urllib.error.URLError, OSError) as e:
-        return ProbeResult(False, f"no HTTP response: {e}")
+    except (urllib.error.URLError, ssl.SSLError, OSError) as e:
+        return ProbeResult(False, f"no HTTP response: {proxyd.describe_transport_error(e)}")
 
 
 def probe_force_flow() -> ProbeResult:
@@ -196,8 +219,7 @@ def probe_tcc_grants() -> ProbeResult:
         conn = sqlite3.connect(f"file:{tcc_db}?mode=ro", uri=True, timeout=2.0)
         cur = conn.cursor()
         cur.execute(
-            "SELECT COUNT(*) FROM access "
-            "WHERE client = ? AND auth_value = 2",
+            "SELECT COUNT(*) FROM access WHERE client = ? AND auth_value = 2",
             ("/usr/local/bin/node",),
         )
         count = cur.fetchone()[0]
@@ -245,9 +267,7 @@ def probe_audit_log_bounded() -> ProbeResult:
     size = log.stat().st_size
     cap = 50 * 1024 * 1024
     if size > cap:
-        return ProbeResult(
-            False, f"{size // 1024 // 1024} MB > 50 MB — log-rotate may have failed"
-        )
+        return ProbeResult(False, f"{size // 1024 // 1024} MB > 50 MB — log-rotate may have failed")
     return ProbeResult(True, f"{size // 1024 // 1024} MB / 50 MB cap")
 
 
@@ -277,21 +297,20 @@ def probe_backup_recent() -> ProbeResult:
 
 PROBES: list[Probe] = [
     # CLI-tier — every install needs these.
-    Probe("network reachability",         probe_network),
-    Probe("node binary identity",         probe_node_identity),
-    Probe("sanctum config valid",         probe_config_valid),
-    Probe("recent backup snapshot",       probe_backup_recent),
-
+    Probe("network reachability", probe_network),
+    Probe("node binary identity", probe_node_identity),
+    Probe("sanctum config valid", probe_config_valid),
+    Probe("recent backup snapshot", probe_backup_recent),
     # Haus-tier — only meaningful when the haus services are installed.
     # Each is wrapped to return n/a on CLI-only installs.
-    Probe("Yoda cathedral (:1337)",       _haus_only("yoda", probe_yoda_cathedral)),
-    Probe("Coder cathedral (:1338)",      _haus_only("coder", probe_coder_cathedral)),
-    Probe("proxyd routing (:4040)",       _haus_only("proxyd", probe_proxyd)),
-    Probe("Force Flow (:4077)",           _haus_only("force-flow", probe_force_flow)),
-    Probe("chitti samskara (:2188)",      _haus_only("chitti", probe_chitti_samskara)),
-    Probe("TCC grants",                   _haus_only("tcc", probe_tcc_grants)),
-    Probe("R2D2 supervisor heartbeat",    _haus_only("r2d2", probe_r2d2_heartbeat)),
-    Probe("audit log within budget",      _haus_only("audit", probe_audit_log_bounded)),
+    Probe("Yoda cathedral (:1337)", _haus_only("yoda", probe_yoda_cathedral)),
+    Probe("Coder cathedral (:1338)", _haus_only("coder", probe_coder_cathedral)),
+    Probe("proxyd routing (:4040)", _haus_only("proxyd", probe_proxyd)),
+    Probe("Force Flow (:4077)", _haus_only("force-flow", probe_force_flow)),
+    Probe("chitti samskara (:2188)", _haus_only("chitti", probe_chitti_samskara)),
+    Probe("TCC grants", _haus_only("tcc", probe_tcc_grants)),
+    Probe("R2D2 supervisor heartbeat", _haus_only("r2d2", probe_r2d2_heartbeat)),
+    Probe("audit log within budget", _haus_only("audit", probe_audit_log_bounded)),
 ]
 
 # ── Module-keyed probe registry ───────────────────────────────────────
@@ -366,10 +385,7 @@ def module_probes(registry: ModuleRegistry) -> dict[str, list[Probe]]:
     """
     result: dict[str, list[Probe]] = {}
     for name, manifest in registry.manifests.items():
-        result[name] = [
-            Probe(path, _resolve_probe_callable(path))
-            for path in manifest.probes
-        ]
+        result[name] = [Probe(path, _resolve_probe_callable(path)) for path in manifest.probes]
     return result
 
 
@@ -395,10 +411,7 @@ def self_test_command(
     start = time.time()
     results: list[tuple[Probe, ProbeResult, float]] = []
 
-    selected = (
-        [p for p in PROBES if only.lower() in p.name.lower()]
-        if only else PROBES
-    )
+    selected = [p for p in PROBES if only.lower() in p.name.lower()] if only else PROBES
 
     if not json_output:
         console.print()
@@ -419,10 +432,9 @@ def self_test_command(
                 )
             )
         else:
-            console.print_json(json.dumps({
-                "total": 0, "passed": 0, "failed": 0,
-                "duration_ms": 0.0, "probes": []
-            }))
+            console.print_json(
+                json.dumps({"total": 0, "passed": 0, "failed": 0, "duration_ms": 0.0, "probes": []})
+            )
         raise typer.Exit(code=0)
 
     width = max(len(p.name) for p in selected) + 2
@@ -471,9 +483,14 @@ def self_test_command(
             "not_applicable": na,
             "duration_ms": round(total_ms, 1),
             "probes": [
-                {"name": p.name, "passed": r.passed, "not_applicable": r.not_applicable,
-                 "detail": r.detail, "reason": r.reason,
-                 "duration_ms": round(ms, 1)}
+                {
+                    "name": p.name,
+                    "passed": r.passed,
+                    "not_applicable": r.not_applicable,
+                    "detail": r.detail,
+                    "reason": r.reason,
+                    "duration_ms": round(ms, 1),
+                }
                 for p, r, ms in results
             ],
         }
