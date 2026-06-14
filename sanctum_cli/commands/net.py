@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Annotated
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 
 from sanctum_cli.net import detect, playbooks, render, safety, system, verify
 from sanctum_cli.net.types import Verdict
@@ -20,7 +21,10 @@ _SNAP_ROOT = Path.home() / ".sanctum" / "net-optimize"
 
 
 def _build_runner() -> Runner:
-    return system.real_runner
+    gw = detect.parse_default_gateway(system.real_runner(("route",)))
+    key_path = Path.home() / ".ssh" / "firewalla_ed25519"
+    fw_key = str(key_path) if key_path.exists() else None
+    return system.make_real_runner(fw_gateway=gw, fw_key=fw_key)
 
 
 def _build_http() -> HttpProbe:
@@ -39,9 +43,11 @@ def _firewalla_present() -> bool:
 def net_check() -> None:
     runner, http = _build_runner(), _build_http()
     rep = detect.detect(runner=runner, http=http, firewalla_present=_firewalla_present())
-    console.print(f"[bold]NAT topology:[/] {rep.nat.value}")
-    console.print(f"[bold]ISP:[/] {rep.isp}   [bold]gateway:[/] {rep.gateway_ip or '-'}")
-    console.print(rep.reason)
+    console.print(f"[bold]NAT topology:[/] {escape(rep.nat.value)}")
+    console.print(
+        f"[bold]ISP:[/] {escape(rep.isp)}   [bold]gateway:[/] {escape(rep.gateway_ip or '-')}"
+    )
+    console.print(escape(rep.reason))
 
 
 @net_app.command("optimize", help="Guide you from double-NAT to single-NAT (opt-in, reversible).")
@@ -56,11 +62,11 @@ def net_optimize(
         if not rep.firewalla_present:
             console.print("[green]✓[/] No Firewalla here — nothing to optimize.")
         else:
-            console.print(f"[green]✓[/] {rep.reason}")
+            console.print(f"[green]✓[/] {escape(rep.reason)}")
         raise typer.Exit(code=0)
 
     pb = playbooks.BUILTINS.get(rep.isp, playbooks.BUILTINS["generic"])
-    console.print(render.render_plan(rep, pb))
+    console.print(render.render_plan(rep, pb), markup=False)
 
     if plan_only:
         raise typer.Exit(code=0)
@@ -77,11 +83,11 @@ def net_optimize(
     typer.prompt("", default="", show_default=False)
     v, reason = verify.verify(runner=runner)
     if v is Verdict.VERIFIED:
-        console.print(f"[green]✓ {reason}[/]")
+        console.print(f"[green]✓ {escape(reason)}[/]")
     elif v is Verdict.APIPA_ROLLBACK:
-        console.print(f"[red]✗ {reason}[/]")
+        console.print(f"[red]✗ {escape(reason)}[/]")
         console.print("Roll back:")
         for line in pb.rollback:
-            console.print(f"  ↩ {line}")
+            console.print(f"  ↩ {escape(line)}")
     else:
-        console.print(f"[yellow]{reason}[/]")
+        console.print(f"[yellow]{escape(reason)}[/]")
