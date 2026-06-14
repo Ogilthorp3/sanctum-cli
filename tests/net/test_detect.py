@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from sanctum_cli.net import detect
-from sanctum_cli.net.types import Nat
+from sanctum_cli.net.types import Nat, TopologyReport
+from tests.net import fixtures as fx
 
 
 def test_parse_hop2_picks_second_hop_ip() -> None:
@@ -51,3 +52,53 @@ def test_parse_default_gateway() -> None:
 def test_parse_mtu_from_ifconfig() -> None:
     out = "en1: flags=8863<UP> mtu 1500\n\tinet 192.168.2.10 netmask 0xffffff00\n"
     assert detect.parse_mtu(out) == 1500
+
+
+def test_detect_double_nat_bell() -> None:
+    rep = detect.detect(
+        runner=fx.FakeRunner(fx.DOUBLE_NAT),
+        http=fx.fake_http(200, "Bell Giga Hub"),
+        firewalla_present=True,
+    )
+    assert isinstance(rep, TopologyReport)
+    assert rep.nat is Nat.DOUBLE
+    assert rep.firewalla_present is True
+    assert rep.firewalla_wan_mac == "20:6d:31:51:67:82"
+    assert rep.gateway_ip == "192.168.2.1"
+    assert rep.isp == "bell"
+    assert rep.applicable is True
+
+
+def test_detect_single_nat_is_not_applicable() -> None:
+    rep = detect.detect(
+        runner=fx.FakeRunner(fx.SINGLE_NAT), http=fx.fake_http(200, "Bell"), firewalla_present=True
+    )
+    assert rep.nat is Nat.SINGLE
+    assert rep.applicable is False
+    assert "already" in rep.reason.lower()
+
+
+def test_detect_no_firewalla_is_not_applicable() -> None:
+    rep = detect.detect(
+        runner=fx.FakeRunner(fx.NO_FIREWALLA), http=fx.fake_http(200, ""), firewalla_present=False
+    )
+    assert rep.firewalla_present is False
+    assert rep.applicable is False
+    assert "firewalla" in rep.reason.lower()
+
+
+def test_detect_cgnat_is_not_applicable_with_reason() -> None:
+    rep = detect.detect(
+        runner=fx.FakeRunner(fx.CGNAT), http=fx.fake_http(200, ""), firewalla_present=True
+    )
+    assert rep.nat is Nat.CGNAT
+    assert rep.applicable is False
+    assert "cgnat" in rep.reason.lower() or "carrier" in rep.reason.lower()
+
+
+def test_detect_apipa_double_still_applicable() -> None:
+    rep = detect.detect(
+        runner=fx.FakeRunner(fx.APIPA), http=fx.fake_http(200, "Bell"), firewalla_present=True
+    )
+    assert rep.nat is Nat.DOUBLE
+    assert rep.applicable is True
