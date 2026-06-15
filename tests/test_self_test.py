@@ -152,3 +152,29 @@ def test_probe_that_raises_is_caught_as_fail(runner, monkeypatch):
     assert result.exit_code == 1
     assert "exploding probe" in result.output
     assert "boom" in result.output
+
+
+def test_probe_proxy_key_passes_when_provisioned(monkeypatch):
+    """CLI-7: the proxy-key probe passes when a real key resolves."""
+    from sanctum_cli.commands import council
+
+    monkeypatch.setattr(council, "proxy_key_provisioned", lambda: True)
+    res = st.probe_proxy_key()
+    assert res.passed is True
+    assert "provisioned" in res.detail
+
+
+def test_probe_proxy_key_fails_with_fallback_detail_when_unprovisioned(monkeypatch):
+    """CLI-7: when the key is unresolved the probe FAILS with a FALLBACK row —
+    making the silent-auth failure visible before proxyd enforces."""
+    from sanctum_cli.commands import council
+
+    monkeypatch.setattr(council, "proxy_key_provisioned", lambda: False)
+    res = st.probe_proxy_key()
+    assert res.passed is False
+    assert "FALLBACK" in res.detail
+
+
+def test_proxy_key_probe_is_registered_in_the_fleet():
+    """The probe is wired into PROBES so self-test actually runs it."""
+    assert any("proxy key" in p.name.lower() for p in st.PROBES)

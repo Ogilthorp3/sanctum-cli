@@ -199,6 +199,27 @@ def probe_proxyd() -> ProbeResult:
         return ProbeResult(False, f"no HTTP response: {proxyd.describe_transport_error(e)}")
 
 
+def probe_proxy_key() -> ProbeResult:
+    """The council's proxyd wire-auth key is provisioned (env or keychain).
+
+    Honest about a silent failure mode: when neither ``$SANCTUM_PROXY_KEY``
+    nor the ``sanctum-proxy-client`` keychain item is set, the council falls
+    back to a non-secret identifier that works only while proxyd's auth is
+    lenient — and will 401 the day it enforces. A FALLBACK row makes that
+    posture visible instead of letting it bite at the worst time. Resolves no
+    secret, mints nothing — only reports provisioned vs FALLBACK.
+    """
+    from sanctum_cli.commands import council
+
+    if council.proxy_key_provisioned():
+        return ProbeResult(True, "proxy key provisioned")
+    return ProbeResult(
+        False,
+        "proxy key: FALLBACK (not provisioned) — set $SANCTUM_PROXY_KEY or the "
+        "'sanctum-proxy-client' keychain item; council will 401 once proxyd enforces auth",
+    )
+
+
 def probe_force_flow() -> ProbeResult:
     """Force Flow notice hub on :4077."""
     ok = _tcp_reachable("127.0.0.1", 4077, 1.5)
@@ -307,6 +328,7 @@ PROBES: list[Probe] = [
     Probe("Yoda cathedral (:1337)", _haus_only("yoda", probe_yoda_cathedral)),
     Probe("Coder cathedral (:3301)", _haus_only("coder", probe_coder_cathedral)),
     Probe("proxyd routing (:4040)", _haus_only("proxyd", probe_proxyd)),
+    Probe("proxy key provisioned", _haus_only("proxy-key", probe_proxy_key)),
     Probe("Force Flow (:4077)", _haus_only("force-flow", probe_force_flow)),
     Probe("chitti samskara (:2188)", _haus_only("chitti", probe_chitti_samskara)),
     Probe("TCC grants", _haus_only("tcc", probe_tcc_grants)),

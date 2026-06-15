@@ -35,10 +35,12 @@ Observed, NEVER pages:
 Modes:
   (default)    diagnose + page Force Flow on pathological (confirm + cooldown)
   --check      dry-run: print the JSON verdict, never page
-  --self-test  run the detector against synthetic fixtures, never touch state
+  --self-test  run the detector against synthetic fixtures + report whether the
+               matching launchd label is LOADED, never touch state
 
-Run by com.sanctum.endocrine-gland-sentinel.plist every 300s (staged, NOT
-loaded — Bert turns it on).
+Run by com.sanctum.endocrine-gland-sentinel.plist every 300s. LOADED on manoir
+as of 2026-06-15 (the endocrine organ is live); on a host where it is not yet
+bootstrapped, `--self-test` says so plainly.
 
 This file is the deploy copy; the canonical source is in the sanctum-cli repo
 under deploy/endocrine/. It depends ONLY on the stdlib + alert-confirm.sh, so it
@@ -266,6 +268,23 @@ SYNTHETIC = {
 }
 
 
+def _sentinel_label_loaded() -> bool | None:
+    """Is THIS sentinel's launchd job loaded? (True/False, or None if launchctl
+    is unreadable). Honest about the deploy state so --self-test can report
+    LOADED vs not-yet-bootstrapped rather than implying it's always running."""
+    label = os.environ.get(
+        "ENDOCRINE_SENTINEL_LABEL", "com.sanctum.endocrine-gland-sentinel"
+    )
+    try:
+        out = subprocess.run(
+            ["launchctl", "print", f"gui/{os.getuid()}/{label}"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except Exception:
+        return None
+    return out.returncode == 0
+
+
 def self_test() -> int:
     ok = True
     for name, (panel, age, loaded, last_exit, want) in SYNTHETIC.items():
@@ -273,6 +292,17 @@ def self_test() -> int:
         passed = state == want
         ok = ok and passed
         print(f"  [{'PASS' if passed else 'FAIL'}] {name:10s} -> {state} (want {want})")
+    # Deploy honesty: report whether the sentinel's own launchd label is loaded.
+    # This is observational (never affects the PASS/FAIL exit) — it tells the
+    # operator if the sentinel is actually running on this host.
+    sent_loaded = _sentinel_label_loaded()
+    if sent_loaded is None:
+        loaded_txt = "launchd unreadable (cannot tell)"
+    elif sent_loaded:
+        loaded_txt = "LOADED"
+    else:
+        loaded_txt = "NOT loaded (not bootstrapped on this host)"
+    print(f"  [info] sentinel launchd label -> {loaded_txt}")
     print("self-test:", "ALL PASS" if ok else "FAILURES")
     return 0 if ok else 1
 

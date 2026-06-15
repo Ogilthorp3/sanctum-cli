@@ -131,6 +131,11 @@ def diversity_seats(
 ) -> list[str]:
     """Which seats to ENGAGE for a fan-out, given the panel.
 
+    STATUS: NOT WIRED — ``council_ask`` engages every seat in ``SEATS`` today
+    and never calls this. It is a pure, unit-tested helper staged for a future
+    opt-in; the subscription-first guarantee below is DESIGN INTENT, not a live
+    runtime invariant until ``council_ask`` computes its engaged set from here.
+
     "neurodiversity paramount" made DYNAMIC: high dopamine (creative mode)
     would engage the MAX set of seats for divergence; neutral/absent a
     conservative core. SUBSCRIPTION-FIRST: a metered seat is NEVER engaged

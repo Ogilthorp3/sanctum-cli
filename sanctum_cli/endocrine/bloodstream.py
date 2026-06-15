@@ -34,6 +34,7 @@ import json
 import os
 import time
 import urllib.request
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -56,6 +57,11 @@ STATE_DIR_ENV = "SANCTUM_ENDOCRINE_DIR"
 _DEFAULT_STATE_DIR = Path("~/.sanctum/state/endocrine").expanduser()
 PANEL_FILENAME = "panel.json"
 CREATIVE_FILENAME = "creative-mode.json"
+# Persistent opt-OUT marker: `sanctum endocrine off` writes it, `on` removes it.
+# Distinct from the per-invocation SANCTUM_ENDOCRINE=0 env (which still wins) —
+# this is the durable in-product switch so an operator doesn't have to remember
+# to export the env every shell.
+OPTOUT_FILENAME = "subscribed-off.json"
 
 
 def chitti_base() -> str:
@@ -71,12 +77,47 @@ def state_dir() -> Path:
     return Path(raw).expanduser() if raw else _DEFAULT_STATE_DIR
 
 
+def _ensure_state_dir() -> Path:
+    """Make the state dir at 0700 (owner-only). The endocrine lever + panel are
+    operator state — the creative-mode lever in particular is an UNauthenticated
+    input signal the gland trusts, so it must not be world-writable. 0700 keeps
+    the directory owner-only; the files inside are written 0600 (mirroring
+    telemetry.py's deliberate-0600 pattern)."""
+    d = state_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    # Best-effort tighten: idempotent, and pulls a pre-existing looser dir down.
+    with suppress(OSError):
+        d.chmod(0o700)
+    return d
+
+
+def _write_private_atomic(path: Path, data: str) -> None:
+    """Atomic write with a 0600 final file (and 0600 temp, so the secret-ish
+    payload is never momentarily world-readable between create and rename)."""
+    tmp = path.with_name(path.name + ".tmp")
+    # os.open with the mode arg is the only way to create AT 0600 (a plain
+    # write_text honours umask, which is typically 0644). Mirror telemetry.py.
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, data.encode("utf-8"))
+    finally:
+        os.close(fd)
+    # A pre-existing temp from an older run may carry looser perms — force 0600.
+    with suppress(OSError):
+        tmp.chmod(0o600)
+    tmp.replace(path)
+
+
 def panel_path() -> Path:
     return state_dir() / PANEL_FILENAME
 
 
 def creative_path() -> Path:
     return state_dir() / CREATIVE_FILENAME
+
+
+def optout_path() -> Path:
+    return state_dir() / OPTOUT_FILENAME
 
 
 # ───────────────────────────── publish (gland → bloodstream) ──────────────
@@ -87,16 +128,13 @@ def publish_panel_file(panel: Panel) -> None:
 
     Readers (seats, CLI, tests) poll this instead of an HTTP endpoint — no
     listener to crash, no port to allocate. Atomic via write-temp-then-rename
-    so a reader never sees a half-written panel."""
-    d = state_dir()
-    d.mkdir(parents=True, exist_ok=True)
+    so a reader never sees a half-written panel. Written 0600 in a 0700 dir."""
+    _ensure_state_dir()
     rec = {
         "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "panel": panel.to_wire(),
     }
-    tmp = d / (PANEL_FILENAME + ".tmp")
-    tmp.write_text(json.dumps(rec))
-    tmp.replace(d / PANEL_FILENAME)
+    _write_private_atomic(panel_path(), json.dumps(rec))
 
 
 def broadcast_to_chitti(panel: Panel, *, timeout: float = 5.0) -> bool:
@@ -172,16 +210,46 @@ def set_creative_mode(on: bool, *, ttl_seconds: int | None = None) -> dict[str, 
 
     Writing the lever is all the CLI does; the gland picks it up on its next
     tick and SLOWLY elevates dopamine / lowers cortisol (a sustained STATE, not
-    a flag). Returns the written record."""
-    d = state_dir()
-    d.mkdir(parents=True, exist_ok=True)
+    a flag). Returns the written record.
+
+    The lever is an UNauthenticated input the gland trusts, so it is written
+    0600 in a 0700 dir — a world-writable lever would let any local user dose
+    the council. (The auth boundary itself is roadmapped; this closes the
+    file-permission half.)"""
+    _ensure_state_dir()
     rec: dict[str, Any] = {
         "creative": bool(on),
         "set_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
     if on and ttl_seconds:
         rec["until_epoch"] = int(time.time()) + int(ttl_seconds)
-    tmp = d / (CREATIVE_FILENAME + ".tmp")
-    tmp.write_text(json.dumps(rec))
-    tmp.replace(d / CREATIVE_FILENAME)
+    _write_private_atomic(creative_path(), json.dumps(rec))
     return rec
+
+
+# ───────────────────────────── persistent opt-out switch ──────────────────
+
+
+def read_optout() -> bool:
+    """Is the durable opt-out marker present? (`sanctum endocrine off` wrote it.)
+
+    A missing/garbage marker means NOT opted out (the default is subscribed,
+    per the 2026-06-15 ON-by-default directive). The per-invocation env
+    SANCTUM_ENDOCRINE=0 still wins over this; it is checked at the call site."""
+    try:
+        doc = json.loads(optout_path().read_text())
+    except (FileNotFoundError, OSError, ValueError, TypeError):
+        return False
+    return bool(doc.get("optout", False)) if isinstance(doc, dict) else False
+
+
+def set_optout(optout: bool) -> None:
+    """Persist the in-product switch. `off` writes optout=True; `on` removes the
+    marker entirely (back to the subscribed default)."""
+    if optout:
+        _ensure_state_dir()
+        rec = {"optout": True, "set_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+        _write_private_atomic(optout_path(), json.dumps(rec))
+    else:
+        with suppress(FileNotFoundError, OSError):
+            optout_path().unlink()

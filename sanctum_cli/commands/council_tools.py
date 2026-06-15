@@ -12,7 +12,10 @@ dormant and tested, waiting for phase 2's verbs.
 from __future__ import annotations
 
 import json
+import os
+import re
 import time
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
@@ -28,6 +31,31 @@ AUDIT_LEDGER = Path.home() / ".sanctum" / "logs" / "council-tools-audit.jsonl"
 # budget is per-conversation, not per-call.
 LOGS_TAIL_MAX_BYTES = 24_000
 
+# Bound each audited param VALUE and the whole audit LINE so a pathological
+# (or adversarial) tool input can't balloon the ledger on disk. The params are
+# logged verbatim for forensics, but a single value cannot exceed AUDIT_PARAM_MAX
+# bytes and the serialized line cannot exceed AUDIT_LINE_MAX bytes; overflow is
+# replaced with a "[truncated]" marker that records the original size.
+AUDIT_PARAM_MAX = 2_048
+AUDIT_LINE_MAX = 8_192
+
+
+def _cap_params(params: dict[str, object]) -> dict[str, object]:
+    """Truncate over-long param VALUES so one fat input can't bloat the ledger.
+
+    Each value is serialized; anything over AUDIT_PARAM_MAX bytes is replaced
+    with a marker carrying the original byte length (so the forensic trail says
+    'a huge value was here', not the whole payload)."""
+    capped: dict[str, object] = {}
+    for k, v in params.items():
+        s = v if isinstance(v, str) else json.dumps(v, ensure_ascii=False, default=str)
+        b = s.encode("utf-8", errors="replace")
+        if len(b) > AUDIT_PARAM_MAX:
+            capped[k] = f"[truncated: {len(b)} bytes]"
+        else:
+            capped[k] = v
+    return capped
+
 
 def redact(text: str) -> str:
     """Scrub known secret shapes before any model reads tool output.
@@ -39,6 +67,34 @@ def redact(text: str) -> str:
     for name, pattern in CONTENT_PATTERNS:
         data = pattern.sub(f"[REDACTED:{name}]".encode(), data)
     return data.decode("utf-8", errors="replace")
+
+
+# Lines that try to hijack the model's instruction channel. Matched at the START
+# of a (whitespace-stripped) line — tool/log output is DATA, so a line that opens
+# with one of these is a prompt-injection attempt, not a real log entry to obey.
+_INJECTION_LINE = re.compile(
+    r"^\s*(ignore (all |the )?previous|disregard (all |the )?(previous|above)|"
+    r"system\s*:|assistant\s*:|you are now|new instructions?\s*:)",
+    re.IGNORECASE,
+)
+
+
+def sanitize(text: str) -> str:
+    """Defang prompt-injection lines in untrusted tool/log output.
+
+    Defense-in-depth on top of the data-not-instructions envelope (council.py):
+    a log line that BEGINS with an instruction-hijack marker is neutralized by
+    prefixing it with a visible ``[neutralized]`` tag so the model reads it as a
+    quoted, defanged log line — never as a live directive. Runs AFTER redact()
+    so a secret never survives in a 'neutralized' line either. Content-preserving
+    for every normal line; only the hostile opener is tagged."""
+    out: list[str] = []
+    for line in text.split("\n"):
+        if _INJECTION_LINE.match(line):
+            out.append(f"[neutralized prompt-injection] {line}")
+        else:
+            out.append(line)
+    return "\n".join(out)
 
 
 def audit(
@@ -63,14 +119,31 @@ def audit(
         "seat": seat,
         "session": session,
         "tool": tool,
-        "params": params,
+        "params": _cap_params(params),
         "kind": kind,
         "mode": mode,
         "outcome": outcome,
         "duration_ms": duration_ms,
     }
-    with ledger.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(line, ensure_ascii=False, default=str) + "\n")
+    serialized = json.dumps(line, ensure_ascii=False, default=str)
+    # Final backstop on total line size: even capped params + a long tool name
+    # could in principle exceed the budget — bound the whole line so the ledger
+    # stays parseable and can't be flooded by one oversized record.
+    if len(serialized.encode("utf-8", errors="replace")) > AUDIT_LINE_MAX:
+        line["params"] = {"_note": "[line truncated: oversized audit record]"}
+        serialized = json.dumps(line, ensure_ascii=False, default=str)
+    # 0600 like telemetry.py — the ledger records params that redaction might
+    # miss, so it must never be world-readable (council #5). os.open with the
+    # mode arg is the only way to CREATE at 0600 (write honours umask → 0644).
+    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
+    fd = os.open(ledger, flags, 0o600)
+    try:
+        os.write(fd, (serialized + "\n").encode("utf-8"))
+    finally:
+        os.close(fd)
+    # Pull a pre-existing looser ledger down to 0600 (idempotent, best-effort).
+    with suppress(OSError):
+        ledger.chmod(0o600)
 
 
 # ─── Registry primitives ─────────────────────────────────────────────
@@ -156,11 +229,14 @@ def run_tool(
 
     try:
         raw = tool.run(params)
-        content = redact(raw)
+        # redact secrets FIRST, then defang any prompt-injection line. Order
+        # matters: sanitize() must never let a secret survive inside a line it
+        # tags, so it runs strictly after redact().
+        content = sanitize(redact(raw))
         outcome = "ok"
         is_error = False
     except Exception as exc:  # executor errors become error results, not crashes
-        content = redact(str(exc))
+        content = sanitize(redact(str(exc)))
         outcome = "error"
         is_error = True
 

@@ -419,6 +419,117 @@ class TestBloodstream:
         assert bloodstream.read_creative_mode() is False
 
 
+class TestBloodstreamPermissions:
+    """CLI-4/CLI-5: the lever + panel are operator state the gland TRUSTS as an
+    unauthenticated input — they must be written 0600 in a 0700 dir, not the
+    world-readable 0644 a plain write_text leaves under the usual umask."""
+
+    def test_lever_file_is_0600_and_dir_is_0700(self, tmp_path, monkeypatch) -> None:
+        import stat
+
+        from sanctum_cli.endocrine import bloodstream
+
+        d = tmp_path / "endo"
+        monkeypatch.setenv(bloodstream.STATE_DIR_ENV, str(d))
+        bloodstream.set_creative_mode(True, ttl_seconds=60)
+        lever = bloodstream.creative_path()
+        assert stat.S_IMODE(lever.stat().st_mode) == 0o600, "lever must be owner-only"
+        assert stat.S_IMODE(d.stat().st_mode) == 0o700, "state dir must be owner-only"
+
+    def test_panel_file_is_0600(self, tmp_path, monkeypatch) -> None:
+        import stat
+
+        from sanctum_cli.endocrine import bloodstream
+
+        monkeypatch.setenv(bloodstream.STATE_DIR_ENV, str(tmp_path))
+        bloodstream.publish_panel_file(Panel.neutral())
+        assert stat.S_IMODE(bloodstream.panel_path().stat().st_mode) == 0o600
+
+
+class TestDurableOptOut:
+    """CLI-9: the durable in-product off switch. `off` writes a marker that
+    `_endocrine_subscribed()` reads; the per-shell env still wins over it."""
+
+    def test_optout_marker_round_trips(self, tmp_path, monkeypatch) -> None:
+        from sanctum_cli.endocrine import bloodstream
+
+        monkeypatch.setenv(bloodstream.STATE_DIR_ENV, str(tmp_path))
+        assert bloodstream.read_optout() is False  # default: subscribed
+        bloodstream.set_optout(True)
+        assert bloodstream.read_optout() is True
+        bloodstream.set_optout(False)  # `on` removes the marker
+        assert bloodstream.read_optout() is False
+
+    def test_subscribed_false_when_marker_present_no_env(self, tmp_path, monkeypatch) -> None:
+        from sanctum_cli.commands import council
+        from sanctum_cli.endocrine import bloodstream
+
+        monkeypatch.setenv(bloodstream.STATE_DIR_ENV, str(tmp_path))
+        monkeypatch.delenv(council.ENDOCRINE_ENV, raising=False)
+        bloodstream.set_optout(True)
+        assert council._endocrine_subscribed() is False
+
+    def test_env_truthy_overrides_durable_optout(self, tmp_path, monkeypatch) -> None:
+        from sanctum_cli.commands import council
+        from sanctum_cli.endocrine import bloodstream
+
+        monkeypatch.setenv(bloodstream.STATE_DIR_ENV, str(tmp_path))
+        bloodstream.set_optout(True)  # durably off
+        monkeypatch.setenv(council.ENDOCRINE_ENV, "1")  # but the shell forces on
+        assert council._endocrine_subscribed() is True
+
+    def test_env_falsy_still_wins_when_no_marker(self, tmp_path, monkeypatch) -> None:
+        from sanctum_cli.commands import council
+        from sanctum_cli.endocrine import bloodstream
+
+        monkeypatch.setenv(bloodstream.STATE_DIR_ENV, str(tmp_path))
+        # no marker → default subscribed, but env=0 opts out
+        monkeypatch.setenv(council.ENDOCRINE_ENV, "0")
+        assert council._endocrine_subscribed() is False
+
+
+class TestCreativeCommandHonesty:
+    """CLI-2/CLI-4: the `creative` command surfaces an honest caveat when no
+    gland is publishing, and the dose defaults to a bounded TTL."""
+
+    def test_creative_default_ttl_is_bounded(self, tmp_path, monkeypatch) -> None:
+        from sanctum_cli.commands import endocrine_cmd
+        from sanctum_cli.endocrine import bloodstream
+
+        monkeypatch.setenv(bloodstream.STATE_DIR_ENV, str(tmp_path))
+        # invoke with the DEFAULT ttl (no --ttl) → must set an until_epoch
+        endocrine_cmd.creative_cmd(ttl=endocrine_cmd.DEFAULT_CREATIVE_TTL)
+        import json
+
+        rec = json.loads(bloodstream.creative_path().read_text())
+        assert rec.get("until_epoch"), "default dose must auto-expire (bounded ttl)"
+        # and the dose actually lapses when its epoch passes
+        assert bloodstream.read_creative_mode() is True
+
+    def test_creative_permanent_requires_explicit_ttl_zero(self, tmp_path, monkeypatch) -> None:
+        import json
+
+        from sanctum_cli.commands import endocrine_cmd
+        from sanctum_cli.endocrine import bloodstream
+
+        monkeypatch.setenv(bloodstream.STATE_DIR_ENV, str(tmp_path))
+        endocrine_cmd.creative_cmd(ttl=0)  # explicit opt-in to permanent
+        rec = json.loads(bloodstream.creative_path().read_text())
+        assert "until_epoch" not in rec, "--ttl 0 is the explicit permanent dose"
+
+    def test_no_gland_caveat_present_then_absent(self, tmp_path, monkeypatch) -> None:
+        from sanctum_cli.commands import endocrine_cmd
+        from sanctum_cli.endocrine import bloodstream
+
+        monkeypatch.setenv(bloodstream.STATE_DIR_ENV, str(tmp_path / "no-gland"))
+        # no panel published → the caveat must fire
+        assert "No gland is publishing" in endocrine_cmd._gland_caveat()
+        # publish a live panel → caveat must vanish
+        monkeypatch.setenv(bloodstream.STATE_DIR_ENV, str(tmp_path / "live"))
+        bloodstream.publish_panel_file(Panel.neutral())
+        assert endocrine_cmd._gland_caveat() == ""
+
+
 # ───────────── gland daemon: REAL signal reading + one real tick ───────────
 
 

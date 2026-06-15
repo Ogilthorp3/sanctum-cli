@@ -1,9 +1,15 @@
 # Endocrine system — deploy bundle (the seventh organ)
 
-These are the **daemon-side** artifacts for the endocrine system. They are
-**STAGED, NOT LOADED** — additive and off-by-default. Nothing here runs until
-Bert turns it on, and even when running it changes **no** council seat until a
-seat opts in *and* creative mode is dosed.
+These are the **daemon-side** artifacts for the endocrine system.
+
+**Status: LIVE on manoir as of 2026-06-15.** The gland LaunchAgent ticks every
+120 s and publishes a live panel; the CLI council reads the endocrine system
+**ON BY DEFAULT** (opt out per-shell with `SANCTUM_ENDOCRINE=0`, or durably with
+`sanctum endocrine off`). A **fresh install with no gland running is still a
+no-op** — the panel read is fail-soft to NEUTRAL → byte-identical to before — so
+"on by default" does not change a friend's CLI until a gland is actually
+publishing. Verifiable artifacts: panel at `~/.sanctum/state/endocrine/panel.json`;
+LaunchAgents `com.sanctum.endocrine-gland` + `com.sanctum.endocrine-gland-sentinel`.
 
 Source-of-truth is the `sanctum_cli.endocrine` package (ships with the CLI and
 rides its test harness). These deploy copies live at `~/.sanctum` per the
