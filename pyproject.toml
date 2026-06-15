@@ -55,7 +55,11 @@ packages = ["sanctum_cli"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
-extend-exclude = [".venv", "build", "dist"]
+# deploy/ holds daemon-side artifacts (staged plists + a standalone sentinel) that
+# run from ~/.sanctum WITHOUT this package on PYTHONPATH; the sentinel is stdlib-only
+# and follows the sibling ~/.sanctum/sentinels/ idioms (os.path), not the package's
+# pathlib-strict rules. It is verified via its own --self-test, not this linter.
+extend-exclude = [".venv", "build", "dist", "deploy"]
 
 [tool.ruff.lint]
 select = [
@@ -78,6 +82,13 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = ["ARG"]
+# The endocrine package documents a control-theory regulator; its docstrings and
+# comments use deliberate mathematical notation (the minus sign − vs hyphen, the
+# Greek α leak gain, ×/·/≈/⊣/→) where the glyph IS the meaning. RUF002/RUF003
+# would have us mangle the math into ASCII; the notation is intentional, not a
+# typo, so it is allowed here (and only here).
+"sanctum_cli/endocrine/*.py" = ["RUF002", "RUF003"]
+"tests/test_endocrine.py" = ["ARG", "RUF002", "RUF003"]
 
 [tool.ruff.format]
 quote-style = "double"

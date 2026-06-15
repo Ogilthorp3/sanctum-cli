@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  STAGED — NOT LOADED. This is the gland daemon (the seventh organ).
+  Bert turns it on:
+      cp com.sanctum.endocrine-gland.plist ~/Library/LaunchAgents/
+      launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.sanctum.endocrine-gland.plist
+
+  Runs one gland tick every 120s (StartInterval) via `sanctum endocrine tick`.
+  Off-by-default in effect: a running gland publishes a NEUTRAL panel until a
+  seat opts in (SANCTUM_ENDOCRINE=1) AND the operator doses creative mode — so
+  loading this alone changes NO seat behaviour.
+
+  StartInterval (not a long-running KeepAlive loop) keeps the organ stateless
+  between ticks and crash-trivial: each invocation reads the checkpoint, steps
+  once, publishes, exits. A wedged tick can't accumulate.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.sanctum.endocrine-gland</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/bin/sanctum</string>
+        <string>endocrine</string>
+        <string>tick</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>/Users/bert</string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StartInterval</key>
+    <integer>120</integer>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>StandardOutPath</key>
+    <string>/Users/bert/.sanctum/logs/endocrine-gland.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/bert/.sanctum/logs/endocrine-gland.log</string>
+</dict>
+</plist>

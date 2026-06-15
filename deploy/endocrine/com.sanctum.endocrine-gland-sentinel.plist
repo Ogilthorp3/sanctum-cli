@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  STAGED — NOT LOADED. Watches the gland (the seventh organ) and pages Force
+  Flow ONLY on a pathological state, damped via alert-confirm.sh (probe-twice +
+  cooldown). Observe-only: never restarts/doses anything.
+  Bert turns it on:
+      cp endocrine-gland-sentinel.py ~/.sanctum/sentinels/
+      cp com.sanctum.endocrine-gland-sentinel.plist ~/Library/LaunchAgents/
+      launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.sanctum.endocrine-gland-sentinel.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.sanctum.endocrine-gland-sentinel</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/bin/python3</string>
+        <string>/Users/bert/.sanctum/sentinels/endocrine-gland-sentinel.py</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>/Users/bert</string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StartInterval</key>
+    <integer>300</integer>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>StandardOutPath</key>
+    <string>/Users/bert/.sanctum/logs/endocrine-gland-sentinel.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/bert/.sanctum/logs/endocrine-gland-sentinel.log</string>
+</dict>
+</plist>

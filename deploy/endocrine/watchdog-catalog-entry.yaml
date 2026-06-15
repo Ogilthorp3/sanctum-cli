@@ -1,0 +1,45 @@
+# Watchdog catalog entry for the endocrine gland (the seventh organ).
+#
+# STAGED — append to ~/.sanctum/services/ as endocrine-gland.yaml (or merge into
+# the catalog) when Bert turns the organ on. Matches the existing
+# ~/.sanctum/services/watchdog.yaml schema. The Living Force (sanctum-watchdog)
+# then monitors the gland process; the endocrine-gland-sentinel owns the
+# pathological-state paging (damped via alert-confirm.sh).
+name: endocrine-gland
+display_name: Endocrine Gland (hormone panel)
+host: mac
+type: service
+provides:
+- endocrine
+- hormone-panel
+requires:
+- chitti        # reads /fluid for the cortisol memory-pressure signal
+launchagent: com.sanctum.endocrine-gland
+health:
+  startup:
+    type: file-fresh
+    target: /Users/bert/.sanctum/state/endocrine/panel.json
+    max_age_seconds: 600
+  liveness:
+    # The gland is a StartInterval tick, not a long-running PID — liveness is a
+    # FRESH published panel, not a process check (a stale panel == dead organ).
+    type: file-fresh
+    target: /Users/bert/.sanctum/state/endocrine/panel.json
+    max_age_seconds: 600
+    interval: 300
+remediation:
+  responsible_agent: cilghal   # the endocrinologist — monitors + doses creative mode
+  escalation_level: 1
+  max_restarts: 3
+  cooldown: 120
+  restart_cmd: /Users/bert/Documents/Claude_Code/tools/heal_launchagent.sh com.sanctum.endocrine-gland /Users/bert/Library/LaunchAgents/com.sanctum.endocrine-gland.plist
+  actions:
+  - name: heal-launchagent
+    cmd: /Users/bert/Documents/Claude_Code/tools/heal_launchagent.sh com.sanctum.endocrine-gland /Users/bert/Library/LaunchAgents/com.sanctum.endocrine-gland.plist
+metadata:
+  generated_from: deploy/endocrine (sanctum-cli feat/endocrine-system)
+  organ: endocrine
+  note: >-
+    ADDITIVE + off-by-default. A running gland publishes a NEUTRAL panel until a
+    seat opts in (SANCTUM_ENDOCRINE=1) and the operator doses creative mode.
+    Mon Mothma governs the stress axis; Cilghal monitors + doses creative mode.

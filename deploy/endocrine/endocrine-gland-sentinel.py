@@ -1,0 +1,242 @@
+#!/usr/bin/env python3
+"""endocrine-gland-sentinel.py — watch the seventh organ.
+
+The endocrine system is a NEW organ; the Living Force (sanctum-watchdog) must be
+able to see it. This sentinel is OBSERVE-ONLY: it reads the gland's published
+panel + freshness and pages Force Flow ONLY on a PATHOLOGICAL state. It never
+restarts, kills, or doses anything.
+
+It is DAMPED by construction, reusing the sibling's already-shipped
+``alert-confirm.sh`` (probe-twice + cooldown) so it cannot become an alert-storm
+source — the truthful-alerts lesson made structural (0 false criticals). The
+endocrine layer is ITSELF feedback-damped (the regulator math forbids an
+out-of-range level), so a pathology here means the INPUTS are stuck or the gland
+is mis-running — a real, page-worthy organ fault, never the math running away.
+
+Pages (any → CRITICAL, confirm-twice + 30-min cooldown):
+  GLAND_DOWN   — no panel published, or the panel file is stale > STALE_SEC
+                 (the gland tick loop has stopped — the organ is dead)
+  HORMONE_STORM— a published level is out of [0,1] (regulator invariant
+                 violated → mis-running gland) OR cortisol pinned high
+                 (>= STORM_CORTISOL) for the whole confirm window (stuck stress
+                 axis — the canonical "hormone storm")
+
+Modes:
+  (default)    diagnose + page Force Flow on pathological (confirm + cooldown)
+  --check      dry-run: print the JSON verdict, never page
+  --self-test  run the detector against synthetic fixtures, never touch state
+
+Run by com.sanctum.endocrine-gland-sentinel.plist every 300s (staged, NOT
+loaded — Bert turns it on).
+
+This file is the deploy copy; the canonical source is in the sanctum-cli repo
+under deploy/endocrine/. It depends ONLY on the stdlib + alert-confirm.sh, so it
+runs from ~/.sanctum without the sanctum_cli package on PYTHONPATH.
+"""
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+import time
+
+HOME = os.environ.get("HOME", "/Users/bert")
+PANEL_FILE = os.environ.get(
+    "ENDOCRINE_PANEL_FILE", os.path.join(HOME, ".sanctum/state/endocrine/panel.json")
+)
+STATE_FILE = os.environ.get(
+    "ENDOCRINE_SENTINEL_STATE",
+    os.path.join(HOME, ".sanctum/state/endocrine-gland-sentinel.json"),
+)
+FORCE_FLOW_URL = os.environ.get("FORCE_FLOW_URL", "http://127.0.0.1:4077")
+ALERT_CONFIRM = os.environ.get(
+    "ALERT_CONFIRM_LIB", os.path.join(HOME, ".sanctum/lib/alert-confirm.sh")
+)
+# The gland ticks every ~60s; a panel older than this means the loop stopped.
+STALE_SEC = int(os.environ.get("ENDOCRINE_STALE_SEC", "600"))  # 10 min (10 missed ticks)
+STORM_CORTISOL = float(os.environ.get("ENDOCRINE_STORM_CORTISOL", "0.97"))
+ALERT_COOLDOWN = int(os.environ.get("ENDOCRINE_ALERT_COOLDOWN", "1800"))  # 30 min
+HORMONES = (
+    "dopamine", "cortisol", "noradrenaline", "oxytocin", "melatonin", "serotonin",
+)
+NOW = int(time.time())
+
+
+def read_panel() -> tuple[dict | None, int | None]:
+    """Return (panel_dict, age_sec). (None, None) if unreadable/absent."""
+    try:
+        age = NOW - int(os.path.getmtime(PANEL_FILE))
+    except OSError:
+        return None, None
+    try:
+        with open(PANEL_FILE) as f:
+            doc = json.load(f)
+    except (OSError, ValueError):
+        return None, age
+    panel = doc.get("panel", doc) if isinstance(doc, dict) else None
+    if not isinstance(panel, dict):
+        return None, age
+    return panel, age
+
+
+def diagnose(panel: dict | None, age: int | None) -> tuple[str, str]:
+    """Pure verdict. Returns (state, detail). HEALTHY when the organ is fine."""
+    if panel is None:
+        if age is None:
+            return "GLAND_DOWN", (
+                f"no panel published at {PANEL_FILE} — the endocrine gland has "
+                f"never run or its state dir is gone"
+            )
+        return "GLAND_DOWN", (
+            f"panel file present but unparseable (age {age}s) — gland mis-writing"
+        )
+    if age is not None and age > STALE_SEC:
+        return "GLAND_DOWN", (
+            f"panel stale {age}s (> {STALE_SEC}s) — the gland tick loop has "
+            f"stopped; disposition is frozen"
+        )
+    # invariant: every level must be a real number in [0,1]
+    for h in HORMONES:
+        v = panel.get(h)
+        if not isinstance(v, (int, float)) or v != v or v < 0.0 or v > 1.0:
+            return "HORMONE_STORM", (
+                f"{h}={v!r} out of [0,1] — regulator invariant violated; the "
+                f"gland is mis-running (the math cannot produce this)"
+            )
+    cort = panel.get("cortisol", 0.0)
+    if isinstance(cort, (int, float)) and cort >= STORM_CORTISOL:
+        return "HORMONE_STORM", (
+            f"cortisol pinned high ({cort:.2f} >= {STORM_CORTISOL}) — stuck "
+            f"stress axis; the council is jammed convergent"
+        )
+    return "HEALTHY", (
+        f"gland fresh ({age}s); levels in range; "
+        f"cortisol={cort:.2f} dopamine={panel.get('dopamine')}"
+    )
+
+
+def confirm_down_via_lib(state: str) -> bool:
+    """Re-probe the verdict through alert-confirm.sh's confirm_down (probe-twice).
+
+    A second read that comes back HEALTHY means the first was transient → do NOT
+    page. We shell into the sibling lib so the damping is the EXACT same code the
+    rest of the haus uses (no re-implementation). If the lib is missing we fall
+    back to confirming in-process with one extra read."""
+    probe = (
+        f'{sys.executable} {os.path.abspath(__file__)} --check '
+        f'| grep -q \'"state": "{state}"\''
+    )
+    if os.path.exists(ALERT_CONFIRM):
+        cmd = f'source "{ALERT_CONFIRM}"; confirm_down \'{probe}\''
+        try:
+            rc = subprocess.run(
+                ["bash", "-c", cmd], capture_output=True, text=True, timeout=30
+            ).returncode
+        except Exception:
+            return False
+        return rc == 0  # 0 == CONFIRMED (both reads agreed it's bad)
+    # fallback: one extra in-process read
+    time.sleep(3)
+    panel, age = read_panel()
+    again, _ = diagnose(panel, age)
+    return again == state
+
+
+def cooldown_ok_via_lib(key: str) -> bool:
+    """Anti-storm cooldown through alert-confirm.sh's alert_cooldown_ok."""
+    if os.path.exists(ALERT_CONFIRM):
+        cmd = f'source "{ALERT_CONFIRM}"; alert_cooldown_ok "{key}" {ALERT_COOLDOWN}'
+        try:
+            rc = subprocess.run(
+                ["bash", "-c", cmd], capture_output=True, text=True, timeout=10
+            ).returncode
+        except Exception:
+            return False
+        return rc == 0
+    # fallback cooldown via local state file
+    prev = load_state()
+    return (NOW - int(prev.get("last_alert", 0) or 0)) > ALERT_COOLDOWN
+
+
+def force_flow_notify(severity: str, title: str, message: str) -> None:
+    payload = json.dumps({
+        "source": "endocrine-gland-sentinel",
+        "severity": severity, "title": title, "message": message,
+    })
+    try:
+        subprocess.run(
+            ["curl", "-fsS", "-X", "POST", f"{FORCE_FLOW_URL}/notify",
+             "-H", "Content-Type: application/json", "--max-time", "10", "-d", payload],
+            capture_output=True, text=True, timeout=12,
+        )
+    except Exception:
+        pass
+
+
+def load_state() -> dict:
+    try:
+        with open(STATE_FILE) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def write_state(d: dict) -> None:
+    os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
+    with open(STATE_FILE, "w") as f:
+        json.dump(d, f, indent=2)
+
+
+SYNTHETIC = {
+    "healthy":  ({"dopamine": 0.3, "cortisol": 0.2, "noradrenaline": 0.1,
+                  "oxytocin": 0.5, "melatonin": 0.2, "serotonin": 0.6}, 30, "HEALTHY"),
+    "stale":    ({"dopamine": 0.3, "cortisol": 0.2, "noradrenaline": 0.1,
+                  "oxytocin": 0.5, "melatonin": 0.2, "serotonin": 0.6}, 9000, "GLAND_DOWN"),
+    "absent":   (None, None, "GLAND_DOWN"),
+    "oor":      ({"dopamine": 1.7, "cortisol": 0.2, "noradrenaline": 0.1,
+                  "oxytocin": 0.5, "melatonin": 0.2, "serotonin": 0.6}, 30, "HORMONE_STORM"),
+    "stuckhigh":({"dopamine": 0.1, "cortisol": 0.99, "noradrenaline": 0.8,
+                  "oxytocin": 0.5, "melatonin": 0.2, "serotonin": 0.2}, 30, "HORMONE_STORM"),
+}
+
+
+def self_test() -> int:
+    ok = True
+    for name, (panel, age, want) in SYNTHETIC.items():
+        state, _ = diagnose(panel, age)
+        passed = state == want
+        ok = ok and passed
+        print(f"  [{'PASS' if passed else 'FAIL'}] {name:10s} -> {state} (want {want})")
+    print("self-test:", "ALL PASS" if ok else "FAILURES")
+    return 0 if ok else 1
+
+
+def main() -> None:
+    args = sys.argv[1:]
+    if "--self-test" in args:
+        sys.exit(self_test())
+
+    panel, age = read_panel()
+    state, detail = diagnose(panel, age)
+    verdict = {"ts": NOW, "state": state, "detail": detail, "age": age}
+
+    if "--check" in args:
+        print(json.dumps(verdict))
+        return
+
+    if state != "HEALTHY":
+        # DAMPED: confirm via the sibling probe-twice lib, then cooldown-gate.
+        if confirm_down_via_lib(state) and cooldown_ok_via_lib(f"endocrine-{state.lower()}"):
+            force_flow_notify(
+                "critical",
+                f"Endocrine {state} — the seventh organ is unhealthy",
+                f"{detail}  [observe-only; investigate: cat {PANEL_FILE}; "
+                f"check com.sanctum.endocrine-gland launchd job]",
+            )
+            write_state({"last_alert": NOW, "last_state": state, "detail": detail})
+    print(json.dumps(verdict))
+
+
+if __name__ == "__main__":
+    main()

@@ -23,7 +23,7 @@ from sanctum_cli.commands import bridge as bridge_cmd
 from sanctum_cli.commands import chat as chat_cmd
 from sanctum_cli.commands import cloud as cloud_cmd
 from sanctum_cli.commands import code as code_cmd
-from sanctum_cli.commands import config_cmd, doctor, status
+from sanctum_cli.commands import config_cmd, doctor, endocrine_cmd, status
 from sanctum_cli.commands import council as council_cmd
 from sanctum_cli.commands import deadman as deadman_cmd
 from sanctum_cli.commands import devices as devices_cmd
@@ -333,6 +333,10 @@ def screentime_phone_mode(
 
 
 app.add_typer(module_app, name="module")
+
+# The seventh organ — hormone panel + creative-mode lever. Read-only/file-based;
+# adds no behavior to any seat until a seat opts into the receptor.
+app.add_typer(endocrine_cmd.app, name="endocrine")
 
 keys_app = typer.Typer(help="Keychain-backed credential helpers.")
 app.add_typer(keys_app, name="keys")

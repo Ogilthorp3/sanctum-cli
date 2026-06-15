@@ -38,8 +38,53 @@ from rich.text import Text
 
 from sanctum_cli import proxyd
 from sanctum_cli.commands import banner, council_tools
+from sanctum_cli.endocrine import bloodstream, receptor
 
 console = Console()
+
+# ── Endocrine receptor opt-in (the seventh organ; OFF BY DEFAULT) ──────────
+# The council seat is the demonstrated receptor: when a seat subscribes, the
+# live hormone panel modulates its effective sampling (temperature/top_p) and
+# tilts its system-prompt framing. Subscription is opt-in via env so the
+# DEFAULT council behaviour is byte-identical to today — an absent gland or a
+# neutral panel changes nothing (the receptor's None/neutral paths are no-ops).
+ENDOCRINE_ENV = "SANCTUM_ENDOCRINE"
+_TRUTHY = {"1", "true", "yes", "on"}
+
+
+def _endocrine_subscribed() -> bool:
+    return os.environ.get(ENDOCRINE_ENV, "").strip().lower() in _TRUTHY
+
+
+def _live_panel() -> object | None:
+    """The live panel IFF subscribed, else None (off-by-default).
+
+    Read is fail-soft: a missing/garbage bloodstream returns None and the
+    receptor leaves the payload untouched. There is no path where a failed
+    read makes the seat hotter."""
+    if not _endocrine_subscribed():
+        return None
+    return bloodstream.read_panel()
+
+
+def _apply_sampling(seat: Seat, payload: dict[str, object]) -> None:
+    """Merge the receptor's sampling delta into a seat payload, in place.
+
+    Off-by-default: with no subscription / neutral / absent panel the receptor
+    returns {} and the payload is unchanged — exactly today's request."""
+    delta = receptor.sampling_for(seat, _live_panel())  # type: ignore[arg-type]
+    if delta:
+        payload.update(delta)
+
+
+def _framed_system(system: str) -> str:
+    """Append the receptor's disposition clause to a seat's system prompt.
+
+    Additive: never rewrites the persona; appends an empty string when not
+    subscribed / neutral (no-op). Seat-agnostic — the disposition clause is a
+    function of the panel, not the seat."""
+    clause = receptor.framing_clause(_live_panel())  # type: ignore[arg-type]
+    return f"{system}\n\n{clause}" if clause else system
 
 # Endpoint + TLS trust now live in sanctum_cli.proxyd (single source of truth,
 # crypto-agnostic). PROXYD_URL_ENV is re-exported here for back-compat with any
@@ -347,13 +392,14 @@ def sse_text_delta(line: str) -> str | None:
 
 def _stream(seat: Seat, messages: list[dict[str, str]], *, system: str) -> Iterator[str]:
     """Yield text deltas from a streaming /v1/messages call."""
-    payload = {
+    payload: dict[str, object] = {
         "model": seat.model,
         "max_tokens": _MAX_TOKENS,
-        "system": system,
+        "system": _framed_system(system),
         "messages": messages,
         "stream": True,
     }
+    _apply_sampling(seat, payload)
     with (
         httpx.Client(timeout=httpx.Timeout(120.0, connect=10.0), verify=proxyd.verify()) as client,
         client.stream(
@@ -369,14 +415,31 @@ def _stream(seat: Seat, messages: list[dict[str, str]], *, system: str) -> Itera
                 yield delta
 
 
-def _complete(seat: Seat, messages: list[dict[str, str]], *, system: str) -> str:
-    """Buffered (non-streaming) completion — used by the fan-out."""
-    payload = {
+def build_completion_payload(
+    seat: Seat, messages: list[dict[str, str]], *, system: str
+) -> dict[str, object]:
+    """The EXACT request body the buffered path sends to proxyd.
+
+    Extracted so the endocrine receptor contract can be tested on the REAL
+    boundary artifact (the payload that crosses to proxyd) without mocking the
+    HTTP call — Contracts-at-the-Boundary §3: don't mock a cheap boundary, feed
+    the produced artifact through the real producer. When the seat subscribes
+    and the live panel is non-neutral, ``temperature``/``top_p`` appear here and
+    the system prompt carries the disposition clause; otherwise the body is
+    byte-identical to today (off-by-default)."""
+    payload: dict[str, object] = {
         "model": seat.model,
         "max_tokens": _MAX_TOKENS,
-        "system": system,
+        "system": _framed_system(system),
         "messages": messages,
     }
+    _apply_sampling(seat, payload)
+    return payload
+
+
+def _complete(seat: Seat, messages: list[dict[str, str]], *, system: str) -> str:
+    """Buffered (non-streaming) completion — used by the fan-out."""
+    payload = build_completion_payload(seat, messages, system=system)
     with httpx.Client(timeout=httpx.Timeout(180.0, connect=10.0), verify=proxyd.verify()) as client:
         resp = client.post(f"{_proxyd_url()}/v1/messages", headers=_headers(), json=payload)
     if resp.status_code != 200:
