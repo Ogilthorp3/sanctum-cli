@@ -42,12 +42,17 @@ from sanctum_cli.endocrine import bloodstream, receptor
 
 console = Console()
 
-# ── Endocrine receptor opt-in (the seventh organ; OFF BY DEFAULT) ──────────
-# The council seat is the demonstrated receptor: when a seat subscribes, the
-# live hormone panel modulates its effective sampling (temperature/top_p) and
-# tilts its system-prompt framing. Subscription is opt-in via env so the
-# DEFAULT council behaviour is byte-identical to today — an absent gland or a
-# neutral panel changes nothing (the receptor's None/neutral paths are no-ops).
+# ── Endocrine receptor (the seventh organ; ON BY DEFAULT, opt-out) ──────────
+# The council seat is the live receptor: it reads the hormone panel and the panel
+# modulates its effective sampling (temperature/top_p) and tilts its system-prompt
+# framing. ON BY DEFAULT (2026-06-15, Bert directive) — the council responds to the
+# endocrine system unless explicitly opted out with SANCTUM_ENDOCRINE=0. This stays
+# SAFE by construction: it is still fail-soft (an absent gland / unreadable panel ->
+# read_panel() returns None -> the receptor is a no-op -> byte-identical to today),
+# and the resting baseline is a near-no-op (the divergent/convergent clause + the
+# temperature shift only engage as the panel MOVES — a creative dose, or cortisol
+# under real stress). So a fresh install with no gland running behaves exactly as
+# before; the council only changes once a live panel is actually being published.
 #
 # SCOPE: modulation applies to chat and the final voiced turn (the streaming
 # `_stream` path and the buffered `build_completion_payload` path). The
@@ -56,19 +61,22 @@ console = Console()
 # (e.g. gemini-31-pro), NOT the voiced model, so the creative-temperature knob
 # is most meaningful on the voiced turn the receptor already modulates.
 ENDOCRINE_ENV = "SANCTUM_ENDOCRINE"
-_TRUTHY = {"1", "true", "yes", "on"}
+_FALSY = {"0", "false", "no", "off"}
 
 
 def _endocrine_subscribed() -> bool:
-    return os.environ.get(ENDOCRINE_ENV, "").strip().lower() in _TRUTHY
+    # ON by default: subscribed unless explicitly opted out (SANCTUM_ENDOCRINE=0).
+    # Still fail-soft — _live_panel() returns None when no panel is published, so
+    # "on" with no gland running is a no-op (byte-identical to today).
+    return os.environ.get(ENDOCRINE_ENV, "").strip().lower() not in _FALSY
 
 
 def _live_panel() -> object | None:
-    """The live panel IFF subscribed, else None (off-by-default).
+    """The live panel unless explicitly opted out (SANCTUM_ENDOCRINE=0), else None.
 
     Read is fail-soft: a missing/garbage bloodstream returns None and the
     receptor leaves the payload untouched. There is no path where a failed
-    read makes the seat hotter."""
+    read makes the seat hotter — so ON-by-default with no gland is a no-op."""
     if not _endocrine_subscribed():
         return None
     return bloodstream.read_panel()
@@ -77,8 +85,8 @@ def _live_panel() -> object | None:
 def _apply_sampling(seat: Seat, payload: dict[str, object]) -> None:
     """Merge the receptor's sampling delta into a seat payload, in place.
 
-    Off-by-default: with no subscription / neutral / absent panel the receptor
-    returns {} and the payload is unchanged — exactly today's request."""
+    Fail-soft: when opted out / neutral / absent panel the receptor returns {}
+    and the payload is unchanged — exactly today's request."""
     delta = receptor.sampling_for(seat, _live_panel())  # type: ignore[arg-type]
     if delta:
         payload.update(delta)
@@ -432,8 +440,8 @@ def build_completion_payload(
     HTTP call — Contracts-at-the-Boundary §3: don't mock a cheap boundary, feed
     the produced artifact through the real producer. When the seat subscribes
     and the live panel is non-neutral, ``temperature``/``top_p`` appear here and
-    the system prompt carries the disposition clause; otherwise the body is
-    byte-identical to today (off-by-default)."""
+    the system prompt carries the disposition clause; otherwise (opted out, a
+    neutral panel, or no gland) the body is byte-identical to today."""
     payload: dict[str, object] = {
         "model": seat.model,
         "max_tokens": _MAX_TOKENS,

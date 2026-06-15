@@ -49,17 +49,22 @@ sanctum endocrine creative --ttl 3600 # auto-expire after 1 h
 sanctum endocrine calm                # back to the resting baseline
 ```
 
-## Opt a council seat in (per-seat, env-gated)
+## The CLI council reads the endocrine system BY DEFAULT (2026-06-15)
+
+No flag needed — the council reads the live hormone panel and modulates its
+sampling + framing automatically:
 
 ```bash
-SANCTUM_ENDOCRINE=1 sanctum council "give me three wild angles on X"
+sanctum endocrine creative            # dose; the council goes divergent on its own
+sanctum council "give me three wild angles on X"
 ```
 
-With `SANCTUM_ENDOCRINE` unset (the default) the council is byte-identical to
-today. VM-wide live-council rollout is a separate, documented opt-in: set
-`SANCTUM_ENDOCRINE=1` in the seat's launch env and point
-`CHITTI_BASE_URL`/`FORCE_FLOW_URL` at the VM endpoints — do **not** mutate the
-live `openclaw.json` seats; subscribe one seat, tune on live signals, then widen.
+Safe by construction: with no gland running (no panel published) the read is
+fail-soft → a no-op → byte-identical to before, so a fresh install behaves exactly
+as it did. The kill switch is `SANCTUM_ENDOCRINE=0` (explicit opt-out, per
+invocation or in a seat's launch env). VM-wide rollout is still a separate step:
+point `CHITTI_BASE_URL`/`FORCE_FLOW_URL` at the VM endpoints — do **not** mutate the
+live `openclaw.json` seats; enable one, tune on live signals, then widen.
 
 ## Subscription-first (planned)
 
@@ -74,10 +79,12 @@ which never change *which* seats run.
 
 ## What's left for Bert
 
-- [ ] Turn the organ on (the `## Turn-on` steps above — deploy copies, dry-verify,
-      `launchctl bootstrap` the gland + sentinel plists).
-- [ ] Opt a council seat in (`SANCTUM_ENDOCRINE=1` in the seat's launch env) and
-      tune thresholds on live signals before widening to the VM council.
+- [x] Turn the organ on — gland + sentinel bootstrapped and healthy on manoir
+      (2026-06-15); the gland publishes a live panel every 120s.
+- [x] CLI council reads the endocrine system BY DEFAULT (opt out with
+      `SANCTUM_ENDOCRINE=0`); tune thresholds on live signals as you go.
+- [ ] VM-wide rollout: point a VM seat's `CHITTI_BASE_URL`/`FORCE_FLOW_URL` at the VM
+      endpoints and enable it there — the CLI surface is done; the VM agents are not.
 - [ ] Wire `diversity_seats` into `council_ask` (compute the engaged set from the
       live panel + a `metered` set derived from each seat's model→provider tier)
       to make subscription-first a *live* invariant — with a test that drives the

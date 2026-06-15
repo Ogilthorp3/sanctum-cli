@@ -17,7 +17,7 @@ Five pieces:
   bloodstream  — the broadcast/read transport: chitti samskara + a listener-free
                  query file + the creative-mode lever file. Discovery-resolved
                  endpoints (no hardcoded literals).
-  receptor     — the OPT-IN, OFF-BY-DEFAULT translation layer a council seat uses
+  receptor     — the ON-BY-DEFAULT (opt-out) translation layer a council seat uses
                  to turn a Panel into concrete sampling/framing/diversity knobs.
 
 The operator control surface is ``sanctum endocrine`` (panel / creative / calm /
@@ -27,7 +27,7 @@ deploy/endocrine/ — STAGED, never loaded by the build.
 
 Hard invariants (each enforced by a test in tests/test_endocrine.py):
   • Homeostatic: a damped negative-feedback regulator that CANNOT run away.
-  • Additive + off-by-default: a neutral/absent panel changes NOTHING.
+  • Fail-soft: a neutral/absent panel (or opt-out SANCTUM_ENDOCRINE=0) changes NOTHING.
   • No hardcoded endpoints: ports come from instance.yaml via config.
 
 Subscription-first (DESIGNED, NOT YET WIRED): receptor.diversity_seats() would

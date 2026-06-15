@@ -19,7 +19,7 @@ wrong assumption with the implementation (Contracts-at-the-Boundary §2):
 The receptor contract is tested against the REAL receptor (no mocks) feeding a
 REAL produced panel: a high-dopamine/low-cortisol panel MUST actually raise a
 seat's effective temperature + widen diversity vs the neutral baseline, and the
-neutral/absent panel MUST leave today's payload byte-identical (off-by-default).
+neutral/absent panel MUST leave today's payload byte-identical (fail-soft / opt-out).
 """
 
 from __future__ import annotations
@@ -571,13 +571,14 @@ class TestCouncilSeatReceptorContract:
 
         return SEATS["yoda"]
 
-    def test_unsubscribed_payload_is_byte_identical_to_today(self, tmp_path, monkeypatch) -> None:
+    def test_opted_out_payload_is_byte_identical_to_today(self, tmp_path, monkeypatch) -> None:
+        # The kill switch: SANCTUM_ENDOCRINE=0 explicitly opts a seat OUT, so even a
+        # hot panel is ignored and the payload is byte-identical to today.
         from sanctum_cli.commands import council
         from sanctum_cli.endocrine import bloodstream
 
         monkeypatch.setenv(bloodstream.STATE_DIR_ENV, str(tmp_path))
-        monkeypatch.delenv(council.ENDOCRINE_ENV, raising=False)  # NOT subscribed
-        # even with a hot panel published, an unsubscribed seat ignores it
+        monkeypatch.setenv(council.ENDOCRINE_ENV, "0")  # explicit opt-OUT
         bloodstream.publish_panel_file(
             Panel(
                 dopamine=0.95,
@@ -594,6 +595,47 @@ class TestCouncilSeatReceptorContract:
         )
         assert "temperature" not in body and "top_p" not in body
         assert body["system"] == seat.persona  # no framing clause appended
+
+    def test_default_on_reads_panel_and_modulates(self, tmp_path, monkeypatch) -> None:
+        # ON by default (2026-06-15): with NO SANCTUM_ENDOCRINE env at all, a published
+        # hot panel is read and modulates the REAL payload — no opt-in flag needed.
+        from sanctum_cli.commands import council
+        from sanctum_cli.endocrine import bloodstream
+
+        monkeypatch.setenv(bloodstream.STATE_DIR_ENV, str(tmp_path))
+        monkeypatch.delenv(council.ENDOCRINE_ENV, raising=False)  # no env -> default ON
+        bloodstream.publish_panel_file(
+            Panel(
+                dopamine=0.95,
+                cortisol=0.05,
+                noradrenaline=0.1,
+                oxytocin=0.2,
+                melatonin=0.1,
+                serotonin=0.7,
+            )
+        )
+        seat = self._seat()
+        body = council.build_completion_payload(
+            seat, [{"role": "user", "content": "hi"}], system=seat.persona
+        )
+        assert "temperature" in body
+        assert body["temperature"] > council.receptor.BASELINE_TEMPERATURE
+        assert body["system"].startswith(seat.persona) and body["system"] != seat.persona
+
+    def test_default_on_with_no_gland_is_byte_identical(self, tmp_path, monkeypatch) -> None:
+        # ON by default stays SAFE: with no panel published (no gland), the read is
+        # fail-soft -> no-op -> byte-identical, even though the seat is "subscribed".
+        from sanctum_cli.commands import council
+        from sanctum_cli.endocrine import bloodstream
+
+        monkeypatch.setenv(bloodstream.STATE_DIR_ENV, str(tmp_path / "no-gland-here"))
+        monkeypatch.delenv(council.ENDOCRINE_ENV, raising=False)  # default ON
+        seat = self._seat()
+        body = council.build_completion_payload(
+            seat, [{"role": "user", "content": "hi"}], system=seat.persona
+        )
+        assert "temperature" not in body and "top_p" not in body
+        assert body["system"] == seat.persona
 
     def test_subscribed_creative_panel_raises_real_payload_temperature(
         self, tmp_path, monkeypatch
