@@ -14,8 +14,10 @@ out-of-range level), so an out-of-range pathology here means the gland is
 mis-running — a real, page-worthy organ fault, never the math running away.
 
 Pages (any → CRITICAL, confirm-twice + 30-min cooldown):
-  GLAND_DOWN   — no panel published, or the panel file is stale > STALE_SEC
-                 (the gland tick loop has stopped — the organ is dead)
+  GLAND_DOWN   — the gland launchd job is unloaded, OR loaded but its last tick
+                 exited non-zero with no panel (crashing), OR the panel file is
+                 stale > STALE_SEC / unparseable (the tick loop has stopped — the
+                 organ is dead)
   HORMONE_STORM— a published level is out of [0,1] (regulator invariant
                  violated → mis-running gland; the math cannot produce this) OR
                  cortisol pinned high (>= STORM_CORTISOL) for the whole confirm
@@ -24,6 +26,11 @@ Pages (any → CRITICAL, confirm-twice + 30-min cooldown):
                  so the cortisol-pinned branch fires only on a genuinely STUCK
                  stress axis — NOT on a faithful read of a real crisis. (Keep
                  STORM_CORTISOL > the gland's max reachable target if either moves.)
+
+Observed, NEVER pages:
+  GLAND_STARTING— no panel yet but the gland job is loaded and its last tick was
+                 clean (the organ is being born — a few seconds at boot). An organ
+                 is not "dead" the instant it loads; this is the boot-race fix.
 
 Modes:
   (default)    diagnose + page Force Flow on pathological (confirm + cooldown)
@@ -84,13 +91,62 @@ def read_panel() -> tuple[dict | None, int | None]:
     return panel, age
 
 
-def diagnose(panel: dict | None, age: int | None) -> tuple[str, str]:
-    """Pure verdict. Returns (state, detail). HEALTHY when the organ is fine."""
+def gland_status() -> tuple[bool, int | None]:
+    """(job_loaded, last_exit_code) for the gland launchd job, via `launchctl print`.
+
+    Pure-ish side helper kept OUT of `diagnose` so the verdict stays unit-pure.
+    Returns (False, None) if the job is not loaded or launchctl is unreadable;
+    (True, None) if loaded but it has not exited yet (just bootstrapped)."""
+    label = os.environ.get("ENDOCRINE_GLAND_LABEL", "com.sanctum.endocrine-gland")
+    try:
+        out = subprocess.run(
+            ["launchctl", "print", f"gui/{os.getuid()}/{label}"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except Exception:
+        return False, None
+    if out.returncode != 0:
+        return False, None  # not loaded
+    last_exit: int | None = None
+    for line in out.stdout.splitlines():
+        s = line.strip()
+        if s.startswith("last exit code ="):
+            try:
+                last_exit = int(s.split("=", 1)[1].strip())
+            except ValueError:
+                last_exit = None
+            break
+    return True, last_exit
+
+
+def diagnose(
+    panel: dict | None,
+    age: int | None,
+    gland_loaded: bool = False,
+    gland_last_exit: int | None = None,
+) -> tuple[str, str]:
+    """Pure verdict. Returns (state, detail). HEALTHY when the organ is fine.
+
+    The absent-panel case is disambiguated by the gland launchd job's state so a
+    freshly-bootstrapped organ that simply hasn't published its first beat yet is
+    GLAND_STARTING (NOT pageable) — never a critical "the organ is dead" the
+    instant it boots. It escalates to GLAND_DOWN only when the job is unloaded or
+    its last tick exited non-zero (crashing)."""
     if panel is None:
         if age is None:
-            return "GLAND_DOWN", (
-                f"no panel published at {PANEL_FILE} — the endocrine gland has "
-                f"never run or its state dir is gone"
+            if not gland_loaded:
+                return "GLAND_DOWN", (
+                    f"no panel at {PANEL_FILE} and the gland launchd job is NOT "
+                    f"loaded — the organ is down"
+                )
+            if gland_last_exit not in (0, None):
+                return "GLAND_DOWN", (
+                    f"no panel at {PANEL_FILE}; gland job loaded but its last tick "
+                    f"exited {gland_last_exit} — the organ is crashing"
+                )
+            return "GLAND_STARTING", (
+                "no panel yet but the gland job is loaded and last tick was clean "
+                "— the organ is starting (first beat pending)"
             )
         return "GLAND_DOWN", (
             f"panel file present but unparseable (age {age}s) — gland mis-writing"
@@ -192,23 +248,28 @@ def write_state(d: dict) -> None:
         json.dump(d, f, indent=2)
 
 
+# (panel, age, gland_loaded, gland_last_exit, want)
 SYNTHETIC = {
-    "healthy":  ({"dopamine": 0.3, "cortisol": 0.2, "noradrenaline": 0.1,
-                  "oxytocin": 0.5, "melatonin": 0.2, "serotonin": 0.6}, 30, "HEALTHY"),
-    "stale":    ({"dopamine": 0.3, "cortisol": 0.2, "noradrenaline": 0.1,
-                  "oxytocin": 0.5, "melatonin": 0.2, "serotonin": 0.6}, 9000, "GLAND_DOWN"),
-    "absent":   (None, None, "GLAND_DOWN"),
-    "oor":      ({"dopamine": 1.7, "cortisol": 0.2, "noradrenaline": 0.1,
-                  "oxytocin": 0.5, "melatonin": 0.2, "serotonin": 0.6}, 30, "HORMONE_STORM"),
-    "stuckhigh":({"dopamine": 0.1, "cortisol": 0.99, "noradrenaline": 0.8,
-                  "oxytocin": 0.5, "melatonin": 0.2, "serotonin": 0.2}, 30, "HORMONE_STORM"),
+    "healthy":          ({"dopamine": 0.3, "cortisol": 0.2, "noradrenaline": 0.1,
+                          "oxytocin": 0.5, "melatonin": 0.2, "serotonin": 0.6}, 30, True, 0, "HEALTHY"),
+    "stale":            ({"dopamine": 0.3, "cortisol": 0.2, "noradrenaline": 0.1,
+                          "oxytocin": 0.5, "melatonin": 0.2, "serotonin": 0.6}, 9000, True, 0, "GLAND_DOWN"),
+    # absent panel is disambiguated by the gland job state (the boot-race fix):
+    "absent_starting":  (None, None, True, 0, "GLAND_STARTING"),     # loaded, clean → being born, NO page
+    "absent_neverran":  (None, None, True, None, "GLAND_STARTING"),  # loaded, not yet exited → being born
+    "absent_crashing":  (None, None, True, 78, "GLAND_DOWN"),        # loaded but last tick crashed → DOWN
+    "absent_unloaded":  (None, None, False, None, "GLAND_DOWN"),     # job not loaded → truly DOWN
+    "oor":              ({"dopamine": 1.7, "cortisol": 0.2, "noradrenaline": 0.1,
+                          "oxytocin": 0.5, "melatonin": 0.2, "serotonin": 0.6}, 30, True, 0, "HORMONE_STORM"),
+    "stuckhigh":        ({"dopamine": 0.1, "cortisol": 0.99, "noradrenaline": 0.8,
+                          "oxytocin": 0.5, "melatonin": 0.2, "serotonin": 0.2}, 30, True, 0, "HORMONE_STORM"),
 }
 
 
 def self_test() -> int:
     ok = True
-    for name, (panel, age, want) in SYNTHETIC.items():
-        state, _ = diagnose(panel, age)
+    for name, (panel, age, loaded, last_exit, want) in SYNTHETIC.items():
+        state, _ = diagnose(panel, age, loaded, last_exit)
         passed = state == want
         ok = ok and passed
         print(f"  [{'PASS' if passed else 'FAIL'}] {name:10s} -> {state} (want {want})")
@@ -222,14 +283,18 @@ def main() -> None:
         sys.exit(self_test())
 
     panel, age = read_panel()
-    state, detail = diagnose(panel, age)
+    loaded, last_exit = gland_status()
+    state, detail = diagnose(panel, age, loaded, last_exit)
     verdict = {"ts": NOW, "state": state, "detail": detail, "age": age}
 
     if "--check" in args:
         print(json.dumps(verdict))
         return
 
-    if state != "HEALTHY":
+    # Only genuinely-pathological states page. HEALTHY and GLAND_STARTING (the
+    # organ is alive and being born) never page — the boot-race false-critical fix.
+    pageable = ("GLAND_DOWN", "HORMONE_STORM")
+    if state in pageable:
         # DAMPED: confirm via the sibling probe-twice lib, then cooldown-gate.
         if confirm_down_via_lib(state) and cooldown_ok_via_lib(f"endocrine-{state.lower()}"):
             force_flow_notify(
