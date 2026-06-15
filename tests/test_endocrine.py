@@ -24,6 +24,7 @@ neutral/absent panel MUST leave today's payload byte-identical (off-by-default).
 
 from __future__ import annotations
 
+import json
 import math
 
 import pytest
@@ -168,6 +169,55 @@ class TestSignalMapping:
         p = gland.settle(blind, 400, start=Panel.neutral())
         # cortisol/noradrenaline stay at their neutral setpoints, not slammed to 0
         assert p.cortisol == pytest.approx(Regulator.for_hormone("cortisol").setpoint, abs=0.05)
+
+
+class TestPathologyVsLegitimateCrisis:
+    """The sentinel's cortisol-pinned-high page must NOT fire on a faithful read
+    of a real crisis — only on a genuinely stuck axis. Expectation derived from
+    the CONSUMER's threshold (STORM_CORTISOL = 0.97), not the producer's tiers."""
+
+    STORM_CORTISOL = 0.97  # the sentinel's threshold (deploy/.../sentinel.py)
+
+    def _settle_cortisol(self, **sig) -> float:
+        import time
+
+        sig.setdefault("hour", time.localtime().tm_hour)
+        return gland.settle(Signals(**sig)).cortisol
+
+    def test_catastrophic_memory_does_not_self_page_a_stuck_gland(self) -> None:
+        # Genuine Catastrophic headroom (<0) is the worst legitimate cortisol
+        # driver. Its settled cortisol must stay strictly BELOW the storm line so
+        # the sentinel cannot raise a false "stuck stress axis" CRITICAL.
+        cat = gland.settle(Signals(headroom_mb=-5000, alert_rate_1h=0, hour=3))
+        assert cat.cortisol < self.STORM_CORTISOL
+        path, _ = gland.is_pathological(cat)
+        assert not path, "a real Catastrophic crisis must not read as pathological"
+
+    def test_critical_plus_heavy_alert_flood_does_not_self_page(self) -> None:
+        # Critical tier + a heavy sustained alert rate is the other worst case.
+        crit = gland.settle(Signals(headroom_mb=1000, alert_rate_1h=40, hour=3))
+        assert crit.cortisol < self.STORM_CORTISOL
+        path, _ = gland.is_pathological(crit)
+        assert not path
+
+    def test_out_of_range_level_is_still_pathological(self) -> None:
+        # The genuine "mis-running gland" signal (out-of-[0,1]) must still page.
+        bad = Panel(
+            dopamine=0.3, cortisol=1.7, noradrenaline=0.1,
+            oxytocin=0.5, melatonin=0.2, serotonin=0.6,
+        )
+        path, reason = gland.is_pathological(bad)
+        assert path and "out of [0,1]" in reason
+
+    def test_genuinely_stuck_cortisol_still_pages(self) -> None:
+        # A cortisol pinned ABOVE the reachable target (only a stuck axis can do
+        # this) must still page — the detector isn't deleted, just made honest.
+        stuck = Panel(
+            dopamine=0.1, cortisol=0.99, noradrenaline=0.8,
+            oxytocin=0.5, melatonin=0.2, serotonin=0.2,
+        )
+        path, reason = gland.is_pathological(stuck)
+        assert path and "pinned high" in reason
 
 
 # ───────────────── receptor contract (REAL receptor, REAL panel) ──────────
@@ -434,6 +484,80 @@ class TestGlandDaemon:
         assert p.cortisol == pytest.approx(Regulator.for_hormone("cortisol").setpoint, abs=0.05)
 
 
+class TestAlertRateReadsRealForceFlowHistory:
+    """Contracts-at-the-Boundary §2/§3: drive read_alert_rate_1h against a REAL
+    /history response shape (a bare JSON array of notification rows with
+    `severity` + ISO `timestamp`), served by a stub http.server — NOT by
+    monkeypatching read_alert_rate_1h (that seam is exactly what hid the dead
+    /recent fetch). The fixture rows are captured from the LIVE box, a different
+    source than the daemon code."""
+
+    def _serve(self, rows_by_severity: dict):
+        import http.server
+        import threading
+
+        class _Handler(http.server.BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.0"  # close per response → no socket leak
+
+            def do_GET(self) -> None:
+                # /history?severity=<sev>&limit=N → bare JSON array for that sev
+                sev = ""
+                if "severity=" in self.path:
+                    sev = self.path.split("severity=", 1)[1].split("&", 1)[0]
+                body = json.dumps(rows_by_severity.get(sev, [])).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a) -> None:  # silence the test log
+                return
+
+        srv = http.server.HTTPServer(("127.0.0.1", 0), _Handler)
+        # close each connection socket promptly so no ResourceWarning leaks
+        srv.daemon_threads = True
+        t = threading.Thread(target=srv.serve_forever, daemon=True)
+        t.start()
+        return srv
+
+    def test_counts_hot_rows_in_window_excludes_stale(self, monkeypatch) -> None:
+        import datetime as _dt
+
+        from sanctum_cli.endocrine import bloodstream, gland_daemon
+
+        now = _dt.datetime.now(_dt.UTC)
+        # ISO strings shaped like the live /history rows (naive, microseconds).
+        fresh = (now - _dt.timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%S.%f")
+        stale = (now - _dt.timedelta(hours=3)).strftime("%Y-%m-%dT%H:%M:%S.%f")
+        rows = {
+            "critical": [
+                {"id": 1, "severity": "critical", "timestamp": fresh, "title": "x"},
+                {"id": 2, "severity": "critical", "timestamp": stale, "title": "old"},
+            ],
+            "error": [
+                {"id": 3, "severity": "error", "timestamp": fresh, "title": "y"},
+            ],
+            "p0": [],
+        }
+        srv = self._serve(rows)
+        try:
+            host, port = srv.server_address
+            monkeypatch.setenv(bloodstream.FORCE_FLOW_ENV, f"http://{host}:{port}")
+            # 2 fresh hot rows (1 critical + 1 error); the 3h-old critical excluded
+            assert gland_daemon.read_alert_rate_1h(timeout=5.0) == 2
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+    def test_unreachable_history_is_honest_none_not_zero(self, monkeypatch) -> None:
+        from sanctum_cli.endocrine import bloodstream, gland_daemon
+
+        # point at a closed port → urlopen raises → honest blindness (None)
+        monkeypatch.setenv(bloodstream.FORCE_FLOW_ENV, "http://127.0.0.1:1")
+        assert gland_daemon.read_alert_rate_1h(timeout=2.0) is None
+
+
 # ───────── council seat path: the receptor REALLY changes a seat's knobs ───
 # Contracts-at-the-Boundary: test the produced REQUEST BODY (the artifact that
 # crosses to proxyd), via the REAL build_completion_payload — not a mock, not a
@@ -528,6 +652,69 @@ class TestCouncilSeatReceptorContract:
         )
         assert body["temperature"] < council.receptor.BASELINE_TEMPERATURE
         assert "converg" in body["system"].lower() or "focus" in body["system"].lower()
+
+    def test_tool_gather_turn_is_never_modulated_even_when_subscribed_and_hot(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        # Pin the DOCUMENTED exemption: _post_with_tools (the armed seat's
+        # tool-gather turn) stays at the backend sampling default for tool-call
+        # determinism — no temperature/top_p and no appended framing clause —
+        # even when the seat is subscribed and the live panel is hot. Capture
+        # the REAL outbound payload by stubbing httpx.Client at the boundary
+        # (we don't mock _post_with_tools itself — that's the seam under test).
+        import httpx
+
+        from sanctum_cli.commands import council
+        from sanctum_cli.endocrine import bloodstream
+
+        monkeypatch.setenv(bloodstream.STATE_DIR_ENV, str(tmp_path))
+        monkeypatch.setenv(council.ENDOCRINE_ENV, "1")  # subscribed
+        bloodstream.publish_panel_file(
+            Panel(
+                dopamine=0.95,
+                cortisol=0.05,
+                noradrenaline=0.1,
+                oxytocin=0.2,
+                melatonin=0.1,
+                serotonin=0.7,
+            )
+        )
+
+        captured: dict[str, object] = {}
+
+        class _FakeResp:
+            status_code = 200
+
+            def json(self) -> dict[str, object]:
+                return {"content": [{"type": "text", "text": "ok"}]}
+
+        class _FakeClient:
+            def __init__(self, *a, **k) -> None:
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a) -> None:
+                return None
+
+            def post(self, _url, *, headers, json):
+                captured.update(json)
+                return _FakeResp()
+
+        monkeypatch.setattr(httpx, "Client", _FakeClient)
+
+        seat = self._seat()
+        council._post_with_tools(
+            seat,
+            [{"role": "user", "content": "hi"}],
+            system=seat.persona,
+            tools=[{"name": "noop", "description": "x", "input_schema": {}}],
+        )
+        # the gather turn is deliberately exempt from endocrine modulation
+        assert "temperature" not in captured
+        assert "top_p" not in captured
+        assert captured["system"] == seat.persona  # no framing clause appended
 
     def test_subscribed_neutral_panel_still_off_by_default(self, tmp_path, monkeypatch) -> None:
         # Subscribed but the gland is at homeostasis → STILL no change (the

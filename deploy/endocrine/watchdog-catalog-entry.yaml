@@ -1,10 +1,12 @@
 # Watchdog catalog entry for the endocrine gland (the seventh organ).
 #
 # STAGED — append to ~/.sanctum/services/ as endocrine-gland.yaml (or merge into
-# the catalog) when Bert turns the organ on. Matches the existing
-# ~/.sanctum/services/watchdog.yaml schema. The Living Force (sanctum-watchdog)
-# then monitors the gland process; the endocrine-gland-sentinel owns the
-# pathological-state paging (damped via alert-confirm.sh).
+# the catalog) when Bert turns the organ on. Liveness/startup use the `command`
+# check type — the only freshness-capable primitive service-graph.py supports
+# (its enum is command|http|port|process|interface; there is NO file-fresh
+# primitive). The Living Force (sanctum-watchdog) then monitors the gland; the
+# endocrine-gland-sentinel owns the pathological-state paging (damped via
+# alert-confirm.sh).
 name: endocrine-gland
 display_name: Endocrine Gland (hormone panel)
 host: mac
@@ -16,17 +18,25 @@ requires:
 - chitti        # reads /fluid for the cortisol memory-pressure signal
 launchagent: com.sanctum.endocrine-gland
 health:
+  # The gland is a StartInterval tick, not a long-running PID — liveness is a
+  # FRESH published panel, not a process check (a stale panel == dead organ).
+  # The gland sentinel's --check encodes the freshness (STALE_SEC=600) and emits
+  # {"state": "GLAND_DOWN"} on a missing/stale/unparseable panel, so a probe that
+  # exits 0 iff the verdict is NOT GLAND_DOWN means "fresh published panel".
+  # We use `command` because it is the only freshness-capable primitive
+  # service-graph.py dispatches (there is no file-fresh check type).
   startup:
-    type: file-fresh
-    target: /Users/bert/.sanctum/state/endocrine/panel.json
-    max_age_seconds: 600
+    type: command
+    command: >-
+      /usr/bin/python3 /Users/bert/.sanctum/sentinels/endocrine-gland-sentinel.py --check
+      | grep -qv '"state": "GLAND_DOWN"'
+    timeout: 15
   liveness:
-    # The gland is a StartInterval tick, not a long-running PID — liveness is a
-    # FRESH published panel, not a process check (a stale panel == dead organ).
-    type: file-fresh
-    target: /Users/bert/.sanctum/state/endocrine/panel.json
-    max_age_seconds: 600
-    interval: 300
+    type: command
+    command: >-
+      /usr/bin/python3 /Users/bert/.sanctum/sentinels/endocrine-gland-sentinel.py --check
+      | grep -qv '"state": "GLAND_DOWN"'
+    timeout: 15
 remediation:
   responsible_agent: cilghal   # the endocrinologist — monitors + doses creative mode
   escalation_level: 1

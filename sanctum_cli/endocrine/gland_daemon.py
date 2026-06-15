@@ -10,9 +10,9 @@ Signals (all local telemetry, no PII, no secrets):
                        (the SAME fluid the ram-sentinel reads) → cortisol.
                        This is castellan's pressure made available without a
                        privileged read; headroom_mb = available_gb·1024.
-  • alert rate       ← Force-Flow ``/recent`` (count of critical/error in the
-                       last hour) → noradrenaline + sustained cortisol. Honest
-                       blind (None) if the endpoint isn't reachable.
+  • alert rate       ← Force-Flow ``/history`` (count of critical/error/p0 rows
+                       in the last hour) → noradrenaline + sustained cortisol.
+                       Honest blind (None) if the endpoint isn't reachable.
   • time-of-day      ← local clock hour → melatonin (circadian).
   • creative mode    ← the operator lever file → dopamine↑ / cortisol↓.
 
@@ -66,38 +66,52 @@ def read_memory_headroom_mb(*, timeout: float = 4.0) -> int | None:
 
 
 def read_alert_rate_1h(*, timeout: float = 4.0) -> int | None:
-    """Count of recent critical/error Force-Flow alerts in the last hour.
+    """Count high-severity Force-Flow notifications in the last hour.
 
-    → noradrenaline (acute) + sustained cortisol. Force-Flow exposes recent
-    notifications; we count the high-severity ones in a 1h window. None on any
-    read failure (honest blindness — never a fabricated zero)."""
-    try:
-        with urllib.request.urlopen(
-            f"{bloodstream.force_flow_base()}/recent", timeout=timeout
-        ) as r:
-            doc = json.loads(r.read())
-    except Exception:
-        return None
-    items = doc.get("items") if isinstance(doc, dict) else doc
-    if not isinstance(items, list):
-        return None
-    now = time.time()
-    hot = {"critical", "error", "p0"}
-    count = 0
-    for it in items:
-        if not isinstance(it, dict):
-            continue
-        sev = str(it.get("severity", "")).lower()
-        if sev not in hot:
-            continue
-        ts = it.get("ts") or it.get("epoch")
-        # accept epoch seconds or an ISO string; out-of-window items are skipped
-        if isinstance(ts, (int, float)):
-            if now - ts <= 3600:
-                count += 1
-        else:
-            count += 1  # no timestamp → count it (conservative: never undercount stress)
-    return count
+    → noradrenaline (acute) + sustained cortisol. Force-Flow exposes
+    GET /history (force_flow.py:608) — a bare JSON ARRAY of ``notifications``
+    rows, each a dict with ``severity`` (TEXT) and ``timestamp`` (TEXT, ISO-8601,
+    naive local-time as written by force_flow). We request the hot severities and
+    count those inside a 1h window. None on ANY read failure — honest blindness
+    (no fabricated zero); a None on this axis simply means noradrenaline and the
+    alert-driven cortisol top-up stay quiescent this tick.
+
+    Force-Flow has two coexisting severity grammars (force_flow.py:301-313):
+    {critical,error,warn,info} and {p0,p1,p2}, with p0=critical/p1=error. We
+    cover the hot ones (critical/error/p0) explicitly — the stored string is what
+    /history returns, so we filter on the literal values, not the aliases."""
+    import datetime as _dt
+
+    now = _dt.datetime.now(_dt.UTC)
+    hot = ("critical", "error", "p0")
+    base = bloodstream.force_flow_base()
+    total = 0
+    for sev in hot:
+        try:
+            url = f"{base}/history?severity={sev}&limit=200"
+            with urllib.request.urlopen(url, timeout=timeout) as r:
+                rows = json.loads(r.read())
+        except Exception:
+            return None  # any axis-blind read → honest None, never a partial count
+        if not isinstance(rows, list):
+            return None
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            ts = row.get("timestamp")
+            if not isinstance(ts, str):
+                continue
+            try:
+                dt = _dt.datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            # force_flow writes naive local timestamps; treat tz-naive as UTC so
+            # the window math is comparable (a small skew only widens the window).
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=_dt.UTC)
+            if 0 <= (now - dt).total_seconds() <= 3600:
+                total += 1
+    return total
 
 
 def read_signals(*, creative: bool | None = None) -> Signals:

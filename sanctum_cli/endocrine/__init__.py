@@ -28,8 +28,13 @@ deploy/endocrine/ — STAGED, never loaded by the build.
 Hard invariants (each enforced by a test in tests/test_endocrine.py):
   • Homeostatic: a damped negative-feedback regulator that CANNOT run away.
   • Additive + off-by-default: a neutral/absent panel changes NOTHING.
-  • Subscription-first: creative mode never engages a metered seat.
   • No hardcoded endpoints: ports come from instance.yaml via config.
+
+Subscription-first (DESIGNED, NOT YET WIRED): receptor.diversity_seats() would
+  exclude metered seats, but council_ask() does not yet consult it — it fans out
+  over all SEATS. No live path selects seats by panel today, so subscription-first
+  is design intent on an isolated, unit-tested helper, not an enforced runtime
+  invariant. (See receptor.diversity_seats and deploy/endocrine/README.md.)
 
 Rust-readiness (rust_readiness doctrine — Python while feature-organic):
   Promote the Regulator + Panel math to sanctum-rs (a sibling kosha to

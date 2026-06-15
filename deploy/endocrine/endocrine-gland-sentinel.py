@@ -10,16 +10,20 @@ It is DAMPED by construction, reusing the sibling's already-shipped
 ``alert-confirm.sh`` (probe-twice + cooldown) so it cannot become an alert-storm
 source — the truthful-alerts lesson made structural (0 false criticals). The
 endocrine layer is ITSELF feedback-damped (the regulator math forbids an
-out-of-range level), so a pathology here means the INPUTS are stuck or the gland
-is mis-running — a real, page-worthy organ fault, never the math running away.
+out-of-range level), so an out-of-range pathology here means the gland is
+mis-running — a real, page-worthy organ fault, never the math running away.
 
 Pages (any → CRITICAL, confirm-twice + 30-min cooldown):
   GLAND_DOWN   — no panel published, or the panel file is stale > STALE_SEC
                  (the gland tick loop has stopped — the organ is dead)
   HORMONE_STORM— a published level is out of [0,1] (regulator invariant
-                 violated → mis-running gland) OR cortisol pinned high
-                 (>= STORM_CORTISOL) for the whole confirm window (stuck stress
-                 axis — the canonical "hormone storm")
+                 violated → mis-running gland; the math cannot produce this) OR
+                 cortisol pinned high (>= STORM_CORTISOL) for the whole confirm
+                 window. STORM_CORTISOL (0.97) sits strictly ABOVE the gland's
+                 max legitimate cortisol target (_CORTISOL_TARGET_MAX = 0.95),
+                 so the cortisol-pinned branch fires only on a genuinely STUCK
+                 stress axis — NOT on a faithful read of a real crisis. (Keep
+                 STORM_CORTISOL > the gland's max reachable target if either moves.)
 
 Modes:
   (default)    diagnose + page Force Flow on pathological (confirm + cooldown)

@@ -13,6 +13,14 @@ Design contract (mirrors chitti_client.rs's fail-soft Mood read):
 These are pure functions — a seat calls them and merges the result into its
 own payload. No global state, no side effects, no network. The seat decides
 whether to subscribe (the off-by-default switch lives at the call site).
+
+NOTE: ``diversity_seats`` is not yet wired into ``council_ask`` (which fans out
+over all SEATS). It is a pure function staged for a future opt-in; until wired,
+the subscription-first guarantee is DESIGN INTENT, not an enforced runtime
+invariant. ``sampling_for`` and ``framing_clause`` ARE wired (council.py) — but
+only on a seat's CHAT and VOICED turns (the streaming + buffered-completion
+paths); the tool-gather turn (``_post_with_tools``) is intentionally left at the
+backend default for tool-call determinism.
 """
 
 from __future__ import annotations
@@ -124,9 +132,15 @@ def diversity_seats(
     """Which seats to ENGAGE for a fan-out, given the panel.
 
     "neurodiversity paramount" made DYNAMIC: high dopamine (creative mode)
-    engages the MAX set of seats for divergence; neutral/absent engages a
-    conservative core. SUBSCRIPTION-FIRST is absolute: a metered seat is
-    NEVER engaged regardless of hormone state.
+    would engage the MAX set of seats for divergence; neutral/absent a
+    conservative core. SUBSCRIPTION-FIRST: a metered seat is NEVER engaged
+    regardless of hormone state.
+
+    NOT YET WIRED: ``council_ask`` (council.py) currently fans out over ALL
+    SEATS and never calls this. So the subscription-first guarantee here is
+    design intent enforced only by a unit test of this isolated helper — it is
+    NOT a live runtime invariant until council_ask computes its engaged set
+    from the panel + a metered set derived from seat→provider routing.
 
     all_seats: {seat_id: model_name}. metered: ids that route to a paid
     provider (OpenRouter) — always excluded."""

@@ -48,6 +48,13 @@ console = Console()
 # tilts its system-prompt framing. Subscription is opt-in via env so the
 # DEFAULT council behaviour is byte-identical to today — an absent gland or a
 # neutral panel changes nothing (the receptor's None/neutral paths are no-ops).
+#
+# SCOPE: modulation applies to chat and the final voiced turn (the streaming
+# `_stream` path and the buffered `build_completion_payload` path). The
+# tool-gather turn (`_post_with_tools`) is intentionally left at the backend
+# default to keep tool-use deterministic — and it runs on the seat's tool_model
+# (e.g. gemini-31-pro), NOT the voiced model, so the creative-temperature knob
+# is most meaningful on the voiced turn the receptor already modulates.
 ENDOCRINE_ENV = "SANCTUM_ENDOCRINE"
 _TRUTHY = {"1", "true", "yes", "on"}
 
@@ -460,6 +467,11 @@ def _post_with_tools(
 
     On 400-499 raises ToolsRejected so the caller can degrade to the
     streaming path (the primary bridge can't tool yet — phase-0 finding).
+
+    Endocrine modulation is deliberately NOT applied here: the tool-gather turn
+    stays at the backend sampling default for tool-call determinism (and runs on
+    the seat's tool_model, not the voiced model); disposition is expressed on the
+    voiced turn (``_stream``). See the endocrine opt-in scope note above.
     """
     payload: dict[str, object] = {
         "model": seat.model,

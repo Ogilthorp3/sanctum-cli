@@ -77,6 +77,14 @@ _CASTELLAN_CATASTROPHIC_MB = 0
 _CASTELLAN_CRITICAL_MB = 2048
 _CASTELLAN_WARN_MB = 6144
 
+# Ceiling on the cortisol fixed-point target. Held strictly BELOW the
+# endocrine-gland-sentinel's STORM_CORTISOL line (0.97) so the worst LEGITIMATE
+# crisis (Catastrophic memory + Critical tier + heavy alert rate) settles cortisol
+# at most here and never trips the "stuck stress axis" page. Keeps the tier
+# ordering monotonic (0 < 0.5 < 0.8 < 0.95) while making the sentinel's
+# cortisol-pinned-high branch reachable ONLY by a genuinely stuck input.
+_CORTISOL_TARGET_MAX = 0.95
+
 # Force-Flow quiet-hours grammar (force_flow.py:29-30, 136): hour>=22 or hour<8.
 _QUIET_START = 22
 _QUIET_END = 8
@@ -169,17 +177,24 @@ class Signals:
         if self.headroom_mb is None:
             return 0.0  # blind → no drive, leak holds at setpoint
         h = self.headroom_mb
+        # Targets cap at _CORTISOL_TARGET_MAX (0.95), strictly BELOW the sentinel's
+        # STORM_CORTISOL line (0.97), so the legitimate worst case (Catastrophic
+        # memory, Critical + heavy alert rate) can NEVER drive cortisol up to the
+        # "stuck stress axis" threshold. The endocrine-gland-sentinel must not page
+        # a false "gland mis-running" CRITICAL while faithfully reflecting a real
+        # crisis — the exact piggyback false-positive alert-confirm.sh kills.
         if h < _CASTELLAN_CATASTROPHIC_MB:
-            target = 1.0
+            target = _CORTISOL_TARGET_MAX
         elif h < _CASTELLAN_CRITICAL_MB:
             target = 0.8
         elif h < _CASTELLAN_WARN_MB:
             target = 0.5
         else:
             target = 0.0
-        # alert rate adds sustained stress on top of memory pressure
+        # alert rate adds sustained stress on top of memory pressure (still capped
+        # below the storm line so a real alert flood can't self-page a stuck gland)
         if self.alert_rate_1h:
-            target = min(1.0, target + 0.02 * self.alert_rate_1h)
+            target = min(_CORTISOL_TARGET_MAX, target + 0.02 * self.alert_rate_1h)
         # drive whose fixed point IS the tier target (calibrated P-term)
         return Regulator.for_hormone("cortisol").drive_toward(target)
 
@@ -335,15 +350,24 @@ def is_pathological(panel: Panel) -> tuple[bool, str]:
     """The ONLY thing the gland-sentinel pages on (via alert-confirm.sh,
     probe-twice + cooldown): a structurally impossible / stuck-storm state.
 
-    The regulator CANNOT produce an out-of-range level (the math forbids it),
-    so a True here means the INPUTS are stuck or the gland is mis-running —
-    a real, page-worthy organ fault. Returns (is_pathological, reason)."""
+    Two page-worthy faults:
+      • An out-of-[0,1] level — the regulator CANNOT produce this (the math
+        forbids it), so it can only mean the gland is mis-running. Truly
+        impossible from a faithful regulator.
+      • Cortisol pinned >= 0.97 — this is ABOVE the maximum target any valid
+        signal can drive (cortisol_drive caps at _CORTISOL_TARGET_MAX = 0.95,
+        strictly below 0.97). So even the worst legitimate crisis (Catastrophic
+        memory + Critical tier + heavy alert rate) settles below this line; a
+        reading at/above it means the stress axis is genuinely STUCK, not merely
+        faithfully reflecting a real crisis. Returns (is_pathological, reason)."""
     for h in HORMONES:
         v = getattr(panel, h)
         if v != v or v < 0.0 or v > 1.0:
             return True, f"{h} out of [0,1]: {v} (regulator invariant violated)"
-    # stuck-high cortisol (the canonical 'hormone storm') — only meaningful when
-    # SUSTAINED, which the sentinel's confirm-twice + hold-window enforces.
+    # stuck-high cortisol — provably ABOVE any reachable valid steady state
+    # (max legitimate target is _CORTISOL_TARGET_MAX = 0.95), so >= 0.97 means a
+    # genuinely stuck axis, not a faithful crisis read. The sentinel's
+    # confirm-twice + hold-window still gate the page.
     if panel.cortisol >= 0.97:
         return True, f"cortisol pinned high ({panel.cortisol:.2f}) — stuck stress axis"
     return False, ""

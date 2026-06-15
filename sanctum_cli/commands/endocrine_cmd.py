@@ -71,9 +71,8 @@ def creative_cmd(
     msg = (
         "Creative mode DOSED. The gland will SLOWLY elevate dopamine and lower "
         "cortisol over the next few ticks — receptors that subscribe raise "
-        "temperature, engage MAX subscription-seat diversity, and tilt to "
-        "divergent framing. This is a STATE the endocrine system sustains, not a "
-        "per-prompt flag."
+        "temperature and tilt to divergent framing on chat/voice turns. This is "
+        "a STATE the endocrine system sustains, not a per-prompt flag."
     )
     if rec.get("until_epoch"):
         msg += f"\nAuto-expires in {ttl}s (lapses back to baseline on its own)."
