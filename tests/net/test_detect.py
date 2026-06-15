@@ -103,3 +103,46 @@ def test_detect_apipa_double_still_applicable() -> None:
     )
     assert rep.nat is Nat.DOUBLE
     assert rep.applicable is True
+
+
+# ── Bell Advanced-DMZ /1 overlap check ──────────────────────────────────────
+
+
+def test_lan_conflicts_with_bell_dmz_10x_true() -> None:
+    # 10.x LAN overlaps Bell's 0.0.0.0/1 Advanced-DMZ WAN → conflict.
+    assert detect.lan_conflicts_with_bell_dmz("10.0.0.0/24") is True
+
+
+def test_lan_conflicts_with_bell_dmz_192_false() -> None:
+    assert detect.lan_conflicts_with_bell_dmz("192.168.50.0/24") is False
+
+
+def test_lan_conflicts_with_bell_dmz_172_false() -> None:
+    assert detect.lan_conflicts_with_bell_dmz("172.16.0.0/24") is False
+
+
+def test_lan_conflicts_with_bell_dmz_127_true() -> None:
+    # 127.x is the last block inside 0.0.0.0/1.
+    assert detect.lan_conflicts_with_bell_dmz("127.0.0.0/8") is True
+
+
+def test_lan_conflicts_with_bell_dmz_128_boundary_false() -> None:
+    # 128.0.0.0/1 is the safe half — the boundary is exclusive.
+    assert detect.lan_conflicts_with_bell_dmz("128.0.0.0/24") is False
+
+
+def test_lan_conflicts_with_bell_dmz_bad_input_false() -> None:
+    assert detect.lan_conflicts_with_bell_dmz("not-a-cidr") is False
+    assert detect.lan_conflicts_with_bell_dmz("") is False
+    assert detect.lan_conflicts_with_bell_dmz("999.0.0.0/8") is False
+
+
+def test_lan_conflicts_with_bell_dmz_bare_ip_treated_as_host() -> None:
+    # ipaddress accepts a bare address as a /32; 10.x → conflict, 200.x → safe.
+    assert detect.lan_conflicts_with_bell_dmz("10.0.0.0") is True
+    assert detect.lan_conflicts_with_bell_dmz("200.0.0.1") is False
+
+
+def test_lan_conflicts_with_bell_dmz_wide_lan_straddling_boundary_true() -> None:
+    # A LAN that even partially overlaps 0.0.0.0/1 conflicts.
+    assert detect.lan_conflicts_with_bell_dmz("0.0.0.0/0") is True

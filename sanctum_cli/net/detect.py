@@ -35,6 +35,28 @@ def _is_cgnat(ip: str | None) -> bool:
         return False
 
 
+_BELL_DMZ_WAN_NET = ipaddress.ip_network("0.0.0.0/1")  # 0.x-127.x
+
+
+def lan_conflicts_with_bell_dmz(lan_cidr: str) -> bool:
+    """True iff a LAN would overlap Bell's Advanced-DMZ WAN network.
+
+    Bell's Advanced DMZ passthrough hands the Firewalla WAN a public IP with a
+    /1 netmask (128.0.0.0) - i.e. 0.0.0.0/1, covering every address 0.x-127.x.
+    Any LAN whose network falls (even partly) inside that range conflicts with
+    the WAN, and the Firewalla refuses to forward LAN->WAN (clients lease, no
+    internet). Common 10.x and 172.x-as-1-127 LANs trip this; 192.168.x and
+    172.16-31.x (first octet >=128 is always safe) do not.
+
+    Bad/unparseable input returns False (no false alarm).
+    """
+    try:
+        net = ipaddress.ip_network(lan_cidr, strict=False)
+    except ValueError:
+        return False
+    return net.overlaps(_BELL_DMZ_WAN_NET)
+
+
 def parse_hop2(traceroute_output: str) -> str | None:
     """Return the first IPv4 on the hop-2 line of `traceroute -n` output, else None."""
     for line in traceroute_output.splitlines():

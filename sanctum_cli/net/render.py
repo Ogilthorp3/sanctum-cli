@@ -44,6 +44,11 @@ def render_plan(report: TopologyReport, playbook: Playbook) -> str:
 
     lines.append("⚠  This briefly drops your internet. Do this at home, at the box — not remotely.")
     lines.append("")
+    if playbook.prechecks:
+        lines.append("Before you start (check these FIRST):")
+        for p in playbook.prechecks:
+            lines.append(f"  • {sub(p)}")
+        lines.append("")
     lines.append("If anything goes wrong, the ROLLBACK (undo) is:")
     for r in playbook.rollback:
         lines.append(f"    ↩ {sub(r)}")

@@ -54,3 +54,43 @@ def test_playbook_and_baseline_construct() -> None:
     assert pb.achieves == "single_nat"
     b = Baseline(wan_ip="192.168.2.10", gateway_ip="192.168.2.1", public_ip="70.0.0.1", mtu=1500)
     assert b.wan_ip == "192.168.2.10"
+
+
+def test_playbook_new_optional_fields_default() -> None:
+    # New fields are optional; existing-style construction must still work.
+    pb = Playbook(
+        id="generic",
+        display_name="Generic router",
+        achieves="single_nat",
+        gateway_ips=(),
+        title_contains=(),
+        admin_url_template="http://{gateway_ip}",
+        steps=("Find the DMZ.",),
+        gotchas=(),
+        ordering=(),
+        rollback=("Disable the DMZ.",),
+    )
+    assert pb.prechecks == ()
+    assert pb.mtu is None
+    assert pb.alt_playbook is None
+
+
+def test_playbook_new_optional_fields_settable() -> None:
+    pb = Playbook(
+        id="example",
+        display_name="Example",
+        achieves="single_nat",
+        gateway_ips=(),
+        title_contains=(),
+        admin_url_template="http://{gateway_ip}",
+        steps=("Step.",),
+        gotchas=(),
+        ordering=(),
+        rollback=("Undo.",),
+        prechecks=("Check the LAN.",),
+        mtu=1492,
+        alt_playbook="example-alt",
+    )
+    assert pb.prechecks == ("Check the LAN.",)
+    assert pb.mtu == 1492
+    assert pb.alt_playbook == "example-alt"

@@ -45,6 +45,13 @@ class Playbook:
     gotchas: tuple[str, ...]
     ordering: tuple[str, ...]
     rollback: tuple[str, ...]
+    # Optional (defaults last so existing playbooks/tests keep working):
+    # prechecks   — things to confirm BEFORE touching the box (e.g. LAN subnet)
+    # mtu         — WAN MTU this ISP's path requires (None = leave default)
+    # alt_playbook — id of an alternative method reached via this playbook
+    prechecks: tuple[str, ...] = ()
+    mtu: int | None = None
+    alt_playbook: str | None = None
 
 
 @dataclass(frozen=True)

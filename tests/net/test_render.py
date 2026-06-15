@@ -47,3 +47,17 @@ def test_render_escapes_hostile_substitution() -> None:
 def test_render_not_possible_playbook_has_no_action_steps_header() -> None:
     text = render.render_plan(_report(nat=Nat.CGNAT, isp="cgnat"), BUILTINS["cgnat"])
     assert "cgnat" in text.lower() or "carrier" in text.lower()
+
+
+def test_render_surfaces_bell_prechecks() -> None:
+    # The Advanced-DMZ /1-vs-10.x precheck must reach the rendered plan.
+    text = render.render_plan(_report(), BUILTINS["bell"])
+    low = text.lower()
+    assert "before you start" in low or "precheck" in low or "check first" in low
+    assert "10." in text  # the 10.x LAN warning
+
+
+def test_render_no_precheck_block_when_empty() -> None:
+    # Playbooks without prechecks (e.g. generic) must not grow a stray header.
+    text = render.render_plan(_report(isp="generic"), BUILTINS["generic"])
+    assert "before you start" not in text.lower()
