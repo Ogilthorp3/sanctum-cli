@@ -21,7 +21,7 @@
     <string>com.sanctum.endocrine-gland</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/opt/homebrew/bin/sanctum</string>
+        <string>/Users/bert/.local/bin/sanctum</string>
         <string>endocrine</string>
         <string>tick</string>
     </array>
