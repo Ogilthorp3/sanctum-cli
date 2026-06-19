@@ -18,6 +18,7 @@ import typer
 
 from sanctum_cli import config, telemetry
 from sanctum_cli.errors import ProviderError, UserError
+from sanctum_cli.haus import haus_required
 from sanctum_cli.providers import ChatOpts, Message, make_provider
 from sanctum_cli.router import Flags, Intent, route
 
@@ -54,6 +55,7 @@ def chat_command(
     ] = None,
 ) -> None:
     """Send a prompt; the router picks the model unless ``--provider`` overrides."""
+    haus_required("council")
     text = _resolve_prompt(prompt, file)
     cfg = config.load()
 

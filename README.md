@@ -6,21 +6,32 @@ One terminal binary, `sanctum`, that is the unified front door to a Sanctum host
 
 ## Status
 
-**v0.9.0 — public release.** Installable from the public Homebrew tap. A person
+**v0.10.0 — public beta.** Installable from the public Homebrew tap. A person
 who isn't the author can go from a fresh Mac to encrypted, verified cloud backups
 in minutes with a single command.
 
-| Capability | State |
-|---|---|
-| `brew install` from the public tap | ✅ |
-| `sanctum onboard` — recipe → cloud wizard → first backup → restore canary | ✅ |
-| Backup recipes (`family` / `operator` / `code`) + R2 / B2 / Google Drive backends | ✅ |
-| Encrypted `restic` backups, per-host bucket, Keychain-only credentials | ✅ |
-| Module manifest system + six-gate ship bar (`sanctum doctor --ship`) | ✅ |
-| Honest, tier-aware `sanctum self-test` | ✅ |
-| 13-pattern + filename pre-push secret scanner | ✅ |
-| Rule-based prompt router (Claude / Gemini / MLX-local) | ✅ |
-| Sigstore release signing | ⏳ roadmap |
+The beta-safe command set runs on any Mac:
+
+| Command | What it does | State |
+|---|---|---|
+| `sanctum status` | One-line health: backup age, disk, providers | ✅ |
+| `sanctum init` | Scaffold a minimal `~/.sanctum/instance.yaml` | ✅ |
+| `sanctum onboard` | recipe → cloud wizard → first backup → restore canary | ✅ |
+| `sanctum doctor` / `--ship` | Health probes + six-gate module ship bar | ✅ |
+| `sanctum self-test` | Honest, tier-aware health check | ✅ |
+| `sanctum backup` | Recipes (`family` / `operator` / `code`) over R2 / B2 / Google Drive | ✅ |
+| `sanctum cloud setup` | Guided cloud-backend wizard | ✅ |
+| `sanctum net check / optimize / speedtest` | NAT/DMZ topology wizard + bandwidth probe | ✅ |
+| `sanctum config validate` | Schema-check `instance.yaml` with a precise pointer | ✅ |
+| `sanctum keychain` / `keys backup` | Inspect/rotate + export Keychain-only credentials | ✅ |
+| `sanctum module` / `logs` / `update` | Module manifests, log tail, brew-gated self-update | ✅ |
+| Sigstore release signing | Release artifact signing | ⏳ roadmap |
+
+Some commands need a **full Sanctum haus** (the Mini + Firewalla + council) and
+are not part of the beta — `brainstorm`, `council`, `chat`, `code`, `bridge`,
+`proxy`, `agent`, `screen-time`, `devices`, `schedule`, `endocrine`. Running one
+without the haus prints a short banner and exits cleanly; it never half-runs. See
+[sanctum.run](https://sanctum.run) for the full setup.
 
 See [`SPEC.md`](./SPEC.md) for the full design, doctrine, and roadmap.
 
@@ -166,3 +177,15 @@ cli:
 | 5 | Configuration error (invalid `instance.yaml`) |
 
 Scripts can branch on `$?` without parsing output.
+
+## License
+
+FSL-1.1-MIT (converts to MIT after 2 years) — see [`LICENSE`](./LICENSE). The
+Functional Source License lets you use, modify, and redistribute the software
+for any purpose except a competing commercial product; two years after each
+release that version is additionally available under the MIT License.
+
+## Security
+
+Found a vulnerability? See [`SECURITY.md`](./SECURITY.md) for how to report it
+privately. Please do not open a public issue for security problems.

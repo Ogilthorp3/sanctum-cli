@@ -16,7 +16,7 @@ from typing import Annotated
 import typer
 from rich.console import Console
 
-from sanctum_cli import __version__
+from sanctum_cli import __version__, haus
 from sanctum_cli.commands import agent as agent_cmd
 from sanctum_cli.commands import backup as backup_cmd
 from sanctum_cli.commands import brainstorm as brainstorm_cmd
@@ -43,6 +43,7 @@ from sanctum_cli.commands import vision as vision_cmd
 from sanctum_cli.commands.module import module_app
 from sanctum_cli.commands.net import net_app
 from sanctum_cli.errors import ExitCode, SanctumError
+from sanctum_cli.haus import haus_required
 
 app = typer.Typer(
     name="sanctum",
@@ -112,7 +113,9 @@ def main(
         except SanctumError as exc:
             _report(exc)
             raise typer.Exit(code=int(exc.exit_code)) from exc
-        if _stdio_is_tty():
+        # The council chamber only opens on a full haus; a beta box gets the
+        # status one-liner and a clean prompt back, never a broken REPL.
+        if _stdio_is_tty() and haus.is_present("council"):
             council_cmd._repl()
 
 
@@ -339,6 +342,11 @@ def schedule_top() -> None:
 
 screentime_app = typer.Typer(help="Screen-time coverage + phone enforcement mode.")
 app.add_typer(screentime_app, name="screen-time")
+
+
+@screentime_app.callback()
+def _screentime_gate() -> None:
+    haus_required("screen-time")
 
 
 @screentime_app.command(
@@ -677,6 +685,11 @@ agent_app = typer.Typer(help="LaunchAgent management for com.sanctum.* labels.")
 app.add_typer(agent_app, name="agent")
 
 
+@agent_app.callback()
+def _agent_gate() -> None:
+    haus_required("launchagents")
+
+
 @agent_app.command("list", help="List loaded com.sanctum.* LaunchAgents.")
 def agent_list_top(
     json_output: Annotated[bool, typer.Option("--json", help="Emit JSON.")] = False,
@@ -745,6 +758,11 @@ proxy_app = typer.Typer(
     help="Manage local provider proxies (claude-cli-proxy / sanctum-server / lmstudio)."
 )
 app.add_typer(proxy_app, name="proxy")
+
+
+@proxy_app.callback()
+def _proxy_gate() -> None:
+    haus_required("launchagents")
 
 
 @proxy_app.command("status", help="LaunchAgent + HTTP /v1/models probe.")
@@ -830,6 +848,11 @@ def keychain_rotate_top(
 
 bridge_app = typer.Typer(help="Talk to the Sanctum Bridge gateway (CF Access + HMAC + SharePoint).")
 app.add_typer(bridge_app, name="bridge")
+
+
+@bridge_app.callback()
+def _bridge_gate() -> None:
+    haus_required("bridge")
 
 
 @bridge_app.command("health", help="Liveness check on the bridge.")

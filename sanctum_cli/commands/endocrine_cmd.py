@@ -25,10 +25,16 @@ from rich.table import Table
 
 from sanctum_cli.endocrine import bloodstream
 from sanctum_cli.endocrine.gland import HORMONES, Panel
+from sanctum_cli.haus import haus_required
 
 console = Console()
 
 app = typer.Typer(help="Endocrine system — hormone panel + creative-mode lever.")
+
+
+@app.callback()
+def _endocrine_gate() -> None:
+    haus_required("council")
 
 
 def _panel_or_neutral() -> tuple[Panel, bool]:
