@@ -8,7 +8,7 @@ Real adapters live in ``default_adapters()``. They deliberately err on
 the conservative side for the two gates that need future work:
 
 - ``is_default``: fingerprint set intentionally empty — always returns
-  False. A later task can add fingerprints for known Bert-default creds
+  False. A later task can add fingerprints for known default creds
   (e.g. placeholder values) once we've collected real examples.
 
 - ``probe_is_false_green``: always False. A later task can add the

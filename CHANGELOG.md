@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.2] - 2026-06-19
+
+A follow-up personal-infra sweep that caught functional defaults and
+user-facing strings the v0.10.1 pass missed.
+
+### Changed
+
+- Routed the Firewalla SSH key path through instance.yaml
+  (`firewalla.ssh_key`); genericized remaining personal host names in
+  user-facing recipe/ship strings.
+
 ## [0.10.1] - 2026-06-19
 
 A beta-portability and honesty pass: no shipped code points at the author's

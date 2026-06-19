@@ -9,6 +9,7 @@ import typer
 from rich.console import Console
 from rich.markup import escape
 
+from sanctum_cli import config
 from sanctum_cli.net import detect, playbooks, render, safety, speedtest, system, verify
 from sanctum_cli.net.types import SpeedReport, Verdict
 
@@ -21,9 +22,21 @@ net_app = typer.Typer(help="Network topology wizard and diagnostics.")
 _SNAP_ROOT = Path.home() / ".sanctum" / "net-optimize"
 
 
+def _firewalla_key_path() -> Path:
+    """Resolve the Firewalla SSH key path (discovery-first).
+
+    Reads ``firewalla.ssh_key`` from instance.yaml when set; falls back to
+    ``~/.ssh/firewalla_ed25519`` for back-compat with the original layout.
+    """
+    configured = config.instance_value("firewalla.ssh_key", None)
+    if configured:
+        return Path(str(configured)).expanduser()
+    return Path.home() / ".ssh" / "firewalla_ed25519"
+
+
 def _build_runner() -> Runner:
     gw = detect.parse_default_gateway(system.real_runner(("route",)))
-    key_path = Path.home() / ".ssh" / "firewalla_ed25519"
+    key_path = _firewalla_key_path()
     fw_key = str(key_path) if key_path.exists() else None
     return system.make_real_runner(fw_gateway=gw, fw_key=fw_key)
 
