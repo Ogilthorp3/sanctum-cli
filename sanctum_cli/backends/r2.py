@@ -91,23 +91,31 @@ class _SetupResult:
 
 
 def _preflight(cfg: config.Config) -> str:
-    """Return the slot to populate: ``primary`` or ``secondary``."""
+    """Return the slot to populate: ``primary`` or ``secondary``.
+
+    The "already configured" guard runs BEFORE the restic precheck: a user
+    whose slots are full has nothing to do, so telling them to install restic
+    would be a misdirecting fix. Only when there is a slot to populate do we
+    insist on the restic binary the wizard will actually drive.
+    """
+    cb = cfg.cli.cloud_backup
+    if cb is None or cb.primary is None:
+        slot = "primary"
+    elif cb.secondary is None:
+        slot = "secondary"
+    else:
+        msg = "both cloud_backup.primary and .secondary already configured"
+        raise UserError(
+            msg,
+            fix=(
+                "free a slot by editing ~/.sanctum/instance.yaml directly, then re-run; "
+                "atomic-replace flow lands in v0.7"
+            ),
+        )
     if not shutil.which("restic"):
         msg = "restic not installed"
         raise UserError(msg, fix="brew install restic && re-run `sanctum cloud setup`")
-    cb = cfg.cli.cloud_backup
-    if cb is None or cb.primary is None:
-        return "primary"
-    if cb.secondary is None:
-        return "secondary"
-    msg = "both cloud_backup.primary and .secondary already configured"
-    raise UserError(
-        msg,
-        fix=(
-            "free a slot by editing ~/.sanctum/instance.yaml directly, then re-run; "
-            "atomic-replace flow lands in v0.7"
-        ),
-    )
+    return slot
 
 
 # ─── SigV4 signing ──────────────────────────────────────────────────

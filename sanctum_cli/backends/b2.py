@@ -85,9 +85,10 @@ class _SetupResult:
 
 
 def _preflight(cfg: config.Config) -> None:
-    if not shutil.which("restic"):
-        msg = "restic not installed"
-        raise UserError(msg, fix="brew install restic && re-run `sanctum cloud setup`")
+    # "Already configured" is reported BEFORE the restic precheck: a user who
+    # has a primary target wired has nothing to do here, so telling them to
+    # install restic would be a misdirecting fix. Only when a slot is free do
+    # we insist on the restic binary the wizard will actually drive.
     if cfg.cli.cloud_backup is not None and cfg.cli.cloud_backup.primary is not None:
         msg = "cloud_backup.primary already configured"
         raise UserError(
@@ -97,6 +98,9 @@ def _preflight(cfg: config.Config) -> None:
                 "~/.sanctum/instance.yaml directly (atomic-replace flow lands in v0.4)"
             ),
         )
+    if not shutil.which("restic"):
+        msg = "restic not installed"
+        raise UserError(msg, fix="brew install restic && re-run `sanctum cloud setup`")
 
 
 # ─── B2 API ─────────────────────────────────────────────────────────

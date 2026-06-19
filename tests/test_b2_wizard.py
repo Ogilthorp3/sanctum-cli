@@ -193,9 +193,19 @@ def test_full_wizard_happy_path(
 def test_wizard_rejects_when_already_configured(
     full_instance_yaml: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """If cloud_backup.primary already set, refuse politely."""
+    """If cloud_backup.primary already set, refuse politely.
+
+    Hermetic: ``shutil.which`` is mocked (like the sibling wizard tests) so the
+    'already configured' guard is exercised on a machine without restic on PATH —
+    not masked by the restic precheck. The default backend is r2, so both
+    backends' ``shutil.which`` are stubbed.
+    """
     monkeypatch.setenv("SANCTUM_INSTANCE_FILE", str(full_instance_yaml))
-    result = runner.invoke(app, ["cloud", "setup", "--no-open", "--no-persist"])
+    with (
+        patch("sanctum_cli.backends.r2.shutil.which", return_value="/x"),
+        patch("sanctum_cli.backends.b2.shutil.which", return_value="/x"),
+    ):
+        result = runner.invoke(app, ["cloud", "setup", "--no-open", "--no-persist"])
     assert result.exit_code == 1
     combined = result.stdout + (result.stderr or "")
     assert "already configured" in combined.lower()

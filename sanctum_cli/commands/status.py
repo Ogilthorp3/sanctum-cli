@@ -356,7 +356,43 @@ def _abbrev(s: str, n: int) -> str:
 # ─── Entry ──────────────────────────────────────────────────────────
 
 
+def _render_first_run(*, json_output: bool, oneline: bool) -> None:
+    """Friendly first-run nudge when no instance.yaml exists yet.
+
+    A brand-new machine has no config; ``config.load()`` would hard-raise
+    ConfigError (exit 5) here. Bare ``sanctum`` and ``sanctum status`` are the
+    first thing a curious user types, so degrade to a "run init / onboard"
+    pointer instead of a traceback-ish error (the same stance ``self-test``
+    takes for a fresh box). Exit 0 — nothing is wrong, the haus just isn't set
+    up yet.
+    """
+    target = config.instance_path()
+    if json_output:
+        print(
+            json.dumps(
+                {
+                    "configured": False,
+                    "instance_file": str(target),
+                    "hint": "run `sanctum init` or `sanctum onboard --recipe family`",
+                },
+                indent=2,
+            )
+        )
+        return
+    if oneline:
+        print("sanctum: not set up yet — run `sanctum init` or `sanctum onboard --recipe family`")
+        return
+    console.print("[bold]Sanctum is not set up on this machine yet.[/]\n")
+    console.print(f"[dim]no config at {target}[/]\n")
+    console.print("Get started:")
+    console.print("  [cyan]sanctum init[/]                     create a minimal config")
+    console.print("  [cyan]sanctum onboard --recipe family[/]  one-shot: config + first backup")
+
+
 def status_command(*, json_output: bool, oneline: bool) -> None:
+    if not config.instance_path().exists():
+        _render_first_run(json_output=json_output, oneline=oneline)
+        return
     cfg = config.load()
     snap = collect(cfg)
     if json_output:
