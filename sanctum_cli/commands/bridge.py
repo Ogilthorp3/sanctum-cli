@@ -13,9 +13,9 @@ Subcommands:
 
 Credentials come from the Keychain (services
 ``sanctum-bridge-cf-access-client-{id,secret}`` and
-``sanctum-bridge-hmac-sharepoint``). The base URL defaults to
-``https://bridge.nepveu.name`` and can be overridden with
-``SANCTUM_BRIDGE_URL`` for staging.
+``sanctum-bridge-hmac-sharepoint``). The base URL is resolved from
+``$SANCTUM_BRIDGE_URL`` (per-invocation override) else instance.yaml
+``secrets.cloudflare_bridge_domain`` — there is no baked-in default host.
 """
 
 from __future__ import annotations

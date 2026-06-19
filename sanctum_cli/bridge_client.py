@@ -36,7 +36,6 @@ import httpx
 from sanctum_cli import config, keychain
 from sanctum_cli.errors import NetworkError, ProviderError, UserError
 
-DEFAULT_BASE_URL = "https://bridge.nepveu.name"
 DEFAULT_TIMEOUT_S = 30.0
 USER_AGENT = "sanctum-cli/bridge"
 
@@ -78,7 +77,7 @@ class BridgeClient:
         self,
         creds: BridgeCreds,
         *,
-        base_url: str = DEFAULT_BASE_URL,
+        base_url: str,
         module: str = "sharepoint",
         timeout: float = DEFAULT_TIMEOUT_S,
         http: httpx.Client | None = None,
@@ -264,16 +263,38 @@ def encode_file(path: Path | str) -> tuple[str, str]:
     return p.name, base64.b64encode(p.read_bytes()).decode("ascii")
 
 
-def base_url_from_env(default: str = DEFAULT_BASE_URL) -> str:
-    """Bridge URL: env override → instance.yaml (secrets.cloudflare_bridge_domain)
-    → the hard fallback. Per-setup: a beta operator's bridge host is their own."""
+def base_url_from_env() -> str:
+    """Bridge URL — no baked-in personal host.
+
+    Resolution order (discovery-first):
+      1. ``$SANCTUM_BRIDGE_URL`` (per-invocation override);
+      2. instance.yaml ``secrets.cloudflare_bridge_domain`` (operator config);
+      3. raise :class:`UserError` — there is no personal fallback to ship.
+    """
     env = os.environ.get("SANCTUM_BRIDGE_URL")
     if env:
         return env.rstrip("/")
     domain = config.instance_value("secrets.cloudflare_bridge_domain", None)
     if domain:
         return f"https://{domain}".rstrip("/")
-    return default.rstrip("/")
+    msg = "bridge URL is not configured"
+    raise UserError(
+        msg,
+        fix=(
+            "set secrets.cloudflare_bridge_domain in ~/.sanctum/instance.yaml "
+            "or export SANCTUM_BRIDGE_URL"
+        ),
+    )
+
+
+def _configured_bridge_url() -> str:
+    """The configured bridge URL for hint text, or a generic phrase if unset.
+
+    Never raises — hints are best-effort and must not mask the real error."""
+    try:
+        return base_url_from_env()
+    except UserError:
+        return "your bridge's public hostname"
 
 
 def _fix_for(status: int, body: dict[str, Any]) -> str:
@@ -282,7 +303,7 @@ def _fix_for(status: int, body: dict[str, Any]) -> str:
         if code == "jwt_missing" or body.get("error") == "cf_access_failed":
             return (
                 "request did not carry a CF Access JWT; bypassing CF? Hit the "
-                "public hostname (https://bridge.nepveu.name) instead of "
+                f"public hostname ({_configured_bridge_url()}) instead of "
                 "127.0.0.1."
             )
         if code in {"signature_mismatch", "missing_scheme", "missing_headers"}:
@@ -298,8 +319,8 @@ def _fix_for(status: int, body: dict[str, Any]) -> str:
         )
     if status == 403 and body.get("error") == "destination_not_allowed":
         return (
-            "folder root is not on the bridge allowlist; edit "
-            "triptyq-skills/sharepoint-structure.yaml and wait up to an hour "
+            "folder root is not on the bridge allowlist; edit your bridge's "
+            "sharepoint-structure.yaml allowlist and wait up to an hour "
             "for the bridge to refresh, or restart it."
         )
     if status == 413:

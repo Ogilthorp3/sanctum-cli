@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import base64
 import json
+import shutil
 import socket
 import subprocess
 import time
@@ -25,13 +26,47 @@ import time
 from sanctum_cli import config
 from sanctum_cli.errors import UserError
 
-DEFAULT_REPO = "Ogilthorp3/sanctum-backup-deadman"  # fallback; SoT key vcs.deadman_repo
+DEADMAN_REPO_NAME = "sanctum-backup-deadman"  # the bare repo name; owner is resolved
+
+
+def _gh_login() -> str | None:
+    """The authenticated GitHub login via ``gh api user``, or ``None``."""
+    if not shutil.which("gh"):
+        return None
+    proc = subprocess.run(
+        ["gh", "api", "user", "--jq", ".login"],
+        capture_output=True,
+        text=True,
+        timeout=GH_TIMEOUT_S,
+        check=False,
+    )
+    if proc.returncode != 0:
+        return None
+    login = proc.stdout.strip()
+    return login or None
 
 
 def default_repo() -> str:
-    """Deadman heartbeat repo — instance.yaml ``vcs.deadman_repo``, else fallback.
-    Per-setup: a beta operator can't push to Ogilthorp3's repo."""
-    return str(config.instance_value("vcs.deadman_repo", DEFAULT_REPO))
+    """Deadman heartbeat repo — no baked-in personal account.
+
+    Resolution order (discovery-first):
+      1. instance.yaml ``vcs.deadman_repo`` (explicit operator config);
+      2. ``<gh-login>/sanctum-backup-deadman`` from the authenticated ``gh`` user;
+      3. raise :class:`UserError` — there is no personal fallback to ship.
+    """
+    configured = config.instance_value("vcs.deadman_repo", None)
+    if configured:
+        return str(configured)
+    login = _gh_login()
+    if login:
+        return f"{login}/{DEADMAN_REPO_NAME}"
+    msg = "could not resolve the deadman heartbeat repo"
+    raise UserError(
+        msg,
+        fix="set vcs.deadman_repo in ~/.sanctum/instance.yaml (or run `gh auth login`)",
+    )
+
+
 DEFAULT_PATH = "heartbeats.json"
 DEFAULT_MAX_HOURS: dict[str, int] = {"backup-fresh": 26, "restore-drill": 192}
 GH_TIMEOUT_S = 30

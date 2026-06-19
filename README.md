@@ -38,8 +38,7 @@ See [`SPEC.md`](./SPEC.md) for the full design, doctrine, and roadmap.
 ## Install
 
 ```bash
-brew tap ogilthorp3/sanctum
-brew install sanctum-cli
+brew install ogilthorp3/sanctum/sanctum-cli
 sanctum --version
 ```
 
@@ -100,8 +99,8 @@ sanctum_cli/
 │   └── config_cmd.py
 ├── providers/        # ABC + concrete impls (v0.2)
 │   └── base.py
-├── tui/              # Textual wizards (v0.3)
-└── backends/         # cloud-backup backends (v0.3)
+├── tui/              # reserved for future rich-based UI helpers
+└── backends/         # cloud-backup backends + rich-prompt wizards
 ```
 
 ## Configuration

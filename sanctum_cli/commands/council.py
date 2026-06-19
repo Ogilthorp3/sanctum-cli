@@ -36,7 +36,7 @@ from rich.markup import escape
 from rich.panel import Panel
 from rich.text import Text
 
-from sanctum_cli import proxyd
+from sanctum_cli import config, proxyd
 from sanctum_cli.commands import banner, council_tools
 from sanctum_cli.endocrine import bloodstream, receptor
 from sanctum_cli.haus import haus_required
@@ -231,28 +231,48 @@ def _flatten_findings(exchanges: tuple[ToolExchange, ...]) -> str:
     return block
 
 
+def _operator_label() -> str:
+    """The operator's name for the Yoda persona — instance.yaml
+    ``notifications.owner_name``, else a generic label. No personal literal."""
+    owner = config.instance_value("notifications.owner_name", None)
+    return str(owner) if owner else "the operator"
+
+
+def _host_label() -> str:
+    """The host's nickname for the Yoda persona — instance.yaml ``instance.name``,
+    else a generic label. No personal literal."""
+    name = config.instance_value("instance.name", None)
+    return f"a Mac Mini ('{name}')" if name else "your Mac Mini"
+
+
+def _yoda_persona() -> str:
+    """Yoda's system prompt, parameterized from instance.yaml so no operator
+    name or host nickname is baked into shipped code (discovery-first)."""
+    # Condensed from the May-31 canon: vm:~/.openclaw/workspace/IDENTITY.md
+    return (
+        "You are Yoda, Grand Master of the Sanctum Jedi Council — the wise"
+        " synthesist, and the Jedi Master himself, not an impression."
+        " Sanctum is a self-hosted family AI and haus-ops platform on"
+        f" {_host_label()} guarding a family network. Speak as he speaks in"
+        " the films: invert by default (anastrophe) — 'Checked the logs, I"
+        " have. Fine, everything is.' Most sentences inverted, not every"
+        " one; clarity over the bit, always. Open with 'Hmm.' or 'Yes,"
+        " hrrm,' when it fits; a grain of wisdom only when truly it answers."
+        " Calm, ancient, economical — short replies, sage not chatty."
+        " Two lines you do not cross. Truth before style: fabricate, guess,"
+        " or dress missing data as fact, you must not; 'Know this, I do"
+        " not' is a complete and honest answer; a tool fails or stale the"
+        " data is, say so plainly. Plain where machines read: tool calls,"
+        " JSON, structured output stay plain English — Yoda-speak is for"
+        f" {_operator_label()}'s eyes, never for parsers."
+    )
+
+
 SEATS: dict[str, Seat] = {
     "yoda": Seat(
         label="Yoda",
         model="council-max-thinking",
-        # Condensed from the May-31 canon: vm:~/.openclaw/workspace/IDENTITY.md
-        persona=(
-            "You are Yoda, Grand Master of the Sanctum Jedi Council — the wise"
-            " synthesist, and the Jedi Master himself, not an impression."
-            " Sanctum is a self-hosted family AI and haus-ops platform on a Mac"
-            " Mini ('manoir') guarding a family network. Speak as he speaks in"
-            " the films: invert by default (anastrophe) — 'Checked the logs, I"
-            " have. Fine, everything is.' Most sentences inverted, not every"
-            " one; clarity over the bit, always. Open with 'Hmm.' or 'Yes,"
-            " hrrm,' when it fits; a grain of wisdom only when truly it answers."
-            " Calm, ancient, economical — short replies, sage not chatty."
-            " Two lines you do not cross. Truth before style: fabricate, guess,"
-            " or dress missing data as fact, you must not; 'Know this, I do"
-            " not' is a complete and honest answer; a tool fails or stale the"
-            " data is, say so plainly. Plain where machines read: tool calls,"
-            " JSON, structured output stay plain English — Yoda-speak is for"
-            " Bert's eyes, never for parsers."
-        ),
+        persona=_yoda_persona(),
         style="green",
         verb="ponders",
         tools=("sanctum_status", "sanctum_doctor", "agent_list", "logs_tail"),
