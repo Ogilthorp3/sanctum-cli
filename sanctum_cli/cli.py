@@ -24,7 +24,7 @@ from sanctum_cli.commands import bridge as bridge_cmd
 from sanctum_cli.commands import chat as chat_cmd
 from sanctum_cli.commands import cloud as cloud_cmd
 from sanctum_cli.commands import code as code_cmd
-from sanctum_cli.commands import config_cmd, doctor, endocrine_cmd, status
+from sanctum_cli.commands import config_cmd, doctor, endocrine_cmd, init_cmd, status
 from sanctum_cli.commands import council as council_cmd
 from sanctum_cli.commands import deadman as deadman_cmd
 from sanctum_cli.commands import devices as devices_cmd
@@ -596,6 +596,26 @@ def deadman_beat_top(
 
 
 # ─── vision (multimodal Gemini) ─────────────────────────────────────
+
+
+@app.command(
+    "init",
+    help="Create a minimal ~/.sanctum/instance.yaml so a fresh machine can run the CLI.",
+)
+def init_top(
+    name: Annotated[
+        str | None, typer.Option("--name", help="Instance name (skips the prompt).")
+    ] = None,
+    yes: Annotated[
+        bool, typer.Option("--yes", "-y", help="Accept the hostname-derived default; no prompts.")
+    ] = False,
+    force: Annotated[bool, typer.Option("--force", help="Overwrite an existing instance.yaml.")] = False,
+) -> None:
+    try:
+        init_cmd.init_command(name=name, yes=yes, force=force)
+    except SanctumError as exc:
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code)) from exc
 
 
 @app.command(

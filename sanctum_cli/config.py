@@ -302,16 +302,35 @@ def _default_identity() -> tuple[str, str]:
     return f"{host} Sanctum", slug
 
 
-def scaffold_instance(path: Path | None = None) -> Path:
+def slugify_name(name: str) -> str:
+    """Bucket/url-safe slug from a free-text instance name.
+
+    Lowercased, non-alphanumerics collapsed to ``-``, trimmed; falls back to
+    ``sanctum`` when the input has no usable characters. Mirrors the hostname
+    slug rule in :func:`_default_identity` so a typed name and a derived name
+    produce slugs of the same shape.
+    """
+    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "sanctum"
+
+
+def scaffold_instance(path: Path | None = None, *, name: str | None = None) -> Path:
     """Write a minimal, valid ``instance.yaml`` when the user has none.
 
     Backs the ``sanctum init`` command and :func:`ensure` so a brand-new machine
-    can run the CLI without hand-writing YAML. Returns the path written.
+    can run the CLI without hand-writing YAML. ``name`` overrides the
+    hostname-derived default; the slug is always derived from the chosen name so
+    the two stay consistent. Returns the path written. Always overwrites the
+    target — callers that must not clobber check existence first (``init`` does).
     """
     target = path or instance_path()
     target.parent.mkdir(parents=True, exist_ok=True)
-    name, slug = _default_identity()
-    target.write_text(f"instance:\n  name: {name}\n  slug: {slug}\n", encoding="utf-8")
+    if name:
+        chosen_name, slug = name, slugify_name(name)
+    else:
+        chosen_name, slug = _default_identity()
+    target.write_text(
+        f"instance:\n  name: {chosen_name}\n  slug: {slug}\n", encoding="utf-8"
+    )
     return target
 
 
