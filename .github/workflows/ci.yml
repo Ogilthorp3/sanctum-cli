@@ -6,7 +6,10 @@ on:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    # sanctum-cli is a macOS product (launchctl, keychain, networksetup,
+    # system_profiler). Run CI on macOS so the platform tests collect and
+    # run honestly — on Linux they crash at import (no launchctl).
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -16,7 +19,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install restic
-        run: sudo apt-get update && sudo apt-get install -y restic
+        run: brew install restic
 
       - name: Install package + dev deps
         run: pip install -e '.[dev]'
