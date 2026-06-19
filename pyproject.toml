@@ -4,11 +4,12 @@ build-backend = "hatchling.build"
 
 [project]
 name = "sanctum-cli"
-version = "0.9.0"
+version = "0.10.0"
 description = "Unified terminal binary for Sanctum hosts — router, wizard, doctor."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "Proprietary — see SPEC.md" }
+license = { text = "FSL-1.1-MIT" }
+license-files = ["LICENSE"]
 authors = [{ name = "Bertrand Nepveu" }]
 keywords = ["sanctum", "cli", "backup", "claude", "gemini"]
 classifiers = [
@@ -113,6 +114,9 @@ minversion = "8.0"
 addopts = "-ra --strict-markers --strict-config"
 testpaths = ["tests"]
 filterwarnings = ["error"]
+markers = [
+  "no_haus_stub: opt out of the autouse haus-present stub (gate's own tests).",
+]
 
 [tool.coverage.run]
 branch = true

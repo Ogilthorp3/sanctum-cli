@@ -20,6 +20,8 @@ from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
+from sanctum_cli.haus import haus_required
+
 console = Console()
 
 
@@ -46,6 +48,7 @@ def _load_devices() -> dict[str, Any] | None:
 
 def devices_command() -> None:
     """Show the haushold's device inventory."""
+    haus_required("screen-time")
     data = _load_devices()
     if data is None:
         console.print("[yellow]No devices.yaml found.[/]")

@@ -39,6 +39,7 @@ from rich.text import Text
 from sanctum_cli import proxyd
 from sanctum_cli.commands import banner, council_tools
 from sanctum_cli.endocrine import bloodstream, receptor
+from sanctum_cli.haus import haus_required
 
 console = Console()
 
@@ -1202,6 +1203,7 @@ def council_command(
     ] = None,
 ) -> None:
     """``sanctum council`` — interactive chamber; with a question, full fan-out."""
+    haus_required("council")
     if question:
         with console.status("[dim]The council deliberates…[/]"):
             result = council_ask(question)

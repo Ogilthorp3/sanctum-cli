@@ -15,6 +15,8 @@ import yaml
 from rich.console import Console
 from rich.table import Table
 
+from sanctum_cli.haus import haus_required
+
 console = Console()
 
 
@@ -34,6 +36,7 @@ def _load_devices() -> dict[str, Any] | None:
 
 def schedule_command() -> None:
     """Show the haushold's curfew schedule."""
+    haus_required("screen-time")
     data = _load_devices()
     if data is None:
         console.print("[yellow]No devices.yaml found — no schedule to show.[/]")

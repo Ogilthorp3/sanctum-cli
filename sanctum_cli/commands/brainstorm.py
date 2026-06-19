@@ -45,6 +45,7 @@ from rich.panel import Panel
 
 from sanctum_cli import config, telemetry
 from sanctum_cli.errors import LocalError, NetworkError, ProviderError, SanctumError, UserError
+from sanctum_cli.haus import haus_required
 
 if TYPE_CHECKING:
     from sanctum_cli.config import Telemetry as TelemetryConfig
@@ -569,6 +570,7 @@ def brainstorm_command(
     ] = False,
 ) -> None:
     """Convene the heterogeneous council and print each Jedi's take in parallel."""
+    haus_required("council")
     text = _resolve_topic(topic, file)
     chosen = _select_seats(seats)
 
