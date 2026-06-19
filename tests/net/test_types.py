@@ -2,7 +2,14 @@ from __future__ import annotations
 
 import dataclasses
 
-from sanctum_cli.net.types import Baseline, Nat, Playbook, TopologyReport, Verdict
+from sanctum_cli.net.types import (
+    Baseline,
+    Nat,
+    Playbook,
+    SpeedReport,
+    TopologyReport,
+    Verdict,
+)
 
 
 def test_enums_have_expected_values() -> None:
@@ -94,3 +101,38 @@ def test_playbook_new_optional_fields_settable() -> None:
     assert pb.prechecks == ("Check the LAN.",)
     assert pb.mtu == 1492
     assert pb.alt_playbook == "example-alt"
+def test_speed_report_defaults_and_shape() -> None:
+    r = SpeedReport(
+        multi_gbps=7.9,
+        single_gbps=1.8,
+        ceiling_gbps=10.0,
+        on_wifi=False,
+        hops=(("router port", 10000), ("switch", 1000)),
+        bottleneck="switch (1.0 Gbps link)",
+        verdict="Your single-stream number was the artifact.",
+        advice=("Single/double-NAT does not change throughput.",),
+    )
+    assert r.multi_gbps == 7.9
+    assert r.test_inconclusive is False
+    assert r.hops[1] == ("switch", 1000)
+    try:
+        r.verdict = "changed"  # type: ignore[misc]
+        raise AssertionError("expected frozen dataclass")
+    except dataclasses.FrozenInstanceError:
+        pass
+
+
+def test_speed_report_all_unknown() -> None:
+    r = SpeedReport(
+        multi_gbps=None,
+        single_gbps=None,
+        ceiling_gbps=None,
+        on_wifi=None,
+        hops=(),
+        bottleneck="unknown",
+        verdict="audit only",
+        advice=(),
+        test_inconclusive=True,
+    )
+    assert r.multi_gbps is None
+    assert r.test_inconclusive is True

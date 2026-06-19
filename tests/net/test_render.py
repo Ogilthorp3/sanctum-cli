@@ -61,3 +61,53 @@ def test_render_no_precheck_block_when_empty() -> None:
     # Playbooks without prechecks (e.g. generic) must not grow a stray header.
     text = render.render_plan(_report(isp="generic"), BUILTINS["generic"])
     assert "before you start" not in text.lower()
+# ─── speed report ────────────────────────────────────────────────────
+
+
+def _speed(**kw: object):
+    from sanctum_cli.net.types import SpeedReport
+
+    base = dict(
+        multi_gbps=7.9,
+        single_gbps=1.8,
+        ceiling_gbps=10.0,
+        on_wifi=False,
+        hops=(("router port", 10000), ("2.5 GbE switch", 2500)),
+        bottleneck="2.5 GbE switch (2.5 Gbps link)",
+        verdict="Your single-stream number was the artifact.",
+        advice=("Single- vs double-NAT does NOT change throughput.",),
+        test_inconclusive=False,
+    )
+    base.update(kw)
+    return SpeedReport(**base)  # type: ignore[arg-type]
+
+
+def test_render_speed_shows_multi_single_and_ceiling() -> None:
+    from rich.console import Console
+
+    con = Console(record=True, width=100)
+    render.render_speed(con, _speed())
+    out = con.export_text()
+    assert "7.9" in out and "1.8" in out  # both numbers side by side
+    assert "2.5 GbE switch" in out
+    assert "artifact" in out.lower()
+    assert "nat" in out.lower()
+
+
+def test_render_speed_escapes_probed_strings() -> None:
+    from rich.console import Console
+
+    con = Console(record=True, width=120)
+    render.render_speed(con, _speed(bottleneck="[bold]evil[/] port", hops=(("[red]x[/]", 1000),)))
+    out = con.export_text()
+    assert "[bold]evil[/] port" in out
+    assert "[red]x[/]" in out
+
+
+def test_render_speed_no_test_shows_audit_only() -> None:
+    from rich.console import Console
+
+    con = Console(record=True, width=100)
+    render.render_speed(con, _speed(multi_gbps=None, single_gbps=None))
+    out = con.export_text().lower()
+    assert "not run" in out or "audit" in out or "skipped" in out

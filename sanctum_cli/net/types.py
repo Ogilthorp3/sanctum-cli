@@ -60,3 +60,16 @@ class Baseline:
     gateway_ip: str | None
     public_ip: str | None
     mtu: int | None
+
+
+@dataclass(frozen=True)
+class SpeedReport:
+    multi_gbps: float | None
+    single_gbps: float | None
+    ceiling_gbps: float | None
+    on_wifi: bool | None
+    hops: tuple[tuple[str, int | None], ...]
+    bottleneck: str
+    verdict: str
+    advice: tuple[str, ...]
+    test_inconclusive: bool = False
