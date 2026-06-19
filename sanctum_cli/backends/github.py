@@ -7,7 +7,8 @@ here, leaving the R2 free tier (10 GB) free for the things that don't
 belong in git (sensitive documents, secrets bundles).
 
 Architecture:
-  - One repo per host: ``Ogilthorp3/sanctum-host-<hostname-slug>``.
+  - One repo per host: ``<owner>/sanctum-host-<hostname-slug>``, where
+    ``<owner>`` resolves from instance.yaml or the authenticated ``gh`` user.
   - Persistent local clone at ``~/.sanctum/cli/github-tier-0/``.
   - Staged sync: build a temp tree, scan for secrets, refuse on any
     match, then commit + push. The persistent clone keeps git history.
@@ -40,14 +41,46 @@ console = Console()
 GH_BIN = "gh"
 GIT_BIN = "git"
 GH_TIMEOUT_S = 30
-DEFAULT_OWNER = "Ogilthorp3"  # hard fallback; real value is instance.yaml vcs.github_owner
 LOCAL_CLONE_DIR = Path("~/.sanctum/cli/github-tier-0").expanduser()
 
 
+def _gh_login() -> str | None:
+    """The authenticated GitHub login via ``gh api user``, or ``None`` if gh is
+    unavailable / unauthenticated. No personal literal — discovery-first."""
+    if not shutil.which(GH_BIN):
+        return None
+    proc = subprocess.run(
+        [GH_BIN, "api", "user", "--jq", ".login"],
+        capture_output=True,
+        text=True,
+        timeout=GH_TIMEOUT_S,
+        check=False,
+    )
+    if proc.returncode != 0:
+        return None
+    login = proc.stdout.strip()
+    return login or None
+
+
 def default_owner() -> str:
-    """GitHub owner for host-backup repos — instance.yaml ``vcs.github_owner``,
-    else the fallback. Per-setup: a beta operator's org is not Ogilthorp3."""
-    return str(config.instance_value("vcs.github_owner", DEFAULT_OWNER))
+    """GitHub owner for host-backup repos — no baked-in personal account.
+
+    Resolution order (discovery-first):
+      1. instance.yaml ``vcs.github_owner`` (explicit operator config);
+      2. the authenticated GitHub user via ``gh api user``;
+      3. raise :class:`UserError` — there is no personal fallback to ship.
+    """
+    configured = config.instance_value("vcs.github_owner", None)
+    if configured:
+        return str(configured)
+    login = _gh_login()
+    if login:
+        return login
+    msg = "could not resolve your GitHub account"
+    raise UserError(
+        msg,
+        fix="set vcs.github_owner in ~/.sanctum/instance.yaml (or run `gh auth login`)",
+    )
 
 # Curated list of dotfiles + inventories that are safe-by-design. Anything
 # in this list still gets secret-scanned before it lands in git, but the
@@ -224,7 +257,7 @@ def _copy_sanctum_launchagents(target: Path) -> list[str]:
     return written
 
 
-def _ensure_readme(target: Path, hostname: str) -> str:
+def _ensure_readme(target: Path, hostname: str, owner: str) -> str:
     readme = target / "README.md"
     if readme.exists():
         return "README.md"
@@ -236,7 +269,7 @@ for this host, synced via the free GitHub private repo plan.
 ## Restore on a fresh machine
 
 ```bash
-gh repo clone {DEFAULT_OWNER}/sanctum-host-{hostname}
+gh repo clone {owner}/sanctum-host-{hostname}
 cd sanctum-host-{hostname}
 brew install $(cat inventory/brew-formulae.txt | tr '\\n' ' ')
 brew install --cask $(cat inventory/brew-casks.txt | tr '\\n' ' ')
@@ -321,7 +354,7 @@ def run_wizard(*, persist: bool = True, owner: str | None = None) -> _SetupResul
     written.extend(_copy_dotfiles(clone_dir, DEFAULT_SOURCES))
     written.extend(_copy_sanctum_launchagents(clone_dir))
     written.extend(_capture_inventories(clone_dir))
-    written.append(_ensure_readme(clone_dir, hostname))
+    written.append(_ensure_readme(clone_dir, hostname, owner))
     console.print(f"  [green]✓[/] {len(written)} files staged")
 
     console.print("\n[bold]Step 4.[/] Pre-commit secret scan …")

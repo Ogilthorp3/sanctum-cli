@@ -529,11 +529,15 @@ def test_transport_failure_raises_network_error():
 # ----------------------------------------------------------------- env / files
 
 
-def test_base_url_from_env_strips_trailing_slash(monkeypatch):
+def test_base_url_from_env_strips_trailing_slash(monkeypatch, tmp_path):
     monkeypatch.setenv("SANCTUM_BRIDGE_URL", "https://bridge.staging.test/")
     assert base_url_from_env() == "https://bridge.staging.test"
+    # With neither the env var nor an instance.yaml domain set, the bridge URL
+    # is unconfigured and must raise — no baked-in personal host to fall back to.
     monkeypatch.delenv("SANCTUM_BRIDGE_URL")
-    assert base_url_from_env() == "https://bridge.nepveu.name"
+    monkeypatch.setenv("SANCTUM_INSTANCE_FILE", str(tmp_path / "absent.yaml"))
+    with pytest.raises(UserError):
+        base_url_from_env()
 
 
 def test_encode_file_round_trips(tmp_path):

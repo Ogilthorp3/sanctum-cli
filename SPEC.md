@@ -118,7 +118,7 @@ sanctum soak <module> --days 7       # target soak duration (informational)
 sanctum config validate              # schema-check ~/.sanctum/instance.yaml
 sanctum config show <path>           # query a config path
 sanctum version
-sanctum self-update
+sanctum update                       # brew upgrade + post-upgrade self-test gate
 ```
 
 **Exit codes** (every command honors these):
@@ -284,7 +284,7 @@ Implementations:
 
 ## 8. Cloud-Setup Wizard
 
-The wizard is a **Textual** app (`sanctum cloud setup`). Each backend is a **state machine** of small screens; every screen has explicit success and failure transitions. State persists in `~/.sanctum/wizard-state.json` so the wizard is **resumable** if the operator quits or the laptop sleeps mid-OAuth.
+The wizard is a **rich-prompt guided flow** (`sanctum cloud setup`). (Textual was the original design; it was not adopted — the wizards are `rich.prompt`-based, no Textual dependency.) Each backend is a **state machine** of small prompts; every step has explicit success and failure transitions. State persists in `~/.sanctum/wizard-state.json` so the wizard is **resumable** if the operator quits or the laptop sleeps mid-OAuth.
 
 ### Wizard architecture
 
@@ -406,11 +406,11 @@ Every command emits a JSONL event to `~/.sanctum/telemetry/cli.jsonl`. Schema:
 | API keys on disk | Never. All credentials in macOS Keychain. CLI reads at invocation; never caches. |
 | Config file with secrets | `instance.yaml` references Keychain entries by name only. `chmod 600`. Schema-validated on every load. |
 | Telemetry leaking prompts | Redacted by default. Opt-in only. Banner when off. |
-| Provider impersonation | mTLS where available (sanctum-server uses it). HTTPS pinning for Anthropic/Google. |
+| Provider impersonation | mTLS / CA-pinning on the local proxy transport (proxyd, sanctum-server). Standard certificate-validated HTTPS to Anthropic/Google via their SDKs. Public-endpoint certificate pinning is not implemented. |
 | Replay attack on cached responses | All responses streamed live, no cache shorthand by default. Optional response cache uses content-hashed keys. |
 | Wizard state file leak | `~/.sanctum/wizard-state.json` is `chmod 600`, contains no secrets (only "step 4 of B2 wizard, awaiting paste"). |
-| Self-update tampering | `sanctum self-update` verifies a Sigstore/cosign signature on the new binary before swapping. |
-| Compromised PATH binary | At launch, `sanctum` self-checks via fixed install path; refuses to run from world-writable dirs. |
+| Self-update tampering | Today `sanctum update` upgrades via the Homebrew tap and gates on a post-upgrade `sanctum self-test`. Sigstore/cosign signature verification of releases is a v1.0 roadmap item (§12), not yet implemented. |
+| Compromised PATH binary | _Roadmap._ Install-path self-check and refusing to run from world-writable directories are planned, not yet implemented. |
 
 The Keychain is the single trust anchor. Lose it, lose everything — same as the existing restic model.
 
@@ -449,7 +449,7 @@ Every failure mode is enumerated, has a deterministic recovery path, and is exer
 - [ ] Telemetry to JSONL (redacted by default)
 - [ ] Keychain integration (existing `sanctum-backup-key` reuse)
 - [ ] Tab completion (Typer ships this for free)
-- [ ] Test suite: router (pure, property-tested), config validator, wizard via Textual pilot
+- [ ] Test suite: router (pure, property-tested), config validator, wizard via CliRunner
 
 **Acceptance**: a fresh Mac can go from zero to a working backup in ≤ 5 minutes with B2.
 
@@ -494,7 +494,7 @@ Every failure mode is enumerated, has a deterministic recovery path, and is exer
 | Router (pure) | hypothesis (property tests) | 100% branch |
 | Config validator | pydantic + pytest | 100% |
 | Provider clients | pytest + respx (HTTP mocking) | 90% |
-| TUI screens | Textual `Pilot` fixture | 80% (every screen reachable, every error path exercised) |
+| Wizard prompts | Typer `CliRunner` (scripted prompt input) | 80% (every step reachable, every error path exercised) |
 | Wizard end-to-end | Real B2 test bucket via env-gated CI | Smoke test only |
 | CLI surface | pytest-shell (subprocess invoke) | All exit codes covered |
 
@@ -546,9 +546,9 @@ Bash gets us 60% there; the breaking points are:
 - **Schema-validating `instance.yaml`** — `yq` works but doesn't catch type mismatches before runtime
 - **Wizard state machines** — possible in bash (we've seen `gum`) but not maintainable past ~5 screens
 - **Async streaming for `sanctum chat`** — bash + `curl --no-buffer` works for one stream but falls apart with parallel providers / retries / fallback
-- **Test surface** — bash testing is possible (`bats`) but property tests, mocks, and TUI fixtures all need a real language
+- **Test surface** — bash testing is possible (`bats`) but property tests, mocks, and CLI fixtures all need a real language
 
-Python with type hints + pydantic + Typer + Textual covers all of these without sacrificing the "small CLI" feel. The eventual Rust port stays scoped to the dispatcher hot path, not the wizard, so this isn't wasted work.
+Python with type hints + pydantic + Typer + rich covers all of these without sacrificing the "small CLI" feel. The eventual Rust port stays scoped to the dispatcher hot path, not the wizard, so this isn't wasted work.
 
 ---
 
@@ -557,6 +557,6 @@ Python with type hints + pydantic + Typer + Textual covers all of these without 
 - **Route** — a routing decision: which provider receives a given request.
 - **Intent** — the kind of work being requested (chat, vision, code, spatial).
 - **Capability** — what a provider can do (CHAT, VISION, TOOLS, STREAMING, THINKING).
-- **Wizard** — a Textual TUI flow with explicit state machine, resumability, and round-trip verification.
+- **Wizard** — a rich-prompt guided flow with explicit state machine, resumability, and round-trip verification.
 - **Doctor** — a diagnostic pass that probes Sanctum's LaunchAgents, capacity, repos, and surfaces drifts.
 - **Closed-loop** — every started operation must produce a terminal result event (success or failure with cause).
