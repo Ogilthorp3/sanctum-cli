@@ -48,7 +48,7 @@ def gate_secrets(
     defaulted = [s.service for s in m.secrets if is_default(s.account, s.service)]
     if defaulted:
         return GateResult("secrets-bootstrap", GateStatus.AMBER,
-                          f"secrets look like Bert-defaults: {defaulted}")
+                          f"secrets look like author-defaults: {defaulted}")
     return GateResult("secrets-bootstrap", GateStatus.GREEN, "present + non-default")
 
 

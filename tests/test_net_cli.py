@@ -1,13 +1,51 @@
 from __future__ import annotations
 
+from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 from typer.testing import CliRunner
 
 from sanctum_cli.cli import app
+from sanctum_cli.commands.net import _firewalla_key_path
 from tests.net import fixtures as fx
 
+if TYPE_CHECKING:
+    import pytest
+
 runner = CliRunner()
+
+
+# ─── Firewalla SSH key resolution (discovery-first) ──────────────────
+
+
+def test_firewalla_key_path_honors_instance_yaml(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A configured firewalla.ssh_key in instance.yaml wins over the default."""
+    inst = tmp_path / "instance.yaml"
+    custom = tmp_path / ".ssh" / "my_fw_key"
+    inst.write_text(f"firewalla:\n  ssh_key: {custom}\n", encoding="utf-8")
+    monkeypatch.setenv("SANCTUM_INSTANCE_FILE", str(inst))
+    assert _firewalla_key_path() == custom
+
+
+def test_firewalla_key_path_expands_tilde(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A configured key path with ~ is expanded to the user's home."""
+    inst = tmp_path / "instance.yaml"
+    inst.write_text("firewalla:\n  ssh_key: ~/.ssh/custom_fw\n", encoding="utf-8")
+    monkeypatch.setenv("SANCTUM_INSTANCE_FILE", str(inst))
+    assert _firewalla_key_path() == Path("~/.ssh/custom_fw").expanduser()
+
+
+def test_firewalla_key_path_defaults_when_unset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no firewalla.ssh_key set, the back-compat default applies."""
+    monkeypatch.setenv("SANCTUM_INSTANCE_FILE", str(tmp_path / "absent.yaml"))
+    assert _firewalla_key_path() == Path.home() / ".ssh" / "firewalla_ed25519"
 
 
 def test_net_check_reports_double_nat() -> None:

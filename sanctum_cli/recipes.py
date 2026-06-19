@@ -81,7 +81,7 @@ BUILTINS: dict[str, Recipe] = {
         description=(
             "Sanctum host configuration — matches the original bash "
             "sanctum-backup.sh source list. Use this on a Sanctum operator "
-            "host (manoir, MBP) to back up infra config + dev projects."
+            "host (e.g. a hub Mac Mini or a laptop) to back up infra config + dev projects."
         ),
         sources=[
             "~/.sanctum",
