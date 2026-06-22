@@ -83,6 +83,48 @@ def test_device_creds_service_override_is_read(monkeypatch: pytest.MonkeyPatch) 
     assert captured["account"] == "admin"  # default account still applies
 
 
+def test_device_creds_threads_resolved_service_into_keychain_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The resolved service reaches Creds.keychain_service (not just the account).
+
+    The prior shape discarded the resolved service: only the account flowed out
+    (as the username). This asserts the OTHER half of the tuple is now carried so
+    the provider can read the password under the override, not the brand constant.
+    """
+    _stub_instance(
+        monkeypatch,
+        {
+            "devices.hub.keychain.service": "my-router-admin",
+            "devices.hub.keychain.account": "operator",
+        },
+    )
+    creds = net.device_creds("hub", _net())
+    assert creds.username == "operator"  # resolved account → login user
+    assert creds.keychain_service == "my-router-admin"  # resolved service → carried
+    assert creds.secret is None  # provider self-resolves from Keychain
+
+
+def test_device_creds_default_keychain_service_is_per_kind_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With nothing configured, keychain_service is the per-kind default service."""
+    _stub_instance(monkeypatch, {})
+    assert net.device_creds("hub", _net()).keychain_service == "bell-hub-admin"
+    assert net.device_creds("orbi", _net("192.168.1.1")).keychain_service == "orbi-admin"
+
+
+def test_device_creds_unknown_kind_keychain_service_is_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unknown kind resolves to an empty service → carried as None, never another
+    kind's service. None makes the provider fall back to ITS OWN per-brand default
+    rather than silently reading a wrong entry."""
+    _stub_instance(monkeypatch, {})
+    creds = net.device_creds("printer", _net())
+    assert creds.keychain_service is None
+
+
 def test_device_keychain_ref_orbi_defaults() -> None:
     """device_keychain_ref('orbi') with no config → (orbi-admin, admin)."""
     # No instance.yaml on a fresh box — instance_value returns the default, so the

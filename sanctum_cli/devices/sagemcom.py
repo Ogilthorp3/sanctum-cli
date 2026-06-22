@@ -181,7 +181,17 @@ class SagemcomHubProvider:
             msg = "Sagemcom hub requires creds (host/username); got None"
             raise DeviceError(msg, fix="pass Creds(host=..., username='admin')")
 
-        password = keychain.read(account=KEYCHAIN_ACCOUNT, service=KEYCHAIN_SERVICE)
+        # Read the password under the RESOLVED (service, account) the CLI threaded
+        # through Creds — NOT the brand constants — so a haus that overrides
+        # devices.hub.keychain.{service,account} actually reads from its own entry.
+        # The username is the resolved account; keychain_service is the resolved
+        # service. Both fall back to this module's per-brand default when the
+        # caller did not resolve them (a direct connect, e.g. in a test, or the
+        # default haus path — which resolves to exactly these constants anyway, so
+        # the default behavior is unchanged).
+        account = creds.username or KEYCHAIN_ACCOUNT
+        service = creds.keychain_service or KEYCHAIN_SERVICE
+        password = keychain.read(account=account, service=service)
         authed = Creds(
             host=creds.host,
             username=creds.username,

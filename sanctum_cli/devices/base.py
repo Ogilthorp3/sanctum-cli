@@ -60,12 +60,22 @@ class Creds:
     that authenticate with a key instead. Exactly which the provider uses is the
     provider's business — both fields are optional so a single shape covers
     password-auth hubs and key-auth firewalls alike.
+
+    ``keychain_service`` carries the *resolved* Keychain service name a
+    password-auth provider should read its secret under (the ``username`` is the
+    resolved Keychain *account*). It is the seam that lets a haus override
+    ``devices.<kind>.keychain.service`` reach the provider's Keychain read,
+    instead of the provider hardcoding its brand's service constant. ``None``
+    means "the caller did not resolve a service" — a provider then falls back to
+    its own per-brand default, so a direct ``connect`` (e.g. in a test) and the
+    default haus path are unchanged.
     """
 
     host: str
     username: str
     secret: str | None = None
     key_path: str | None = None
+    keychain_service: str | None = None
 
 
 @dataclass(frozen=True)

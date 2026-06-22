@@ -85,18 +85,25 @@ def device_creds(kind: str, net: NetContext) -> Creds:
     """Assemble Creds for a resolved device of ``kind``, discovery-first.
 
     The host is the detected gateway IP; the username is the Keychain *account*
-    resolved by :func:`device_keychain_ref` (instance.yaml override → per-kind
-    default). The ``secret`` is left ``None`` on purpose — the provider re-reads
-    the password/token from the Keychain at connect time (credentials never flow
-    through the CLI layer). Generalizes the old per-kind ``_hub_creds`` /
-    ``_orbi_creds`` so the Keychain tuple is no longer hardcoded per brand.
+    AND the ``keychain_service`` is the Keychain *service* — BOTH resolved by
+    :func:`device_keychain_ref` (instance.yaml ``devices.<kind>.keychain.*``
+    override → per-kind default). The ``secret`` is left ``None`` on purpose — the
+    provider re-reads the password/token from the Keychain at connect time using
+    that resolved ``(service, account)`` tuple (credentials never flow through the
+    CLI layer). Threading the resolved *service* through (not just the account)
+    closes the prior low finding completely: a haus whose hub admin entry lives
+    under a non-default service (``devices.hub.keychain.service``) now reads the
+    password from THAT entry, not the brand constant. Generalizes the old per-kind
+    ``_hub_creds`` / ``_orbi_creds`` so the Keychain tuple is no longer hardcoded
+    per brand.
     """
-    _service, account = device_keychain_ref(kind)
+    service, account = device_keychain_ref(kind)
     return Creds(
         host=net.gateway_ip or "",
         username=account,
         secret=None,
         key_path=None,
+        keychain_service=service or None,
     )
 
 
