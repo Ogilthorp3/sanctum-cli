@@ -24,6 +24,8 @@ from __future__ import annotations
 import contextlib
 import os
 import re
+import shutil
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
 
@@ -921,7 +923,6 @@ def _keychain_write(account: str, service: str, value: str) -> None:
     can surface it — a paired device whose password did not land is worse than a
     loud failure. The seam tests monkeypatch so no real Keychain entry is created.
     """
-    import shutil
     import subprocess
 
     from sanctum_cli.keychain import SECURITY_BIN
@@ -940,19 +941,210 @@ def _keychain_write(account: str, service: str, value: str) -> None:
         raise LocalError(msg)
 
 
+# ── Trifecta cred-capture seam (1P / SOPS / Keychain) ────────────────
+# CLAUDE.md secrets-trifecta: 1Password (human SoT) → VM SOPS (agents) →
+# Mini Keychain (Mini tools), drift-synced daily by tools/secret-rotator/sync.py.
+# When the network-gear pairing gate captures a device admin secret it ALWAYS
+# writes the Keychain (the GUARANTEED tier — see store_device_secret). On a FULL
+# haus (op service-account token + SOPS present) it ALSO best-effort mirrors the
+# secret into the trifecta: write/update the 1P item AND emit a providers.yaml
+# `sync_mirrors` mapping so the DAILY DRIFT-SYNC owns real cross-tier propagation
+# thereafter. The heavyweight SOPS/VM push is deferred to that sync by design —
+# onboarding only hands it the mapping. On a stock friend-install (no op/SOPS) the
+# whole mirror is a clean no-op; it must NEVER block onboarding. Every external
+# call (haus-detect, op write) is a module-level seam the tests monkeypatch, so no
+# real `op`/`sops` binary or 1Password account is touched in the gate.
+
+#: Default providers.yaml the daily drift-sync reads. The canonical daemon copy
+#: lives outside the OneDrive-synced repo (CLAUDE.md secrets §); env override lets
+#: a haus point this at its real file. Onboarding only APPENDS the mapping — never
+#: the secret value — so even a world-readable providers.yaml leaks nothing.
+ENV_PROVIDERS_FILE = "SANCTUM_PROVIDERS_FILE"
+_DEFAULT_PROVIDERS_FILE = Path("~/.sanctum/secret-rotator/providers.yaml").expanduser()
+
+#: The op service-account token env the headless drift-sync authenticates with
+#: (CLAUDE.md secrets §: service=op-service-account-token). Its presence is the
+#: cheapest "this is a haus with 1P wired" signal that never shells out.
+_OP_SERVICE_ACCOUNT_ENV = "OP_SERVICE_ACCOUNT_TOKEN"
+
+#: The 1P vault device secrets land in (mirrors the trifecta item naming).
+_OP_VAULT = "Sanctum"
+
+
+@dataclass(frozen=True)
+class _TrifectaNames:
+    """The (logical_key, op_title, sops_key) a keychain service maps to.
+
+    A pure, deterministic derivation so re-pairing the same device updates the
+    same trifecta entry (idempotent) and two different devices never collide.
+    """
+
+    logical_key: str
+    op_title: str
+    sops_key: str
+
+
+def _trifecta_names_for(kc_service: str) -> _TrifectaNames:
+    """Derive stable trifecta names from a keychain service — a pure function.
+
+    ``bell-hub-admin`` → logical/sops ``bell_hub_admin`` (underscored, the
+    providers.yaml/SOPS key convention) and 1P title ``Sanctum - Bell Hub Admin``
+    (the trifecta item-title convention, ``Sanctum - <Title Case>``). Same service
+    → same names (idempotent re-pairing); different service → different names (no
+    collision), because the keychain service is itself unique per kind.
+    """
+    slug = re.sub(r"[^a-z0-9]+", "_", kc_service.lower()).strip("_") or "device"
+    title = " ".join(part.capitalize() for part in slug.split("_"))
+    return _TrifectaNames(
+        logical_key=slug,
+        op_title=f"Sanctum - {title}",
+        sops_key=slug,
+    )
+
+
+def _haus_trifecta_present() -> bool:
+    """True iff this box has the trifecta tooling (op service-account token + SOPS).
+
+    The cheapest, non-blocking haus-fingerprint for the secrets trifecta: a
+    1Password service-account token in the environment (how the headless daily
+    drift-sync authenticates — CLAUDE.md secrets §) AND a ``sops`` binary on PATH
+    (the VM-tier encryptor). A stock friend-install has neither, so the mirror
+    no-ops there. Reads the env + a PATH lookup only — never runs ``op``/``sops``,
+    so it can never hang and never prompts for 1P unlock.
+    """
+    token = os.environ.get(_OP_SERVICE_ACCOUNT_ENV, "").strip()
+    return bool(token) and shutil.which("sops") is not None
+
+
+def _op_write_item(*, title: str, value: str) -> None:
+    """BEST-EFFORT write/update of a 1Password item's credential (real seam).
+
+    Shells out to the headless ``op`` CLI (service-account mode — the token is
+    already in the env, asserted by :func:`_haus_trifecta_present`). Edits the
+    item's ``credential`` field if it exists, else creates it in the Sanctum vault.
+    Module-level so the gate's tests monkeypatch it — NO real ``op`` is run in the
+    default suite. Any failure raises (the caller swallows it); the daily
+    drift-sync re-pushes from 1P later regardless, so a transient op miss is not
+    fatal to custody.
+    """
+    import subprocess
+
+    op_bin = shutil.which("op")
+    if op_bin is None:  # pragma: no cover - guarded by _haus_trifecta_present upstream
+        msg = "op CLI not found on PATH"
+        raise LocalError(msg)
+    ref = f"op://{_OP_VAULT}/{title}/credential"
+    # `op item edit` updates an existing item; if it is absent, create it. We probe
+    # existence with `op read` (cheap, service-account mode is sub-second) so we
+    # don't depend on edit-vs-create error strings.
+    exists = (
+        subprocess.run(
+            [op_bin, "read", ref],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        ).returncode
+        == 0
+    )
+    if exists:
+        cmd = [op_bin, "item", "edit", title, f"credential={value}", "--vault", _OP_VAULT]
+    else:
+        cmd = [
+            op_bin,
+            "item",
+            "create",
+            f"--title={title}",
+            "--category=password",
+            f"--vault={_OP_VAULT}",
+            f"credential={value}",
+        ]
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120, check=False)
+    if proc.returncode != 0:
+        msg = f"1Password write failed for {title!r}: {proc.stderr.strip() or 'unknown error'}"
+        raise LocalError(msg)
+
+
+def _providers_file() -> Path:
+    """Where the daily drift-sync reads its providers.yaml — env override else default."""
+    override = os.environ.get(ENV_PROVIDERS_FILE)
+    return Path(override).expanduser() if override else _DEFAULT_PROVIDERS_FILE
+
+
+def _append_sync_mirror(
+    *,
+    logical_key: str,
+    op_title: str,
+    sops_key: str,
+    kc_service: str,
+    path: Path | None = None,
+) -> None:
+    """Emit/update a ``sync_mirrors`` mapping in providers.yaml — pure read-modify-write.
+
+    Mirrors :func:`set_device_reference`'s atomic YAML write: every sibling section
+    is preserved, a ``<file>.bak`` is written first when the file exists, and the
+    parent dir is created for a fresh file. The mapping is the exact shape the
+    daily drift-sync (`tools/secret-rotator/sync.py`) consumes —
+    ``<logical_key>: {op, sops, kc}`` — so once it lands the key is under managed
+    cross-tier custody. Re-pairing the same kind UPDATES the existing entry in
+    place (keyed by ``logical_key``), never appending a duplicate. NO secret value
+    is ever written here — only the names that point the drift-sync at each tier.
+    """
+    target = path or _providers_file()
+    data: dict[str, Any] = {}
+    if target.exists():
+        loaded = yaml.safe_load(target.read_text(encoding="utf-8"))
+        if isinstance(loaded, dict):
+            data = loaded
+    mirrors = data.get("sync_mirrors")
+    if not isinstance(mirrors, dict):
+        mirrors = data["sync_mirrors"] = {}
+    mirrors[logical_key] = {"op": op_title, "sops": sops_key, "kc": kc_service}
+    if target.exists():
+        backup = target.parent / (target.name + ".bak")
+        backup.write_text(target.read_text(encoding="utf-8"), encoding="utf-8")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True), encoding="utf-8")
+
+
 def _mirror_to_trifecta(*, service: str, account: str, secret: str) -> None:  # noqa: ARG001
-    """BEST-EFFORT mirror of a device secret into the 1P/SOPS trifecta tiers.
+    """BEST-EFFORT mirror of a captured device secret into the 1P/SOPS trifecta.
 
     The trifecta (1Password human-SoT → VM SOPS → Mini Keychain) is the haus's
-    cross-tier secret architecture, but it depends on the ``op`` CLI / SOPS being
-    installed — tooling a friend-installed Sanctum on a clean Mac will NOT have.
-    So this is deliberately a NO-OP placeholder on a stock install: the Keychain
-    write in :func:`store_device_secret` is the guaranteed tier, and this mirror
-    is purely additive. It is a separate seam (not inlined) so the haus can wire a
-    real mirror later AND so a test can prove that a mirror failure is swallowed —
-    onboarding must NEVER block on absent haus tooling.
+    cross-tier secret architecture; the Keychain write in
+    :func:`store_device_secret` is the GUARANTEED tier, so this whole mirror is
+    purely additive. On a stock friend-install (no op service-account token / no
+    SOPS — :func:`_haus_trifecta_present` is False) it is a clean NO-OP: keychain
+    only, no error, no block. On a full haus it:
+
+    1. writes/updates the 1P item with the captured secret (:func:`_op_write_item`),
+    2. emits/updates a ``sync_mirrors`` mapping (:func:`_append_sync_mirror`) so the
+       DAILY DRIFT-SYNC owns the heavyweight SOPS/VM propagation thereafter.
+
+    Each sub-step is independently fail-soft: a failing ``op`` write is swallowed
+    so the mapping (which hands the key to the drift-sync, which re-pushes from 1P)
+    still lands. The whole function never raises out — ``store_device_secret``
+    also suppresses, but the internal fail-soft means a transient op error doesn't
+    drop the mapping. ``account`` is unused (the trifecta keys off the keychain
+    SERVICE, which is unique per device kind).
     """
-    return None
+    if not _haus_trifecta_present():
+        return
+    names = _trifecta_names_for(service)
+    # 1P write is best-effort: the daily drift-sync re-pushes from 1P, so a
+    # transient op miss must not abort the mapping emit below.
+    with contextlib.suppress(Exception):
+        _op_write_item(title=names.op_title, value=secret)
+    # The mapping is what hands real cross-tier propagation to the drift-sync; emit
+    # it best-effort too (absent providers.yaml dir, read-only fs) so a hiccup here
+    # never blocks onboarding.
+    with contextlib.suppress(Exception):
+        _append_sync_mirror(
+            logical_key=names.logical_key,
+            op_title=names.op_title,
+            sops_key=names.sops_key,
+            kc_service=service,
+        )
 
 
 def store_device_secret(*, service: str, account: str, secret: str) -> None:
@@ -1123,7 +1315,6 @@ def _revoke_device_secret(*, service: str, account: str) -> None:
     already-failed path and must never itself raise out of onboarding. The seam is
     module-level so tests can stub it without shelling out to ``security``.
     """
-    import shutil
     import subprocess
 
     from sanctum_cli.keychain import SECURITY_BIN
