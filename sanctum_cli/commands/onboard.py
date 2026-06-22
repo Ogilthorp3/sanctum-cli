@@ -1248,14 +1248,25 @@ def _run_network_gear(*, yes: bool) -> None:
         # Genuine success → persist the devices.<kind> reference block. The secret
         # is already in the Keychain (written above); the block points the provider
         # at that entry on later runs and pins the brand (bypassing a stubbed detect).
+        #
+        # Pin the CLASS-level brand (``type(provider).brand``), NOT ``provider.brand``.
+        # A genuine ``connect()`` in the probe above mutates the INSTANCE brand:
+        # SagemcomHubProvider/OrbiProvider._refine_brand rewrite ``self.brand`` to the
+        # concrete model (``sagemcom-fast5689``/``orbi-rbr850``). But the registry's
+        # ``brand_pin`` path matches against ``cls.brand`` (the constant
+        # ``"sagemcom"``/``"orbi"``), so persisting the refined string would make a
+        # LATER ``sanctum net hub/orbi`` call's ``registry.resolve(..., brand_pin=...)``
+        # raise "no registered provider for pinned brand 'sagemcom-fast5689'". The
+        # class attribute is the only value the pin can resolve.
+        brand_pin = type(provider).brand
         set_device_reference(
             kind=kind,
-            brand=provider.brand,
+            brand=brand_pin,
             host=net.gateway_ip or "",
             keychain_service=service,
             keychain_account=account,
         )
-        console.print(f"  [green]✓[/] {label} paired — {provider.brand} ({kind})")
+        console.print(f"  [green]✓[/] {label} paired — {brand_pin} ({kind})")
 
 
 def _probe_device(

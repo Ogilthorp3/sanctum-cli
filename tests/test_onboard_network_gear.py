@@ -62,10 +62,23 @@ def _no_real_keychain_write(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 class _FakeProvider:
-    """A minimal DeviceProvider whose connect() is a recorded READ-ONLY probe."""
+    """A minimal DeviceProvider whose connect() is a recorded READ-ONLY probe.
+
+    Faithful to the real providers, ``brand`` is a CLASS attribute (the resolvable
+    registry pin — ``SagemcomHubProvider.brand``/``OrbiProvider.brand``), set per
+    instance onto ``type(self)`` from the constructor so ``type(provider).brand``
+    returns the canonical pin even after ``connect()`` REFINES the instance brand to
+    a concrete model. Because each test builds a fresh fake (and asserts before the
+    next), stamping the class attr per-construction is safe here.
+    """
+
+    brand = "fake"
 
     def __init__(self, kind: str, brand: str, *, connect_raises: bool = False) -> None:
         self.kind = kind
+        # Stamp the canonical pin onto the (sub)class so ``type(self).brand`` is the
+        # resolvable brand — mirroring the real providers' class-level declaration.
+        type(self).brand = brand
         self.brand = brand
         self._connect_raises = connect_raises
         self.connected_with: Creds | None = None
@@ -295,6 +308,73 @@ def test_network_gear_detected_device_paired_on_successful_probe(
     assert data["devices"]["hub"]["brand"] == "sagemcom"
     assert data["devices"]["hub"]["keychain"]["service"] == "bell-hub-admin"
     assert "paired" in out
+
+
+def test_network_gear_persists_class_brand_pin_resolvable_after_refine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A genuine connect() that REFINES the instance brand must still persist the
+    CLASS-level brand — the only value ``registry.resolve(brand_pin=...)`` resolves.
+
+    Producer→consumer contract (not a structural field assertion): the REAL
+    providers' ``connect()`` rewrites ``self.brand`` to the concrete model
+    (``SagemcomHubProvider._refine_brand`` → ``sagemcom-fast5689``;
+    ``OrbiProvider._refine_brand`` → ``orbi-rbr850``). But the registry's
+    ``brand_pin`` path matches the persisted pin against the CLASS ``cls.brand``
+    (``"sagemcom"``/``"orbi"``). So if pairing persisted the refined INSTANCE
+    brand, a later ``sanctum net hub/orbi`` would call
+    ``registry.resolve(..., brand_pin="sagemcom-fast5689")`` and hard-error
+    ``no registered provider for pinned brand``.
+
+    The fake here REFINES on connect (exactly as the real ``_refine_brand`` does)
+    — the trait the happy-path ``_FakeProvider`` lacks, which is why the existing
+    tests share the bug. Expectations are derived from a DIFFERENT source than the
+    fake: the real registry's resolution of the persisted pin.
+    """
+    from sanctum_cli.devices import orbi as orbi_mod  # real provider for the consumer side
+    from sanctum_cli.devices import registry
+    from sanctum_cli.devices.base import NetContext
+
+    inst = tmp_path / "instance.yaml"
+    inst.write_text("instance:\n  name: X\n  slug: x\n", encoding="utf-8")
+    monkeypatch.setenv("SANCTUM_INSTANCE_FILE", str(inst))
+
+    class _RefiningOrbi(_FakeProvider):
+        """A provider whose connect() mutates self.brand to the concrete model —
+        mirrors OrbiProvider._refine_brand. Class brand stays the resolvable pin."""
+
+        brand = orbi_mod.OrbiProvider.brand  # class-level pin: "orbi"
+
+        def connect(self, creds: Creds | None) -> None:
+            super().connect(creds)
+            self.brand = "orbi-rbr850"  # refined INSTANCE brand (un-resolvable as a pin)
+
+    provider = _RefiningOrbi("orbi", orbi_mod.OrbiProvider.brand)
+    monkeypatch.setattr(
+        "sanctum_cli.commands.onboard.detect_network_gear", lambda net: [("orbi", provider)]
+    )
+    monkeypatch.setattr("sanctum_cli.commands.onboard.store_device_secret", lambda **k: None)
+
+    code, out = _invoke_family_onboard_interactive(
+        "\n\n"
+        "y\n"  # pair the detected orbi
+        "hunter2\n"  # admin password
+    )
+    assert code == 0, out
+    assert "paired" in out
+    # connect() ran and DID refine the instance brand (so the bug's precondition holds).
+    assert provider.brand == "orbi-rbr850"
+
+    persisted = yaml.safe_load(inst.read_text(encoding="utf-8"))["devices"]["orbi"]["brand"]
+    # The pin is the CLASS brand, NOT the refined instance attribute.
+    assert persisted == "orbi"
+    assert persisted != "orbi-rbr850"
+
+    # The load-bearing contract: the persisted pin must resolve on a LATER run.
+    # Feed it through the REAL registry (the actual consumer), not a stub.
+    resolved = registry.resolve("orbi", NetContext(gateway_ip="192.168.1.1", runner=None),
+                                 brand_pin=persisted)
+    assert isinstance(resolved, orbi_mod.OrbiProvider)
 
 
 def test_network_gear_probe_rejected_rolls_back_and_does_not_persist(
