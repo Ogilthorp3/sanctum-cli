@@ -21,10 +21,11 @@ need to run. Existing operators can use the underlying primitives
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 from pathlib import Path
-from typing import Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any
 
 import typer
 import yaml
@@ -39,6 +40,9 @@ from sanctum_cli.backends import b2, gdrive, r2
 from sanctum_cli.commands import backup as backup_cmd
 from sanctum_cli.errors import LocalError, UserError
 
+if TYPE_CHECKING:
+    from sanctum_cli.devices.base import DeviceProvider, NetContext
+
 console = Console()
 
 # ── Optional-module gates ─────────────────────────────────────────────
@@ -50,7 +54,13 @@ console = Console()
 # misconfiguration (fix included) before relying on it. Listed as data so
 # tests can assert membership and ordering.
 RECIPE_GATES: dict[str, tuple[str, ...]] = {
-    "family": ("identity-setup", "family-setup", "firewalla-pairing", "firewalla-compat"),
+    "family": (
+        "identity-setup",
+        "family-setup",
+        "firewalla-pairing",
+        "firewalla-compat",
+        "network-gear",
+    ),
 }
 
 # ── Surface polish ────────────────────────────────────────────────────
@@ -194,6 +204,9 @@ def onboard_command(
         elif gate == "firewalla-compat":
             console.print(f"\n[bold]Step {step_no}.[/] Firewalla compatibility")
             _run_firewalla_compat()
+        elif gate == "network-gear":
+            console.print(f"\n[bold]Step {step_no}.[/] Network gear")
+            _run_network_gear(yes=yes)
         step_no += 1
 
     console.print()
@@ -781,6 +794,349 @@ def _run_firewalla_compat() -> None:
         console.print(f"  [red]✗[/] {exc.message}")
         if exc.fix:
             console.print(f"  [dim]fix: {exc.fix}[/]")
+
+
+# ── Network-gear detection + pairing gate ────────────────────────────
+# The family path runs a backup, then walks the network gear it can find and
+# offers GUIDED pairing — exactly the apple-like "your haus, your hardware"
+# moment. This mirrors the Firewalla-pairing gate (prompt → READ-ONLY
+# auth-probe → persist on a genuine success), generalized over every registered
+# DeviceProvider kind via the registry's detect() fingerprints. It is ADDITIVE
+# (a new RECIPE_GATES entry) and SKIPPABLE (--yes), and absent/unrecognized gear
+# is silently skipped — a fresh haus with no supported gear finishes onboarding
+# unbothered. NO live-device call is fired in default tests: detection, connect,
+# and the keychain write are module-level seams the tests monkeypatch.
+
+# Kinds we offer guided pairing for, with the human label shown in the prompt.
+# Firewalla is deliberately ABSENT: it has its OWN dedicated pairing gate
+# (firewalla-pairing, bearer-token + on-disk secret, NOT a Keychain password),
+# so re-pairing it here would double-prompt for the same box. This gate covers
+# the Keychain-password kinds (hub / orbi) — exactly the kinds in
+# net._DEVICE_KEYCHAIN_DEFAULTS.
+_NETWORK_GEAR_KINDS: tuple[tuple[str, str], ...] = (
+    ("hub", "network hub / gateway"),
+    ("orbi", "mesh wifi (Orbi)"),
+)
+
+
+def _net_context() -> NetContext:
+    """Build the NetContext the registry fingerprints gear over (read-only).
+
+    Parses the default gateway from the real ``route`` probe — the same seam the
+    ``sanctum net`` sub-apps use — and threads the real runner so a provider's
+    ``detect()`` can probe without owning its own subprocess plumbing. Tests
+    monkeypatch :func:`detect_network_gear` so no shell-out / socket occurs.
+    """
+    from sanctum_cli.devices.base import NetContext as _NetContext
+    from sanctum_cli.net import detect, system
+
+    gw = detect.parse_default_gateway(system.real_runner(("route",)))
+    return _NetContext(gateway_ip=gw, runner=system.real_runner)
+
+
+def _detect_kind(kind: str, net: NetContext) -> DeviceProvider | None:
+    """Resolve a provider for ``kind`` via the registry, IFF a real driver claims it.
+
+    Uses the registry's auto-detection (``detect()`` scoring) rather than a brand
+    pin: a kind whose registered providers all score 0 falls back to the
+    read-only ``GenericReadOnlyProvider``, which we treat as "not present" (it
+    drives no real gear). Returns the resolved provider only when a brand-specific
+    driver claimed the network, else ``None``. Read-only — no ``connect``, no
+    mutation — safe during onboarding's scan. The seam tests monkeypatch.
+    """
+    from sanctum_cli.devices import registry
+
+    provider = registry.resolve(kind, net)
+    # The generic fallback advertises a ``generic-<kind>`` brand and drives no
+    # real gear — treat it as "nothing detected" so absent gear is skipped.
+    if provider.brand == f"generic-{kind}":
+        return None
+    return provider
+
+
+def detect_network_gear(net: NetContext) -> list[tuple[str, DeviceProvider]]:
+    """Registry scan: the (kind, provider) pairs whose driver claims this network.
+
+    Walks the pairing-eligible kinds, asking the registry to resolve each over
+    ``net``; a kind whose read-only ``detect()`` fingerprint matched a real driver
+    is included. Absent / unrecognized gear yields an empty list (haus-aware: the
+    gate then silently skips). Pure of side effects — detection is read-only and
+    no provider is connected here.
+    """
+    detected: list[tuple[str, DeviceProvider]] = []
+    for kind, _label in _NETWORK_GEAR_KINDS:
+        provider = _detect_kind(kind, net)
+        if provider is not None:
+            detected.append((kind, provider))
+    return detected
+
+
+def set_device_reference(
+    *,
+    kind: str,
+    brand: str,
+    host: str,
+    keychain_service: str,
+    keychain_account: str,
+    path: Path | None = None,
+) -> None:
+    """Persist a VALIDATED ``devices.<kind>`` reference block to instance.yaml.
+
+    Mirrors :func:`set_firewalla_bridge`'s atomic read-modify-write: every sibling
+    block is preserved, a ``<file>.bak`` is written first, and the secret itself
+    NEVER lands here (it goes to the Keychain via :func:`store_device_secret`).
+    The block records the brand (so ``devices.<kind>.brand`` pins the provider on
+    later runs — bypassing a stubbed ``detect``), the host, and the Keychain
+    ``(service, account)`` the provider re-reads its password under. Callers must
+    only invoke this AFTER a genuine read-only ``connect()`` auth-probe succeeds.
+    """
+    target = Path(path) if path else config.instance_path()
+    data: dict[str, Any] = {}
+    if target.exists():
+        loaded = yaml.safe_load(target.read_text(encoding="utf-8"))
+        if isinstance(loaded, dict):
+            data = loaded
+    devices = data.get("devices")
+    if not isinstance(devices, dict):
+        devices = data["devices"] = {}
+    devices[kind] = {
+        "brand": brand,
+        "host": host,
+        "keychain": {"service": keychain_service, "account": keychain_account},
+    }
+    if target.exists():
+        backup = target.parent / (target.name + ".bak")
+        backup.write_text(target.read_text(encoding="utf-8"), encoding="utf-8")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True), encoding="utf-8")
+
+
+def _keychain_write(account: str, service: str, value: str) -> None:
+    """Write a generic-password entry to the login Keychain via ``security``.
+
+    The guaranteed secrets tier (CLAUDE.md secrets-trifecta): the Keychain is
+    always present on macOS, so this is the one write that MUST succeed for the
+    pairing to be usable. Mirrors ``keychain_cmd``'s ``add-generic-password -U``
+    (update-or-create). Raises ``LocalError`` on a genuine failure so the caller
+    can surface it — a paired device whose password did not land is worse than a
+    loud failure. The seam tests monkeypatch so no real Keychain entry is created.
+    """
+    import shutil
+    import subprocess
+
+    from sanctum_cli.keychain import SECURITY_BIN
+
+    if not shutil.which(SECURITY_BIN):
+        msg = f"missing required binary: {SECURITY_BIN}"
+        raise LocalError(msg, fix="install Xcode Command Line Tools: xcode-select --install")
+    proc = subprocess.run(
+        [SECURITY_BIN, "add-generic-password", "-a", account, "-s", service, "-w", value, "-U"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        msg = f"Keychain write failed: {proc.stderr.strip() or 'unknown error'}"
+        raise LocalError(msg)
+
+
+def _mirror_to_trifecta(*, service: str, account: str, secret: str) -> None:  # noqa: ARG001
+    """BEST-EFFORT mirror of a device secret into the 1P/SOPS trifecta tiers.
+
+    The trifecta (1Password human-SoT → VM SOPS → Mini Keychain) is the haus's
+    cross-tier secret architecture, but it depends on the ``op`` CLI / SOPS being
+    installed — tooling a friend-installed Sanctum on a clean Mac will NOT have.
+    So this is deliberately a NO-OP placeholder on a stock install: the Keychain
+    write in :func:`store_device_secret` is the guaranteed tier, and this mirror
+    is purely additive. It is a separate seam (not inlined) so the haus can wire a
+    real mirror later AND so a test can prove that a mirror failure is swallowed —
+    onboarding must NEVER block on absent haus tooling.
+    """
+    return None
+
+
+def store_device_secret(*, service: str, account: str, secret: str) -> None:
+    """Store a device admin secret: Keychain (guaranteed) + best-effort trifecta.
+
+    Two tiers, in order of guarantee:
+
+    * **Keychain** (:func:`_keychain_write`) — the guaranteed tier on macOS. A
+      failure here propagates: a paired device whose password did not land is a
+      silent footgun (every later ``connect`` would miss), so it fails loudly.
+    * **Trifecta mirror** (:func:`_mirror_to_trifecta`) — BEST-EFFORT. The 1P/SOPS
+      tooling is absent on a stock friend-install, so any error here (a missing
+      ``op`` binary, an unreachable VM) is SWALLOWED — onboarding must never block
+      on the haus tooling being absent. The Keychain copy is enough to drive the
+      device.
+    """
+    _keychain_write(account=account, service=service, value=secret)
+    # The mirror is best-effort: the Keychain (guaranteed tier) already holds the
+    # secret, so any error here (absent `op`/SOPS, unreachable VM) is SWALLOWED —
+    # onboarding must never block on absent 1Password/SOPS haus tooling.
+    with contextlib.suppress(Exception):
+        _mirror_to_trifecta(service=service, account=account, secret=secret)
+
+
+def _run_network_gear(*, yes: bool) -> None:
+    """Network-gear detection + guided pairing gate — additive, fail-closed.
+
+    Runs the registry's read-only detection across the registered providers over
+    the current network; for EACH detected kind it offers guided pairing that
+    mirrors :func:`_run_firewalla_pairing`: prompt the admin password → run a
+    READ-ONLY ``provider.connect()`` auth-probe → on a genuine success write the
+    password to the Keychain (the resolved ``(service, account)``) AND persist a
+    ``devices.<kind>`` reference block to instance.yaml. A rejected probe (wrong
+    password / unreachable box) is surfaced loudly and NOTHING is written —
+    because a ``devices`` block pointing at a box you cannot auth to is a false
+    "paired" that bites on the first real op. Interactive by design, so ``--yes``
+    SKIPS it (prompting a scripted run against a closed stdin would hang), and
+    absent gear is silently skipped (haus-aware). The step is non-blocking: the
+    backup already succeeded, so a pairing miss never fails the run.
+    """
+    if yes:
+        console.print(
+            "  [yellow]skipped[/] — interactive step; run `sanctum onboard` "
+            "without --yes to pair your network gear"
+        )
+        return
+
+    from sanctum_cli.commands import net as net_cmd
+
+    net = _net_context()
+    detected = detect_network_gear(net)
+    if not detected:
+        console.print(
+            "  [dim]no network gear detected — nothing to pair "
+            "(re-run `sanctum onboard` after connecting your hub/mesh)[/]"
+        )
+        return
+
+    label_map = dict(_NETWORK_GEAR_KINDS)
+    for kind, provider in detected:
+        label = label_map.get(kind, kind)
+        console.print(f"  [bold]{label}[/] detected ({provider.brand})")
+        if not Confirm.ask(f"  pair the {label} now?", default=True):
+            console.print(f"  [dim]skipped {kind} — leave it unpaired for now[/]")
+            continue
+
+        service, account = net_cmd.device_keychain_ref(kind)
+        if not service or not account:
+            console.print(
+                f"  [yellow]skipped {kind}[/] — no Keychain (service, account) resolved; "
+                f"set devices.{kind}.keychain.* in instance.yaml first"
+            )
+            continue
+
+        password = Prompt.ask(f"  {label} admin password", password=True).strip()
+
+        # Order matters for a faithful auth-probe. The REAL providers'
+        # ``connect()`` re-read the admin password FROM THE KEYCHAIN under the
+        # resolved (service, account) — they deliberately ignore ``creds.secret``
+        # (base.Creds docstring; sagemcom/orbi.connect). So the probe can only
+        # authenticate with the just-typed password if that password is ALREADY in
+        # the Keychain. We therefore write it FIRST, then probe. This is NOT a
+        # device mutation (the guardrail's "no mutation" is about device state):
+        # connect() opens an authenticated session and changes nothing on the box.
+        # If the probe then FAILS (wrong password / unreachable box), we REVOKE the
+        # Keychain entry we just wrote and persist NO devices block — so a failed
+        # pairing leaves nothing usable behind (a false "paired" is worse than an
+        # honest "not paired", mirroring _run_firewalla_pairing's fail-closed
+        # stance). The keychain write is guarded; the trifecta mirror is
+        # best-effort and never blocks.
+        store_device_secret(service=service, account=account, secret=password)
+        if not _probe_device(provider, net=net, account=account, service=service, secret=password):
+            # Roll back the keychain write so a rejected probe persists nothing.
+            _revoke_device_secret(service=service, account=account)
+            console.print(
+                f"  [red]✗[/] {kind} not paired — the admin password was rejected or the "
+                f"box was unreachable. Nothing written; re-run `sanctum onboard` to retry."
+            )
+            continue
+
+        # Genuine success → persist the devices.<kind> reference block. The secret
+        # is already in the Keychain (written above); the block points the provider
+        # at that entry on later runs and pins the brand (bypassing a stubbed detect).
+        set_device_reference(
+            kind=kind,
+            brand=provider.brand,
+            host=net.gateway_ip or "",
+            keychain_service=service,
+            keychain_account=account,
+        )
+        console.print(f"  [green]✓[/] {label} paired — {provider.brand} ({kind})")
+
+
+def _probe_device(
+    provider: DeviceProvider,
+    *,
+    net: NetContext,
+    account: str,
+    service: str,
+    secret: str,
+) -> bool:
+    """READ-ONLY auth-probe: open an authenticated session, mutate NOTHING.
+
+    Builds Creds under the resolved ``(service, account)`` and calls
+    ``provider.connect``. The REAL providers re-read the password from the
+    Keychain under that ``(service, account)`` (they ignore ``creds.secret`` by
+    design — base.Creds docstring), so the caller MUST have written the password
+    to the Keychain before this is called; ``secret`` is still carried on Creds so
+    a return-convention / test provider that DOES honor it works too. ``connect``
+    opens a session and changes nothing on the box.
+
+    Returns True on a clean connect (the credential is good), False on a
+    :class:`~sanctum_cli.errors.LocalError` — the base class of both
+    :class:`~sanctum_cli.devices.base.DeviceError` (wrong password / unreachable
+    box) AND the Keychain errors a provider's ``keychain.read`` can raise — so a
+    rejected probe is reported as a failed pairing rather than crashing
+    onboarding. ``disconnect`` is always called so a connected provider's
+    transport is released.
+    """
+    from sanctum_cli.devices.base import Creds
+    from sanctum_cli.errors import LocalError
+
+    creds = Creds(
+        host=net.gateway_ip or "",
+        username=account,
+        secret=secret,
+        key_path=None,
+        keychain_service=service,
+    )
+    try:
+        provider.connect(creds)
+    except LocalError:
+        return False
+    finally:
+        # Best-effort teardown; a provider that never connected no-ops here. A
+        # teardown failure must never mask the probe result.
+        with contextlib.suppress(Exception):
+            provider.disconnect()
+    return True
+
+
+def _revoke_device_secret(*, service: str, account: str) -> None:
+    """Best-effort rollback of a Keychain entry written for a failed pairing.
+
+    Mirrors ``commands.uninstall.revoke_keychain_entry``: deletes the
+    generic-password entry so a rejected auth-probe persists NOTHING usable. A
+    missing entry or a ``security`` failure is swallowed — this is cleanup on an
+    already-failed path and must never itself raise out of onboarding. The seam is
+    module-level so tests can stub it without shelling out to ``security``.
+    """
+    import shutil
+    import subprocess
+
+    from sanctum_cli.keychain import SECURITY_BIN
+
+    if not shutil.which(SECURITY_BIN):
+        return
+    with contextlib.suppress(OSError, subprocess.SubprocessError):
+        subprocess.run(
+            [SECURITY_BIN, "delete-generic-password", "-a", account, "-s", service],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
 
 
 def _run_canary() -> None:
