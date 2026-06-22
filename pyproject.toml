@@ -108,6 +108,13 @@ plugins = ["pydantic.mypy"]
 module = "tests.*"
 disallow_untyped_defs = false
 
+# sagemcom_api (the SAH transport for the Sagemcom hub provider) ships no
+# py.typed marker and no stubs. It is imported lazily inside _make_client and
+# wrapped behind the typed DeviceProvider surface, so treat it as untyped.
+[[tool.mypy.overrides]]
+module = "sagemcom_api.*"
+ignore_missing_imports = true
+
 # ─── pytest ──────────────────────────────────────────────────────────
 [tool.pytest.ini_options]
 minversion = "8.0"
