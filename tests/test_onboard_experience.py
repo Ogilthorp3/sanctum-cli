@@ -18,14 +18,18 @@ per-chapter verify line, forgiving skip notes, the final recap).
 
 from __future__ import annotations
 
+import getpass
+import warnings
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
+import yaml
 from rich.console import Console
 from typer.testing import CliRunner
 
 from sanctum_cli import onboard_experience as ux
 from sanctum_cli.cli import app
+from sanctum_cli.providers.base import HealthSnapshot
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -33,6 +37,16 @@ if TYPE_CHECKING:
     import pytest
 
 runner = CliRunner()
+
+
+def ux_health_ok() -> HealthSnapshot:
+    """A passing provider health snapshot (the verified-key positive)."""
+    return HealthSnapshot(ok=True, latency_ms=12, quota_remaining=None, detail=None)
+
+
+def ux_health_bad() -> HealthSnapshot:
+    """A failing provider health snapshot (the rejected-key fail-closed path)."""
+    return HealthSnapshot(ok=False, latency_ms=None, quota_remaining=None, detail="401")
 
 
 def _render(renderable: object) -> str:
@@ -217,3 +231,164 @@ def test_arc_keeps_existing_data_then_tools_order(
     code, out = _invoke_onboard_yes()
     assert code == 0, out
     assert out.index("Your Data") < out.index("Your AI") < out.index("Your Network"), out
+
+
+# ── The recap must reflect what was PERSISTED, not "ran interactively" ────
+# The §8 acceptance tests above only exercise the --yes path, where everything is
+# honestly "skipped" — so a recap heuristic of "ran interactively == configured"
+# happens to be correct there and ships the false-"connected" bug unseen. These
+# tests drive the INTERACTIVE chapter to completion while configuring NOTHING and
+# then assert the recap/green-check reflects that. Crucially, the expectation is
+# derived from a DIFFERENT source than the orchestrator's mental model: the actual
+# on-disk `cli.providers` in instance.yaml (the contract the recap row claims to
+# summarize). A test cannot catch a bug it shares — so we assert "row status ==
+# what was written", not "the label rendered".
+
+
+def _invoke_onboard_interactive(input_text: str) -> tuple[int, str]:
+    """Run `onboard --recipe family` (no --yes), feeding stdin to the AI chapter.
+
+    The backup/cloud/canary primitives and the OTHER interactive gates (identity,
+    family, firewalla, network-gear) are mocked so they don't consume THIS chapter's
+    stdin — leaving the AI chapter as the only live interactive gate. The mocked
+    gates return their default (a ``MagicMock`` is truthy), so we override the two
+    that feed the recap rows we DON'T assert on (You / Your Network) to return False
+    explicitly, keeping the focus on the AI row's honesty.
+    """
+    with (
+        patch("sanctum_cli.commands.onboard.backup_cmd.backup_estimate"),
+        patch("sanctum_cli.commands.onboard.backup_cmd.backup_run"),
+        patch("sanctum_cli.commands.onboard._dispatch_cloud_setup"),
+        patch("sanctum_cli.commands.onboard._run_canary"),
+        patch("sanctum_cli.commands.onboard._run_identity_setup", return_value=False),
+        patch("sanctum_cli.commands.onboard._run_family_setup", return_value=False),
+        patch("sanctum_cli.commands.onboard._run_firewalla_pairing", return_value=False),
+        patch("sanctum_cli.commands.onboard._run_firewalla_compat", return_value=False),
+        patch("sanctum_cli.commands.onboard._run_network_gear", return_value=False),
+        patch("sanctum_cli.commands.screen_time._fetch_bridge_json", lambda path: None),
+        # The masked key prompt routes to getpass, which warns under CliRunner's
+        # non-TTY stdin; pyproject turns warnings into errors, so suppress that one.
+        warnings.catch_warnings(),
+    ):
+        warnings.simplefilter("ignore", getpass.GetPassWarning)
+        result = runner.invoke(app, ["onboard", "--recipe", "family"], input=input_text)
+    return result.exit_code, " ".join(result.stdout.split())
+
+
+def _recap_ai_status(out: str) -> str:
+    """The recap row status for 'Your AI' — read from the rendered recap card.
+
+    The recap card (title "your Sanctum at a glance", subtitle "recap") renders one
+    ``label  status`` row per chapter. ``out`` is whitespace-normalized, so the row
+    reads ``... Your AI <status> Your Network ...``. We anchor on the recap-card
+    TITLE (so we read the recap, not an earlier mention of the chapter), then take
+    the first word between the 'Your AI' label and the next row's 'Your Network'
+    label — the status the user actually sees. Asserting against THIS row (vs an
+    internal flag) is the point: the row is the recap's claim about what was
+    persisted.
+    """
+    card = out[out.index("your Sanctum at a glance") :]
+    after_ai = card[card.index("Your AI") + len("Your AI") :]
+    status_region = after_ai[: after_ai.index("Your Network")]
+    return status_region.strip().split(" ", 1)[0].lower()
+
+
+def test_interactive_ai_chapter_configuring_nothing_persists_nothing_and_recap_says_skipped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Interactive AI chapter, API path + EMPTY keys → on-disk providers empty AND
+    the recap says 'skipped' — never a false 'connected'.
+
+    This is the contract the false-"connected" bug violated: the recap row claims to
+    summarize what was PERSISTED. We choose the API-key path (option 2), enter an
+    empty Anthropic key, and skip Gemini (empty key) — so NOTHING is written. The
+    expectation is derived from the on-disk instance.yaml (a different source than
+    the orchestrator): if `cli.providers` is empty/None, the AI recap row MUST read
+    'skipped' and the green-check MUST NOT say 'AI connected'.
+    """
+    inst = tmp_path / "instance.yaml"
+    inst.write_text("instance:\n  name: X\n  slug: x\n", encoding="utf-8")
+    monkeypatch.setenv("SANCTUM_INSTANCE_FILE", str(inst))
+
+    # proceed? / run real backup? (defaults) → API path → empty key → skip Gemini.
+    code, out = _invoke_onboard_interactive("\n\n2\n\n\n")
+    assert code == 0, out
+
+    # 1) Nothing persisted on disk — the AUTHORITATIVE source, written by production.
+    data = yaml.safe_load(inst.read_text(encoding="utf-8")) or {}
+    providers = data.get("cli", {}).get("providers")
+    assert not providers, f"expected no providers persisted, got {providers!r}\n{out}"
+
+    # 2) The recap row for 'Your AI' MUST match that truth — 'skipped', not 'connected'.
+    assert _recap_ai_status(out) == "skipped", out
+
+    # 3) The green-check MUST NOT falsely claim a connection.
+    assert "AI connected" not in out, out
+    assert "AI step ready" in out, out
+
+
+def test_interactive_ai_chapter_rejected_key_persists_nothing_and_recap_says_skipped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """API path, a key the health-probe REJECTS → revoke + persist nothing + recap
+    'skipped'.
+
+    Fail-closed: the user enters a non-empty key but the (mocked) health-probe
+    rejects it; the key is revoked and no `via=direct` config is written. The recap
+    must reflect that on-disk truth as 'skipped', not 'connected'. Mirrors the P4
+    auth-probe contract at the experience layer.
+    """
+    inst = tmp_path / "instance.yaml"
+    inst.write_text("instance:\n  name: X\n  slug: x\n", encoding="utf-8")
+    monkeypatch.setenv("SANCTUM_INSTANCE_FILE", str(inst))
+    monkeypatch.setattr(
+        "sanctum_cli.commands.onboard._provider_health",
+        lambda kind, cfg: ux_health_bad(),
+    )
+    monkeypatch.setattr(
+        "sanctum_cli.commands.onboard.store_device_secret", lambda **k: None
+    )
+    monkeypatch.setattr(
+        "sanctum_cli.commands.onboard._revoke_device_secret", lambda **k: None
+    )
+
+    # API path → a rejected key → skip Gemini.
+    code, out = _invoke_onboard_interactive("\n\n2\nsk-bad\n\n")
+    assert code == 0, out
+
+    data = yaml.safe_load(inst.read_text(encoding="utf-8")) or {}
+    claude = data.get("cli", {}).get("providers", {}).get("claude")
+    assert claude is None or claude.get("via") != "direct", data
+    assert _recap_ai_status(out) == "skipped", out
+    assert "AI connected" not in out, out
+
+
+def test_interactive_ai_chapter_verified_key_persists_and_recap_says_connected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The honest POSITIVE: a verified API key persists `via=direct` AND the recap
+    says 'connected'.
+
+    The mirror of the fail-closed tests — proving the signal is not merely 'always
+    skipped'. A genuine green health-probe writes `cli.providers.claude.via=direct`,
+    so the recap row MUST read 'connected' and the green-check 'AI connected'.
+    """
+    inst = tmp_path / "instance.yaml"
+    inst.write_text("instance:\n  name: X\n  slug: x\n", encoding="utf-8")
+    monkeypatch.setenv("SANCTUM_INSTANCE_FILE", str(inst))
+    monkeypatch.setattr(
+        "sanctum_cli.commands.onboard._provider_health",
+        lambda kind, cfg: ux_health_ok(),
+    )
+    monkeypatch.setattr(
+        "sanctum_cli.commands.onboard.store_device_secret", lambda **k: None
+    )
+
+    # API path → an accepted key → skip Gemini.
+    code, out = _invoke_onboard_interactive("\n\n2\nsk-good\n\n")
+    assert code == 0, out
+
+    data = yaml.safe_load(inst.read_text(encoding="utf-8")) or {}
+    assert data["cli"]["providers"]["claude"]["via"] == "direct", data
+    assert _recap_ai_status(out) == "connected", out
+    assert "AI connected" in out, out

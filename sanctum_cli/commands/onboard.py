@@ -133,25 +133,30 @@ _GATE_LABELS: dict[str, str] = {
 }
 
 
-def _run_gate(gate: str, *, yes: bool) -> None:
+def _run_gate(gate: str, *, yes: bool) -> bool:
     """Dispatch a single recipe gate to its handler (presentation lives in the arc).
 
-    The handlers are unchanged; this is the dispatch the chapter loop calls per
-    gate so the orchestrator's chapter framing stays uniform. A gate name with no
-    handler is a silent no-op (defensive — the arc tuples are the source of truth).
+    Returns the handler's CONFIGURED signal: ``True`` iff the gate actually
+    persisted something real (a provider verified, a device paired, an identity
+    saved), ``False`` when it skipped / configured nothing. This is the truth the
+    chapter loop threads into the recap + green-check — never "did we run it", which
+    is the false-"connected" defect this dispatcher's return value closes. A gate
+    name with no handler is a silent no-op that configured nothing (``False``) —
+    defensive; the arc tuples are the source of truth.
     """
     if gate == "identity-setup":
-        _run_identity_setup(yes=yes)
-    elif gate == "family-setup":
-        _run_family_setup(yes=yes)
-    elif gate == "ai-providers":
-        _run_ai_providers(yes=yes)
-    elif gate == "firewalla-pairing":
-        _run_firewalla_pairing(yes=yes)
-    elif gate == "firewalla-compat":
-        _run_firewalla_compat()
-    elif gate == "network-gear":
-        _run_network_gear(yes=yes)
+        return _run_identity_setup(yes=yes)
+    if gate == "family-setup":
+        return _run_family_setup(yes=yes)
+    if gate == "ai-providers":
+        return _run_ai_providers(yes=yes)
+    if gate == "firewalla-pairing":
+        return _run_firewalla_pairing(yes=yes)
+    if gate == "firewalla-compat":
+        return _run_firewalla_compat()
+    if gate == "network-gear":
+        return _run_network_gear(yes=yes)
+    return False
 
 
 def _chapter_active_gates(chapter_title: str, recipe: str) -> tuple[str, ...]:
@@ -170,18 +175,24 @@ def _chapter_active_gates(chapter_title: str, recipe: str) -> tuple[str, ...]:
 def _run_chapter_gates(chapter_title: str, *, recipe: str, yes: bool) -> bool:
     """Run every active gate for a chapter, each under its own per-step header.
 
-    Returns True iff the chapter ran any gates interactively (i.e. ``yes`` is False
-    and the recipe lists at least one gate for it) — the signal the recap uses to
-    show "set up / connected / paired" vs a gentle "skipped". Under ``--yes`` the
-    gates still run (and each prints its own skip note), but the recap honestly
-    reports the chapter as skipped because nothing interactive was completed.
+    Returns True iff at least one gate in the chapter actually CONFIGURED something
+    (persisted a verified provider / paired a device / saved an identity) — the
+    truth the recap + green-check use to show "set up / connected / paired" vs a
+    gentle "skipped". This is the honest signal, NOT "did we run interactively":
+    an interactive run where the user enters no key / detects no gear configures
+    nothing and must read "skipped", never a false "connected" (design spec §2/§11,
+    "guided + verify — never 'probably worked'"). Under ``--yes`` every gate skips
+    (each prints its own note) and returns False, so the chapter reports "skipped"
+    honestly. The per-gate booleans are OR-ed, so a chapter with one configured gate
+    and one skipped gate still reads as configured.
     """
     gates = _chapter_active_gates(chapter_title, recipe)
+    configured = False
     for gate in gates:
         label = _GATE_LABELS.get(gate, gate)
         console.print(f"\n  [bold]{label}[/]")
-        _run_gate(gate, yes=yes)
-    return bool(gates) and not yes
+        configured = _run_gate(gate, yes=yes) or configured
+    return configured
 
 
 def _run_data_chapter(
@@ -702,26 +713,29 @@ def _devices_write_path() -> Path:
     return screen_time._DEVICES_CANDIDATES[0]
 
 
-def _run_family_setup(*, yes: bool) -> None:
+def _run_family_setup(*, yes: bool) -> bool:
     """Family interview gate — names, roles, smartphone numbers → devices.yaml.
 
-    Interactive by design, so ``--yes`` SKIPS it (prompting a scripted run
-    against a closed stdin would hang). Merge never clobbers: re-running
-    onboarding on a configured haus only adds new people; an existing slug
-    is skipped with a note. A fresh file gets the full engine-loadable
-    skeleton (family + empty shared_devices/screens maps).
+    Returns True iff at least one NEW member was actually written to the registry;
+    returns False when ``--yes`` skips, no member was entered, nothing new was
+    added, or the file could not be loaded — so the recap reads "skipped" rather
+    than a false "set up" (design spec §2/§11). Interactive by design, so ``--yes``
+    SKIPS it (prompting a scripted run against a closed stdin would hang). Merge
+    never clobbers: re-running onboarding on a configured haus only adds new people;
+    an existing slug is skipped with a note. A fresh file gets the full
+    engine-loadable skeleton (family + empty shared_devices/screens maps).
     """
     if yes:
         console.print(
             "  [yellow]skipped[/] — interactive step; run `sanctum onboard` "
             "without --yes to set up the family"
         )
-        return
+        return False
 
     members = _interview_family()
     if not members:
         console.print("  [dim]no family members added — registry untouched[/]")
-        return
+        return False
 
     from sanctum_cli.commands import screen_time
 
@@ -734,13 +748,13 @@ def _run_family_setup(*, yes: bool) -> None:
             if exc.fix:
                 console.print(f"  [dim]fix: {exc.fix}[/]")
             console.print("  [dim]registry not written — fix the file and re-run[/]")
-            return
+            return False
         merged, added, skipped = merge_family_members(devices_config, members)
         for slug in skipped:
             console.print(f"  [yellow]skipped[/] {slug} — already in {path.name}; not clobbering")
         if not added:
             console.print("  [dim]nothing new to write[/]")
-            return
+            return False
         backup = path.parent / (path.name + ".bak")
         backup.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
         path.write_text(
@@ -749,13 +763,14 @@ def _run_family_setup(*, yes: bool) -> None:
         console.print(
             f"  [green]✓[/] added {len(added)} member(s) to {path} (backup: {backup.name})"
         )
-    else:
-        skeleton: dict[str, Any] = {"family": members, "shared_devices": {}, "screens": {}}
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            yaml.safe_dump(skeleton, sort_keys=False, allow_unicode=True), encoding="utf-8"
-        )
-        console.print(f"  [green]✓[/] wrote {len(members)} member(s) to new {path}")
+        return True
+    skeleton: dict[str, Any] = {"family": members, "shared_devices": {}, "screens": {}}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        yaml.safe_dump(skeleton, sort_keys=False, allow_unicode=True), encoding="utf-8"
+    )
+    console.print(f"  [green]✓[/] wrote {len(members)} member(s) to new {path}")
+    return True
 
 
 # ── AI-provider chapter ("Your AI") ──────────────────────────────────
@@ -1030,26 +1045,30 @@ def _config_with_provider_overrides(
     return cfg.model_copy(update={"cli": new_cli})
 
 
-def _run_ai_providers(*, yes: bool) -> None:
+def _run_ai_providers(*, yes: bool) -> bool:
     """AI-provider chapter — connect Claude (sub/API) + Gemini, fail-closed.
 
-    Interactive by design, so ``--yes`` SKIPS (a scripted run against a closed
-    stdin would hang). Claude is offered two ways, defaulting to the $0 Max/Pro
-    subscription; both the Anthropic-API-key and the Gemini paths capture a masked
-    key into the Keychain and earn their persisted config ONLY on a green health-
-    probe — a rejected key REVOKES the entry and persists nothing. Each provider is
-    independent: a failed/declined one never blocks the other. On success the
-    verified ``cli.providers.{claude,gemini}`` blocks + ``cli.default_provider`` are
-    written atomically (siblings preserved); ``mlx_local`` always remains as the
-    offline floor, so the chapter is fully skippable. Non-blocking: the backup
-    already succeeded, so a provider miss never fails the run.
+    Returns True iff a provider was actually VERIFIED and persisted (so the chapter
+    honestly reports "connected" vs "skipped"); an interactive run where the user
+    enters no key / a rejected key configures nothing and returns False — never a
+    false "connected" (design spec §2/§11). Interactive by design, so ``--yes``
+    SKIPS (a scripted run against a closed stdin would hang) and returns False.
+    Claude is offered two ways, defaulting to the $0 Max/Pro subscription; both the
+    Anthropic-API-key and the Gemini paths capture a masked key into the Keychain
+    and earn their persisted config ONLY on a green health-probe — a rejected key
+    REVOKES the entry and persists nothing. Each provider is independent: a
+    failed/declined one never blocks the other. On success the verified
+    ``cli.providers.{claude,gemini}`` blocks + ``cli.default_provider`` are written
+    atomically (siblings preserved); ``mlx_local`` always remains as the offline
+    floor, so the chapter is fully skippable. Non-blocking: the backup already
+    succeeded, so a provider miss never fails the run.
     """
     if yes:
         console.print(
             "  [yellow]skipped[/] — interactive step; run `sanctum onboard` "
             "without --yes to connect your AI providers"
         )
-        return
+        return False
 
     console.print(
         "  [dim]Sanctum routes your prompts to the best model — let's connect "
@@ -1074,7 +1093,7 @@ def _run_ai_providers(*, yes: bool) -> None:
             "  [dim]no cloud providers configured — your local offline model "
             "(mlx_local) remains the default[/]"
         )
-        return
+        return False
 
     # Default to Claude when it configured, else Gemini — the verified provider the
     # user most likely wants first; mlx_local stays the floor regardless.
@@ -1092,6 +1111,7 @@ def _run_ai_providers(*, yes: bool) -> None:
         if bit
     )
     console.print(f"  [green]✓[/] AI configured — {summary}")
+    return True
 
 
 def _prompt_signal_target() -> str | None:
@@ -1131,10 +1151,14 @@ def _identity_configured(path: Path | None = None) -> bool:
     return bool(notif.get("owner_name")) and bool(number)
 
 
-def _run_identity_setup(*, yes: bool) -> None:
+def _run_identity_setup(*, yes: bool) -> bool:
     """Collect operator name + Signal alert number → instance.yaml notifications.
 
-    Interactive (``--yes`` skips). Skips silently when already configured so
+    Returns True iff an identity is configured after this step — either it was
+    ALREADY configured (a re-run; honestly "set up") or this run saved at least a
+    name or an alert number. Returns False when ``--yes`` skips or the user entered
+    nothing, so the recap reads "skipped" rather than a false "set up" (design spec
+    §2/§11). Interactive (``--yes`` skips). Skips silently when already configured so
     re-runs don't re-prompt. Without it a fresh haus has no one to address in
     briefings and nowhere to send alerts (they'd otherwise have to fall back to
     a baked-in number — exactly the per-setup leak we're closing).
@@ -1144,10 +1168,10 @@ def _run_identity_setup(*, yes: bool) -> None:
             "  [yellow]skipped[/] — interactive step; run `sanctum onboard` "
             "without --yes to set your name + alert number"
         )
-        return
+        return False
     if _identity_configured():
         console.print("  [dim]operator identity already configured — skipping[/]")
-        return
+        return True
     try:
         who = os.getlogin()
     except OSError:
@@ -1161,6 +1185,7 @@ def _run_identity_setup(*, yes: bool) -> None:
         if bit
     )
     console.print(f"  [green]✓[/] saved operator identity ({summary or 'nothing entered'})")
+    return bool(owner) or bool(number)
 
 
 def set_firewalla_bridge(
@@ -1210,15 +1235,18 @@ def set_firewalla_bridge(
     tf.write_text(token.strip() + "\n", encoding="utf-8")
 
 
-def _run_firewalla_pairing(*, yes: bool) -> None:
+def _run_firewalla_pairing(*, yes: bool) -> bool:
     """Interactive Firewalla bridge pairing — fail-closed.
 
-    Collects the bridge URL/token + device IP/MAC, runs an AUTHENTICATED probe
-    (:func:`screen_time.validate_firewalla_pairing`), and persists the pairing
-    ONLY on a genuine authenticated 200. A wrong token, an unreachable bridge,
-    or a malformed response is surfaced with the precise reason and the pairing
-    is NOT written — because a curfew engine pointed at an unpaired bridge
-    enforces nothing, and a false "paired" hides that until the first missed
+    Returns True ONLY on a genuine authenticated 200 that persisted the pairing;
+    returns False when ``--yes`` skips, the operator declines, or every attempt is
+    rejected — so the recap reads "skipped" rather than a false "paired" (design
+    spec §2/§11). Collects the bridge URL/token + device IP/MAC, runs an
+    AUTHENTICATED probe (:func:`screen_time.validate_firewalla_pairing`), and
+    persists the pairing ONLY on a genuine authenticated 200. A wrong token, an
+    unreachable bridge, or a malformed response is surfaced with the precise reason
+    and the pairing is NOT written — because a curfew engine pointed at an unpaired
+    bridge enforces nothing, and a false "paired" hides that until the first missed
     bedtime. ``--yes`` skips (interactive); re-run later via the same gate.
     """
     from sanctum_cli.commands import screen_time
@@ -1228,10 +1256,10 @@ def _run_firewalla_pairing(*, yes: bool) -> None:
             "  [yellow]skipped[/] — interactive step; run `sanctum onboard` without "
             "--yes to pair the Firewalla bridge"
         )
-        return
+        return False
     if not Confirm.ask("  pair the Firewalla screen-time bridge now?", default=True):
         console.print("  [dim]skipped — curfews stay inert until the bridge is paired[/]")
-        return
+        return False
 
     url = Prompt.ask("  bridge URL", default="http://127.0.0.1:1984").strip()
     for attempt in range(3):
@@ -1247,7 +1275,7 @@ def _run_firewalla_pairing(*, yes: bool) -> None:
                 port=_port_from_url(url),
             )
             console.print(f"  [green]✓[/] bridge paired — {result.detail}")
-            return
+            return True
         console.print(f"  [red]✗[/] not paired: {result.detail}")
         if result.state == "auth_rejected" and attempt < 2:
             console.print("  [dim]check the token and try again[/]")
@@ -1258,6 +1286,7 @@ def _run_firewalla_pairing(*, yes: bool) -> None:
         "complete pairing. Re-run `sanctum onboard` (or `sanctum screen-time compat`) after "
         "fixing the bridge."
     )
+    return False
 
 
 def _port_from_url(url: str) -> int:
@@ -1268,18 +1297,21 @@ def _port_from_url(url: str) -> int:
     return parsed.port or 1984
 
 
-def _run_firewalla_compat() -> None:
+def _run_firewalla_compat() -> bool:
     """Firewalla screen-time gate — skip-if-absent, strict-if-present.
 
-    The /info probe distinguishes "module not paired" (bridge unreachable or
-    no token → SKIP, onboarding continues) from "paired but incompatible" —
-    ``compat_command`` raises :class:`LocalError` for both cases, so we probe
-    first instead of parsing exception messages. When the bridge answers, the
-    assessment runs STRICT: a spoof-mode box or a near-capacity policy table
-    is surfaced to the brand-new operator *now*, fix text included, instead
-    of via the first silently-unenforced curfew. The verdict is loud but
-    non-blocking (same stance as the restore canary): the backup already
-    succeeded, and `sanctum screen-time compat --strict` is the hard gate.
+    Always returns False: this is a read-only compatibility ASSESSMENT, not a
+    configuration step — it persists nothing, so it never contributes a "configured"
+    signal to the chapter recap (the recap reflects what was PAIRED, which the
+    pairing gate owns). The /info probe distinguishes "module not paired" (bridge
+    unreachable or no token → SKIP, onboarding continues) from "paired but
+    incompatible" — ``compat_command`` raises :class:`LocalError` for both cases, so
+    we probe first instead of parsing exception messages. When the bridge answers,
+    the assessment runs STRICT: a spoof-mode box or a near-capacity policy table is
+    surfaced to the brand-new operator *now*, fix text included, instead of via the
+    first silently-unenforced curfew. The verdict is loud but non-blocking (same
+    stance as the restore canary): the backup already succeeded, and `sanctum
+    screen-time compat --strict` is the hard gate.
     """
     from sanctum_cli.commands import screen_time
 
@@ -1288,7 +1320,7 @@ def _run_firewalla_compat() -> None:
             "  [yellow]skipped[/] — screen-time module not paired yet — "
             "run `sanctum screen-time compat` after pairing"
         )
-        return
+        return False
     try:
         # Prints the per-check table (status + fix columns) before raising.
         screen_time.compat_command(strict=True)
@@ -1296,6 +1328,7 @@ def _run_firewalla_compat() -> None:
         console.print(f"  [red]✗[/] {exc.message}")
         if exc.fix:
             console.print(f"  [dim]fix: {exc.fix}[/]")
+    return False
 
 
 # ── Network-gear detection + pairing gate ────────────────────────────
@@ -1669,14 +1702,18 @@ def store_device_secret(*, service: str, account: str, secret: str) -> None:
         _mirror_to_trifecta(service=service, account=account, secret=secret)
 
 
-def _run_network_gear(*, yes: bool) -> None:
+def _run_network_gear(*, yes: bool) -> bool:
     """Network-gear detection + guided pairing gate — additive, fail-closed.
 
-    Runs the registry's read-only detection across the registered providers over
-    the current network; for EACH detected kind it offers guided pairing that
-    mirrors :func:`_run_firewalla_pairing`: prompt the admin password → run a
-    READ-ONLY ``provider.connect()`` auth-probe → on a genuine success write the
-    password to the Keychain (the resolved ``(service, account)``) AND persist a
+    Returns True iff at least one device was actually PAIRED (a green auth-probe +
+    a persisted ``devices.<kind>`` block); returns False when ``--yes`` skips, no
+    gear is detected, the operator declines every device, or every probe is
+    rejected — so the recap reads "skipped" rather than a false "paired" (design
+    spec §2/§11). Runs the registry's read-only detection across the registered
+    providers over the current network; for EACH detected kind it offers guided
+    pairing that mirrors :func:`_run_firewalla_pairing`: prompt the admin password →
+    run a READ-ONLY ``provider.connect()`` auth-probe → on a genuine success write
+    the password to the Keychain (the resolved ``(service, account)``) AND persist a
     ``devices.<kind>`` reference block to instance.yaml. A rejected probe (wrong
     password / unreachable box) is surfaced loudly and NOTHING is written —
     because a ``devices`` block pointing at a box you cannot auth to is a false
@@ -1690,7 +1727,7 @@ def _run_network_gear(*, yes: bool) -> None:
             "  [yellow]skipped[/] — interactive step; run `sanctum onboard` "
             "without --yes to pair your network gear"
         )
-        return
+        return False
 
     from sanctum_cli.commands import net as net_cmd
 
@@ -1701,8 +1738,9 @@ def _run_network_gear(*, yes: bool) -> None:
             "  [dim]no network gear detected — nothing to pair "
             "(re-run `sanctum onboard` after connecting your hub/mesh)[/]"
         )
-        return
+        return False
 
+    paired_any = False
     label_map = dict(_NETWORK_GEAR_KINDS)
     for kind, provider in detected:
         label = label_map.get(kind, kind)
@@ -1767,6 +1805,8 @@ def _run_network_gear(*, yes: bool) -> None:
             keychain_account=account,
         )
         console.print(f"  [green]✓[/] {label} paired — {brand_pin} ({kind})")
+        paired_any = True
+    return paired_any
 
 
 def _probe_device(
