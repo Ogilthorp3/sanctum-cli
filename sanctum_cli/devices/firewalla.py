@@ -40,6 +40,9 @@ import socket
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import quote
+
+import httpx
 
 from sanctum_cli import config
 from sanctum_cli.devices import registry
@@ -83,6 +86,33 @@ _HTTP_TIMEOUT_S = 15
 def _bridge_url() -> str:
     """Resolve the bridge base URL (env override → loopback default)."""
     return os.environ.get(_BRIDGE_URL_ENV, _DEFAULT_BRIDGE_URL)
+
+
+def _encode_path(path: str) -> str:
+    """Percent-encode a caller-supplied bridge path EXACTLY once for the wire.
+
+    Own the escaping at the boundary (CLAUDE.md "Own the escaping at the
+    boundary"): a target / policy id interpolated into the URL may carry a literal
+    ``%``, a space, or a non-ASCII char. ``httpx`` *preserves* an existing
+    ``%``-sequence, so without this an id literally containing ``%41`` would ride
+    to the box as ``%41`` (decoding server-side to the letter ``A``) and silently
+    address the WRONG policy. ``quote(path, safe="/")`` turns that literal ``%``
+    into ``%25`` (``%41`` → ``%2541``, the id's own bytes) while keeping the path's
+    ``/`` separators literal — one layer of encoding the provider owns, so httpx
+    has nothing left to encode and cannot double-encode it to ``%2525``.
+    """
+    return quote(path, safe="/")
+
+
+def _bridge_transport() -> httpx.BaseTransport | None:
+    """The httpx transport the bridge client is built on (``None`` = default).
+
+    A seam so tests can inject an ``httpx.MockTransport`` and drive the REAL httpx
+    URL-construction/encoding without opening a socket — proving the boundary
+    encoding against the exact bytes that would hit the wire. In production it
+    returns ``None`` so ``httpx.Client`` uses its own default (loopback) transport.
+    """
+    return None
 
 
 def _read_bridge_token() -> str | None:
@@ -136,18 +166,19 @@ def _fetch_bridge_json(
     screen-time engine, which routes its bridge reads through this seam) drives
     the read without re-resolving here — keeping a single HTTP implementation.
     """
-    import httpx
-
     bearer = token if token is not None else _read_bridge_token()
     if not bearer:
         return None
     base = url if url is not None else _bridge_url()
+    # Own the encoding at the boundary (exactly once); httpx then has nothing left
+    # to encode and cannot double-encode a literal '%' to '%2525'.
+    safe_path = _encode_path(path)
     try:
-        resp = httpx.get(
-            f"{base}{path}",
-            headers={"Authorization": f"Bearer {bearer}"},
-            timeout=_HTTP_TIMEOUT_S,
-        )
+        with httpx.Client(transport=_bridge_transport(), timeout=_HTTP_TIMEOUT_S) as client:
+            resp = client.get(
+                f"{base}{safe_path}",
+                headers={"Authorization": f"Bearer {bearer}"},
+            )
         if resp.status_code != 200:
             return None
         data = resp.json()
@@ -165,18 +196,19 @@ def _post_bridge_json(path: str, body: dict[str, Any]) -> dict[str, Any] | None:
     ``ok=False`` rather than raising mid-mutation. Tests monkeypatch this so no
     write ever reaches live gear.
     """
-    import httpx
-
     token = _read_bridge_token()
     if not token:
         return None
+    # Own the encoding at the boundary (exactly once) — same contract as the GET
+    # seam: a '%'-bearing policy id in a mutate path must address the right policy.
+    safe_path = _encode_path(path)
     try:
-        resp = httpx.post(
-            f"{_bridge_url()}{path}",
-            headers={"Authorization": f"Bearer {token}"},
-            json=body,
-            timeout=_HTTP_TIMEOUT_S,
-        )
+        with httpx.Client(transport=_bridge_transport(), timeout=_HTTP_TIMEOUT_S) as client:
+            resp = client.post(
+                f"{_bridge_url()}{safe_path}",
+                headers={"Authorization": f"Bearer {token}"},
+                json=body,
+            )
         if resp.status_code // 100 != 2:
             return None
         data = resp.json()

@@ -28,7 +28,7 @@ come from the environment or a monkeypatched module constant pointed at a
 from __future__ import annotations
 
 import json as _json
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import httpx
 
@@ -44,7 +44,15 @@ if TYPE_CHECKING:
 
 
 class _Recorder:
-    """Records the last httpx.get call and returns a scripted response."""
+    """Records the request that crossed the bridge boundary; scripts a response.
+
+    Installed as the handler of an ``httpx.MockTransport`` on the provider's
+    ``_bridge_transport`` seam, so the REAL httpx URL-construction/encoding runs
+    and the captured ``url``/``headers``/``timeout`` are exactly what would hit the
+    wire (the contract that crosses the boundary — not the now-internal call shape
+    the engine uses to reach it). ``timeout`` is read off the transport-level
+    ``request.extensions`` httpx populates from the client timeout.
+    """
 
     def __init__(self, *, status: int | None, body: object) -> None:
         self.status = status
@@ -53,24 +61,30 @@ class _Recorder:
         self.headers: dict[str, str] | None = None
         self.timeout: object = None
 
-    def __call__(self, url: str, **kwargs: Any) -> httpx.Response:
-        self.url = url
-        self.headers = kwargs.get("headers")
-        self.timeout = kwargs.get("timeout")
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        self.url = str(request.url)
+        # Re-derive the single Authorization header the engine set (case-insensitive
+        # on the wire; assert against the same shape the prior characterization did).
+        auth = request.headers.get("authorization")
+        self.headers = {"Authorization": auth} if auth is not None else None
+        self.timeout = request.extensions.get("timeout", {}).get("connect")
         if self.status is None:
             raise httpx.ConnectError("simulated unreachable")
-        req = httpx.Request("GET", url)
         content = (
             _json.dumps(self.body).encode() if self.body is not None else b"not json"
         )
-        return httpx.Response(self.status, request=req, content=content)
+        return httpx.Response(self.status, request=request, content=content)
 
 
 def _install(
     monkeypatch: pytest.MonkeyPatch, *, status: int | None, body: object
 ) -> _Recorder:
     rec = _Recorder(status=status, body=body)
-    monkeypatch.setattr("httpx.get", rec)
+    # Drive the REAL httpx path; intercept only the socket via MockTransport.
+    monkeypatch.setattr(
+        "sanctum_cli.devices.firewalla._bridge_transport",
+        lambda: httpx.MockTransport(rec),
+    )
     # Provide a token via env so the real ~/.sanctum token file is never read.
     monkeypatch.setenv(st._BRIDGE_TOKEN_ENV, "tok-from-env")
     return rec
@@ -128,17 +142,20 @@ class TestFetchBridgeJson:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         # No env token AND a token file that does not exist → fail-soft None,
-        # and httpx.get must NOT be called (no probe without a token).
+        # and NO request must reach the transport (no probe without a token).
         monkeypatch.delenv(st._BRIDGE_TOKEN_ENV, raising=False)
         monkeypatch.setattr(st, "_BRIDGE_TOKEN_FILE", tmp_path / "missing-token")
         called = False
 
-        def _boom(*_a: Any, **_k: Any) -> httpx.Response:
+        def _boom(_request: httpx.Request) -> httpx.Response:
             nonlocal called
             called = True
-            raise AssertionError("httpx.get must not be called without a token")
+            raise AssertionError("the bridge transport must not be hit without a token")
 
-        monkeypatch.setattr("httpx.get", _boom)
+        monkeypatch.setattr(
+            "sanctum_cli.devices.firewalla._bridge_transport",
+            lambda: httpx.MockTransport(_boom),
+        )
         assert st._fetch_bridge_json("/info") is None
         assert called is False
 
@@ -153,7 +170,10 @@ class TestFetchBridgeJson:
         tf.write_text("file-token\n", encoding="utf-8")
         monkeypatch.setattr(st, "_BRIDGE_TOKEN_FILE", tf)
         rec = _Recorder(status=200, body={"ok": 1})
-        monkeypatch.setattr("httpx.get", rec)
+        monkeypatch.setattr(
+            "sanctum_cli.devices.firewalla._bridge_transport",
+            lambda: httpx.MockTransport(rec),
+        )
         out = st._fetch_bridge_json("/info")
         assert out == {"ok": 1}
         assert rec.headers == {"Authorization": "Bearer file-token"}
