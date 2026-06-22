@@ -129,6 +129,31 @@ def test_net_firewalla_status_prints_brand_and_summary(
     assert p.set_calls == []  # status never mutates
 
 
+def test_net_firewalla_status_dead_bridge_exits_nonzero_not_dash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dead / unauthorized bridge must exit nonzero, NOT print 'info: -' exit 0.
+
+    The real FirewallaProvider.get now RAISES DeviceError on transport-down /
+    auth-reject (the Protocol contract Sagemcom already honors), instead of
+    swallowing it into None. firewalla_status catches SanctumError and exits the
+    LOCAL_ERROR code (4) — so a total connectivity / auth failure is reported as a
+    failure, not disguised as 'box up, empty body' with exit 0.
+    """
+    from sanctum_cli.devices.base import DeviceError
+
+    class DeadBridgeFirewalla(FakeFirewalla):
+        def get(self, path: str) -> str | None:
+            msg = "Firewalla bridge unreachable for GET '/info'"
+            raise DeviceError(msg, fix="check the bridge is up")
+
+    p = DeadBridgeFirewalla()
+    _point_registry_at(monkeypatch, p)
+    result = runner.invoke(app, ["net", "firewalla", "status"])
+    assert result.exit_code == 4, result.stdout  # LOCAL_ERROR, not a silent 0
+    assert p.disconnected is True  # still released the provider
+
+
 def test_net_firewalla_status_disconnects_provider(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -119,17 +119,18 @@ def test_connect_none_creds_uses_defaults(monkeypatch: pytest.MonkeyPatch) -> No
 
 def test_get_info_returns_json_string(monkeypatch: pytest.MonkeyPatch) -> None:
     p, _ = _connected(monkeypatch, info={"box": {"model": "gold"}})
+    # get() routes through the strict seam (raises on transport/auth failure); drive
+    # it through the real MockTransport so a 200 + dict body serializes as before.
+    _install_strict_transport(monkeypatch, status=200, body={"box": {"model": "gold"}})
     out = p.get("/info")
     assert out is not None
     assert "gold" in out  # serialized info payload
 
 
 def test_get_unknown_path_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
-    from sanctum_cli.devices import firewalla as fw
-
     p, _ = _connected(monkeypatch)
-    # A path the bridge has no body for → None (best-effort read, not an error).
-    monkeypatch.setattr(fw, "_fetch_bridge_json", lambda path: None)
+    # A path the box has no body for (404) → None (best-effort read, not an error).
+    _install_strict_transport(monkeypatch, status=404, body={"error": "not found"})
     assert p.get("/nope") is None
 
 
@@ -139,6 +140,96 @@ def test_get_before_connect_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     p = FirewallaProvider()
     with pytest.raises(DeviceError):
         p.get("/info")
+
+
+def _install_strict_transport(
+    monkeypatch: pytest.MonkeyPatch, *, status: int | None, body: object
+) -> None:
+    """Drive the REAL strict GET seam through an httpx.MockTransport (no socket).
+
+    Mirrors the characterization suite's MockTransport pattern: intercept only at
+    the socket layer so httpx's real URL-construction / status / JSON parsing runs
+    — the cross-layer contract is proven against the actual transport, not a stub
+    of the seam (CLAUDE.md "Don't mock cheap subprocess boundaries"). ``status=None``
+    simulates an unreachable bridge (ConnectError).
+    """
+    import json as _json
+
+    import httpx
+
+    from sanctum_cli.devices import firewalla as fw
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if status is None:
+            raise httpx.ConnectError("simulated unreachable")
+        content = _json.dumps(body).encode() if body is not None else b"not json"
+        return httpx.Response(status, request=request, content=content)
+
+    monkeypatch.setattr(fw, "_bridge_transport", lambda: httpx.MockTransport(handler))
+    monkeypatch.setattr(fw, "_read_bridge_token", lambda: "tok")
+
+
+def test_get_404_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A genuine path-unknown (404) is best-effort None — the contract's "no body"."""
+    p, _ = _connected(monkeypatch)
+    _install_strict_transport(monkeypatch, status=404, body={"error": "not found"})
+    assert p.get("/nope") is None
+
+
+def test_get_transport_down_raises_device_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A dead bridge (transport error) must RAISE DeviceError, not return None.
+
+    The Protocol mandates transport/auth failures raise (matching Sagemcom);
+    swallowing them into None makes a total connectivity failure indistinguishable
+    from "box up, empty body" and lets firewalla_status exit 0 on a dead box.
+    """
+    p, _ = _connected(monkeypatch)
+    _install_strict_transport(monkeypatch, status=None, body=None)  # ConnectError
+    with pytest.raises(DeviceError):
+        p.get("/info")
+
+
+def test_get_auth_reject_raises_device_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A token-reject (401/403) must RAISE DeviceError, not return None.
+
+    Otherwise an unauthorized box is reported as "empty body" and the CLI exits 0,
+    hiding a credential failure behind a dash. This is the exact failure class the
+    fail-soft _fetch_bridge_json swallows to None (see the characterization suite);
+    the strict seam get() routes through must distinguish it.
+    """
+    p, _ = _connected(monkeypatch)
+    _install_strict_transport(monkeypatch, status=403, body={"error": "unauthorized"})
+    with pytest.raises(DeviceError):
+        p.get("/info")
+
+
+def test_get_server_error_raises_device_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Any other non-200 (e.g. 503) is a transport-class failure → DeviceError."""
+    p, _ = _connected(monkeypatch)
+    _install_strict_transport(monkeypatch, status=503, body={"error": "down"})
+    with pytest.raises(DeviceError):
+        p.get("/info")
+
+
+def test_get_missing_token_raises_device_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No token at all is an auth failure → DeviceError, not a silent None."""
+    from sanctum_cli.devices import firewalla as fw
+
+    p, _ = _connected(monkeypatch)
+    monkeypatch.setattr(fw, "_read_bridge_token", lambda: None)
+    with pytest.raises(DeviceError):
+        p.get("/info")
+
+
+def test_get_200_empty_body_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A reachable, authorized box that answers 200 with a non-dict body → None.
+
+    The path answered (no transport/auth failure) but carries no structured value
+    — a legitimate best-effort "no data", which must stay None (not raise).
+    """
+    p, _ = _connected(monkeypatch)
+    _install_strict_transport(monkeypatch, status=200, body=[1, 2, 3])  # JSON list, not dict
+    assert p.get("/info") is None
 
 
 # ── set: mutating bridge op behind an OpResult ────────────────────────

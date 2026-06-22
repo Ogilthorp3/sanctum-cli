@@ -208,6 +208,69 @@ def _fetch_bridge_json(
         return None
 
 
+def _get_bridge_json_strict(path: str) -> dict[str, Any] | None:
+    """GET a bridge endpoint, distinguishing "no data" from "transport/auth down".
+
+    The contract-honoring counterpart to the fail-soft :func:`_fetch_bridge_json`.
+    The Protocol (``base.DeviceProvider.get``) mandates two DIFFERENT signals for
+    two DIFFERENT facts, and the fail-soft seam collapses them into one ``None``:
+
+    * a path the box has **no body** for — a genuine 404, or a 200 carrying an
+      empty / non-dict body → ``None`` (best-effort "unknown path", per contract);
+    * the bridge is **unreachable** (transport error), the token is **missing**,
+      or the box **rejected the token** (401/403) or otherwise errored (any other
+      non-200) → raise :class:`DeviceError`.
+
+    Without this, a dead bridge or a rejected token is indistinguishable from
+    "box up, empty body" — ``get`` returns ``None`` and ``firewalla_status``
+    prints ``info: -`` and exits 0 on a total connectivity / auth failure, the
+    opposite signal the Sagemcom provider gives for the same failure class
+    (``_raw_get`` normalizes any transport error to ``DeviceError``). This seam
+    is module-level so tests can monkeypatch it without opening a socket; the
+    fail-soft :func:`_fetch_bridge_json` is retained UNCHANGED for the callers
+    that must never raise (``detect`` during a registry scan, the best-effort
+    ``connect``/``_refine_brand``/``snapshot`` baseline).
+    """
+    bearer = _read_bridge_token()
+    if not bearer:
+        msg = "Firewalla bridge token unavailable (no FIREWALLA_BRIDGE_TOKEN env / on-disk secret)"
+        raise DeviceError(
+            msg,
+            fix=(
+                "set FIREWALLA_BRIDGE_TOKEN or write the token to "
+                "~/.sanctum/secrets/firewalla-bridge-token"
+            ),
+        )
+    base = _bridge_url()
+    safe_path = _encode_path(path)
+    try:
+        with httpx.Client(transport=_bridge_transport(), timeout=_HTTP_TIMEOUT_S) as client:
+            resp = client.get(
+                f"{base}{safe_path}",
+                headers={"Authorization": f"Bearer {bearer}"},
+            )
+    except httpx.HTTPError as exc:  # transport down: unreachable / timeout / reset
+        msg = f"Firewalla bridge unreachable for GET {path!r}: {exc}"
+        raise DeviceError(
+            msg, fix="check the bridge is up (FIREWALLA_BRIDGE_URL, default 127.0.0.1:1984)"
+        ) from exc
+    if resp.status_code in (401, 403):  # the box rejected the bearer token
+        msg = f"Firewalla bridge rejected the token for GET {path!r} (HTTP {resp.status_code})"
+        raise DeviceError(msg, fix="rotate / re-provision the Firewalla bridge bearer token")
+    if resp.status_code == 404:  # path genuinely unknown → best-effort None, per contract
+        return None
+    if resp.status_code != 200:  # any other server-side error is a transport-class failure
+        msg = f"Firewalla bridge errored for GET {path!r} (HTTP {resp.status_code})"
+        raise DeviceError(msg, fix="check the bridge logs; the box returned an unexpected status")
+    try:
+        data = resp.json()
+    except ValueError:
+        # 200 with a non-JSON body: the path answered but carries no structured
+        # value — best-effort "no data", not a transport failure.
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def _post_bridge_json(path: str, body: dict[str, Any]) -> dict[str, Any] | None:
     """POST a JSON body to a bridge endpoint; ``None`` on any failure.
 
@@ -327,14 +390,21 @@ class FirewallaProvider:
             raise DeviceError(msg, fix="call provider.connect(creds) before reading/writing")
 
     def get(self, path: str) -> str | None:
-        """Read one bridge endpoint by path; ``None`` when the bridge has no body.
+        """Read one bridge endpoint by path; ``None`` only when the box has no body.
 
-        Returns the JSON payload serialized to a compact string (the uniform
-        ``str | None`` the Protocol mandates), or ``None`` for an unreachable /
-        empty endpoint — a normal best-effort outcome, not an error.
+        Honors the :class:`~sanctum_cli.devices.base.DeviceProvider` Protocol
+        contract: returns the JSON payload serialized to a compact string, or
+        ``None`` for a path the box genuinely has no body for (a 404, or a 200
+        with an empty / non-dict / non-JSON body). A transport failure, a missing
+        token, or an auth-reject (401/403) raises :class:`DeviceError` rather than
+        masquerading as an empty body — so a dead bridge / rejected token is
+        distinguishable from "box up, empty endpoint" (matching Sagemcom's
+        ``get``, which also raises on transport/auth failure). Routed through the
+        strict seam; the fail-soft ``_fetch_bridge_json`` is reserved for the
+        best-effort callers (detect / connect / snapshot) that must never raise.
         """
         self._require_connected()
-        data = _fetch_bridge_json(path)
+        data = _get_bridge_json_strict(path)
         if data is None:
             return None
         return json.dumps(data, separators=(",", ":"), ensure_ascii=False)
