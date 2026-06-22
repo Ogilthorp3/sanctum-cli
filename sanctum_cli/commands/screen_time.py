@@ -26,6 +26,7 @@ from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
+from sanctum_cli.devices import firewalla
 from sanctum_cli.errors import LocalError, UserError
 
 console = Console()
@@ -372,9 +373,16 @@ def assess_compat(
 
 
 def _fetch_bridge_json(path: str) -> dict[str, Any] | None:
-    """GET a bridge endpoint; None on any transport/auth failure (caller decides)."""
-    import httpx
+    """GET a bridge endpoint; None on any transport/auth failure (caller decides).
 
+    Bridge reads are routed through the :class:`FirewallaProvider` HTTP seam
+    (``sanctum_cli.devices.firewalla._fetch_bridge_json``) so the engine and the
+    provider share ONE bridge transport. This module still owns the *resolution*
+    of the bridge URL + bearer token from its own constants (env override →
+    on-disk ``_BRIDGE_TOKEN_FILE`` fallback) and passes them in explicitly — the
+    fail-soft ``dict | None`` contract is unchanged: no token → ``None`` without
+    a probe; non-200 / non-JSON / non-dict / transport error → ``None``.
+    """
     url = os.environ.get(_BRIDGE_URL_ENV, "http://127.0.0.1:1984")
     token = os.environ.get(_BRIDGE_TOKEN_ENV, "").strip()
     if not token:
@@ -382,16 +390,9 @@ def _fetch_bridge_json(path: str) -> dict[str, Any] | None:
             token = _BRIDGE_TOKEN_FILE.read_text(encoding="utf-8").strip()
         except OSError:
             return None
-    try:
-        resp = httpx.get(
-            f"{url}{path}", headers={"Authorization": f"Bearer {token}"}, timeout=15
-        )
-        if resp.status_code != 200:
-            return None
-        data = resp.json()
-        return data if isinstance(data, dict) else None
-    except (httpx.HTTPError, ValueError):
+    if not token:
         return None
+    return firewalla._fetch_bridge_json(path, url=url, token=token)
 
 
 class PairingResult(NamedTuple):

@@ -246,6 +246,57 @@ def test_guarded_apply_change_raises_rolls_back(tmp_path: Path) -> None:
     assert p.rollback_calls == 1
 
 
+class ReturnConventionProvider(FakeProvider):
+    """A provider that signals a refused write by RETURNING ok=False (no raise).
+
+    Mirrors FirewallaProvider.set, which diverges from Sagemcom/Generic (those
+    RAISE DeviceError on failure). guarded_apply trips rollback only when the
+    change RAISES — a plain return is taken as a successful apply. So a caller that
+    drives a return-convention provider MUST convert ok=False into a raise inside
+    the change closure, or a refused write is reported as a green success (Task 6
+    finding 1). This fake makes that contract testable at the rails layer (the
+    durable home for it once a mutating intent is re-wired to a return-convention
+    provider).
+    """
+
+    def set(self, path: str, value: str) -> OpResult:
+        return OpResult(ok=False, detail="bridge refused set", before=None, after=None)
+
+
+def test_guarded_apply_rolls_back_when_change_raises_on_returned_not_ok(
+    tmp_path: Path,
+) -> None:
+    """A change closure that raises on a returned ok=False must trip rollback + ok=False.
+
+    The return-convention adapter (CLAUDE.md "Contracts at the Boundary": the
+    cross-layer contract, not the field). guarded_apply cannot see a discarded
+    OpResult — if the closure swallows ok=False and returns normally, the rails
+    would verify + commit, falsely reporting a refused mutation as committed.
+    Converting ok=False into a raise inside the closure is what makes the rails
+    snapshot → rollback → report ok=False.
+    """
+    p = ReturnConventionProvider()
+
+    def change(pv: FakeProvider) -> None:
+        result = pv.set("WanMode", "xgspon")
+        if not result.ok:
+            msg = result.detail
+            raise RuntimeError(msg)
+
+    res = guarded_apply(
+        p,
+        change,
+        verify_fn=lambda: True,  # would COMMIT if the closure had swallowed ok=False
+        confirm=lambda _plan: True,
+        force=True,
+        rollback=True,
+        log_path=tmp_path / "audit.jsonl",
+    )
+    assert res.ok is False  # NOT a green success on a refused write
+    assert p.rollback_calls == 1  # the refused write was rolled back
+    assert p.get("WanMode") == "gpon"  # state restored to the snapshot
+
+
 class RollbackRaisesProvider(FakeProvider):
     """A provider whose rollback transport dies mid-recovery (the 2 a.m. case)."""
 
