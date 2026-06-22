@@ -246,6 +246,40 @@ def test_net_orbi_guest_wifi_apply_routes_through_rails(
     assert p.rollback_calls == 0
 
 
+def test_net_orbi_guest_wifi_apply_set_returns_not_ok_rolls_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A provider whose set RETURNS ok=False (refused write) must trip rollback.
+
+    The return-convention contract end-to-end (P2 low finding): OrbiProvider.set
+    returns ok=False on an unwritable leaf instead of raising. The guest-wifi
+    apply closure passes that OpResult THROUGH to the rails, which now inspect it
+    and treat ok=False as a failed apply — so a refused write is NOT reported as a
+    green success even though the verify (re-read) would have passed. Without the
+    call-site returning the OpResult (and the rails inspecting it), this would exit
+    0 and silently no-op.
+    """
+
+    class RefusingOrbi(FakeOrbi):
+        def set(self, path: str, value: str) -> OpResult:
+            # Mutate state (so the post-change verify re-read would PASS) but REFUSE
+            # via the return convention (ok=False, no raise). This is the silent-
+            # discard trap: only inspecting the returned OpResult catches it — a
+            # verify that re-reads the (now-correct-looking) leaf would commit.
+            self.set_calls.append((path, value))
+            before = self._values.get(path)
+            self._values[path] = value
+            return OpResult(ok=False, detail="orbi: write refused upstream", before=before, after=None)
+
+    p = RefusingOrbi()
+    _point_registry_at(monkeypatch, p)
+    result = runner.invoke(
+        app, ["net", "orbi", "guest-wifi", "on", "--apply", "--force"]
+    )
+    assert result.exit_code == 1, result.stdout  # refused write → nonzero, NOT 0
+    assert p.rollback_calls == 1  # the refused write was rolled back
+
+
 def test_net_orbi_guest_wifi_off_uses_disengaged_value(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

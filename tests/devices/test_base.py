@@ -97,6 +97,7 @@ def test_creds_is_frozen() -> None:
     assert c.username == "admin"
     assert c.secret is None
     assert c.key_path is None
+    assert c.keychain_service is None  # defaults to None (caller resolved nothing)
     import dataclasses
 
     import pytest

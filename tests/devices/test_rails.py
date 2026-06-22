@@ -297,6 +297,106 @@ def test_guarded_apply_rolls_back_when_change_raises_on_returned_not_ok(
     assert p.get("WanMode") == "gpon"  # state restored to the snapshot
 
 
+def test_guarded_apply_change_returns_not_ok_rolls_back(tmp_path: Path) -> None:
+    """A change closure that RETURNS an ok=False OpResult must trip rollback + ok=False.
+
+    The hardening for the P2 Yoda low finding: a return-convention provider
+    (FirewallaProvider.set, OrbiProvider.set on an unwritable leaf) signals a
+    refused write by RETURNING ok=False, NOT raising. Before this, guarded_apply
+    only tripped rollback on a raise, so a closure that returned the OpResult
+    straight through (the natural shape) would let the rails verify + commit —
+    falsely reporting a refused mutation as a green success. Now guarded_apply
+    INSPECTS what the closure returns: an ok=False OpResult is treated as a failed
+    apply (rollback when enabled, ok=False), so NO call site can silently discard
+    an ok=False by returning it.
+    """
+    p = ReturnConventionProvider()
+
+    def change(pv: FakeProvider) -> OpResult:
+        # Return the OpResult straight through — the natural call shape. The rails
+        # must catch the ok=False; the closure does NOT have to re-raise it.
+        return pv.set("WanMode", "xgspon")
+
+    res = guarded_apply(
+        p,
+        change,
+        verify_fn=lambda: True,  # would COMMIT if the rails ignored the returned ok=False
+        confirm=lambda _plan: True,
+        force=True,
+        rollback=True,
+        log_path=tmp_path / "audit.jsonl",
+    )
+    assert res.ok is False  # NOT a green success on a refused write
+    assert "bridge refused set" in res.detail  # the closure's reason is surfaced
+    assert p.rollback_calls == 1  # the refused write was rolled back
+    assert p.get("WanMode") == "gpon"  # state restored to the snapshot
+
+
+def test_guarded_apply_change_returns_not_ok_no_rollback_left_in_place(
+    tmp_path: Path,
+) -> None:
+    """rollback=False + a returned ok=False → left in place, ok=False (no rollback)."""
+    p = ReturnConventionProvider()
+
+    res = guarded_apply(
+        p,
+        lambda pv: pv.set("WanMode", "xgspon"),
+        verify_fn=lambda: True,
+        confirm=lambda _plan: True,
+        force=True,
+        rollback=False,
+        log_path=tmp_path / "audit.jsonl",
+    )
+    assert res.ok is False
+    assert p.rollback_calls == 0  # rollback disabled — failed change left in place
+
+
+def test_guarded_apply_change_returns_ok_true_commits(tmp_path: Path) -> None:
+    """A change closure that RETURNS an ok=True OpResult still commits on verify pass.
+
+    The hardening must not regress the happy path: returning a *successful*
+    OpResult is indistinguishable (to the operator) from returning None — the
+    verify gate still decides commit vs rollback.
+    """
+    p = FakeProvider()  # base FakeProvider.set returns ok=True
+
+    res = guarded_apply(
+        p,
+        lambda pv: pv.set("WanMode", "xgspon"),
+        verify_fn=lambda: True,
+        confirm=lambda _plan: True,
+        force=True,
+        rollback=True,
+        log_path=tmp_path / "audit.jsonl",
+    )
+    assert res.ok is True
+    assert p.get("WanMode") == "xgspon"
+    assert p.rollback_calls == 0
+
+
+def test_guarded_apply_change_returns_none_still_verifies(tmp_path: Path) -> None:
+    """A change closure that returns None keeps the existing verify-gated behavior.
+
+    Back-compat: the prior closures (``_set_wan`` returns None) must still route
+    through the verify gate — a None return means "no OpResult to inspect", so the
+    rails fall through to verify_fn exactly as before.
+    """
+    p = FakeProvider()
+
+    res = guarded_apply(
+        p,
+        _set_wan("xgspon"),  # returns None
+        verify_fn=lambda: False,  # verify still gates
+        confirm=lambda _plan: True,
+        force=True,
+        rollback=True,
+        log_path=tmp_path / "audit.jsonl",
+    )
+    assert res.ok is False  # verify failed → rolled back
+    assert p.rollback_calls == 1
+    assert p.get("WanMode") == "gpon"
+
+
 class RollbackRaisesProvider(FakeProvider):
     """A provider whose rollback transport dies mid-recovery (the 2 a.m. case)."""
 

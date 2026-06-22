@@ -181,7 +181,17 @@ class SagemcomHubProvider:
             msg = "Sagemcom hub requires creds (host/username); got None"
             raise DeviceError(msg, fix="pass Creds(host=..., username='admin')")
 
-        password = keychain.read(account=KEYCHAIN_ACCOUNT, service=KEYCHAIN_SERVICE)
+        # Read the password under the RESOLVED (service, account) the CLI threaded
+        # through Creds — NOT the brand constants — so a haus that overrides
+        # devices.hub.keychain.{service,account} actually reads from its own entry.
+        # The username is the resolved account; keychain_service is the resolved
+        # service. Both fall back to this module's per-brand default when the
+        # caller did not resolve them (a direct connect, e.g. in a test, or the
+        # default haus path — which resolves to exactly these constants anyway, so
+        # the default behavior is unchanged).
+        account = creds.username or KEYCHAIN_ACCOUNT
+        service = creds.keychain_service or KEYCHAIN_SERVICE
+        password = keychain.read(account=account, service=service)
         authed = Creds(
             host=creds.host,
             username=creds.username,
@@ -204,6 +214,20 @@ class SagemcomHubProvider:
             raise DeviceError(msg, fix="check the admin password in the Keychain") from exc
         self._client = client
         self._refine_brand()
+
+    def auth_ok(self) -> bool:
+        """True iff the last :meth:`connect` opened a genuinely authenticated session.
+
+        The explicit auth oracle a read-only auth-probe (onboard's pairing gate)
+        calls. This provider is ALREADY fail-closed at connect — a rejected login
+        re-raises :class:`DeviceError`, and ``self._client`` is set ONLY after a
+        successful login — so ``_client is not None`` is exactly "we authenticated".
+        Exposing it uniformly (alongside Orbi's :meth:`OrbiProvider.auth_ok`) lets
+        the probe verify auth the SAME way for every brand, instead of relying on a
+        connect-raises convention that is faithful for this brand but not for a
+        best-effort one.
+        """
+        return self._client is not None
 
     def _refine_brand(self) -> None:
         """Best-effort: turn ``sagemcom`` into ``sagemcom-<model>`` post-connect."""

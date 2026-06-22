@@ -181,7 +181,7 @@ def _handle_failure(
 
 def guarded_apply(
     provider: DeviceProvider,
-    change: Callable[[DeviceProvider], None],
+    change: Callable[[DeviceProvider], OpResult | None],
     verify_fn: Callable[[], bool],
     *,
     confirm: Callable[[str], bool],
@@ -198,15 +198,23 @@ def guarded_apply(
     2. **Confirm.** Unless ``force`` is set, call ``confirm(plan)``; a falsey return
        aborts with ``ok=False`` and *no* mutation. ``force=True`` skips this gate
        entirely (the ``confirm`` callable is never invoked).
-    3. **Apply.** Run ``change(provider)``. If it raises mid-flight, the change is
-       treated as failed-verify: roll back (when ``rollback``) and report ``ok=False``
-       — a half-applied device is the most dangerous state, so we always try to
-       restore it.
+    3. **Apply.** Run ``change(provider)``. Two ways the change can fail:
+
+       * it **raises** mid-flight — the worst case (a half-applied device); or
+       * it **returns an** :class:`~sanctum_cli.devices.base.OpResult` **with**
+         ``ok=False`` — a *return-convention* provider (FirewallaProvider.set,
+         OrbiProvider.set on an unwritable leaf) signals a refused write by
+         returning ``ok=False`` rather than raising. The rails INSPECT what the
+         closure returns: an ``ok=False`` is treated identically to a raise (roll
+         back when ``rollback``, report ``ok=False``), so NO call site can silently
+         discard an ``ok=False`` by returning it through (the P2 low finding). A
+         returned ``None`` (the closure performed its own check, or the provider
+         raises on failure) or an ``ok=True`` OpResult falls through to verify.
     4. **Verify.** Call ``verify_fn()``. ``True`` commits (state kept, ``ok=True``).
-    5. **Rollback.** On a falsey verify (or a raised change) *and* ``rollback=True``,
-       call ``provider.rollback(snapshot)`` to restore the captured state and report
-       ``ok=False``. With ``rollback=False`` the (failed) change is left in place so
-       an operator can inspect it — still ``ok=False``.
+    5. **Rollback.** On a falsey verify (or a raised / ``ok=False``-returning change)
+       *and* ``rollback=True``, call ``provider.rollback(snapshot)`` to restore the
+       captured state and report ``ok=False``. With ``rollback=False`` the (failed)
+       change is left in place so an operator can inspect it — still ``ok=False``.
 
     Every terminal outcome appends one line to the audit log (``log_path`` or
     :data:`DEFAULT_AUDIT_LOG`). Returns an :class:`~sanctum_cli.devices.base.OpResult`
@@ -242,7 +250,7 @@ def guarded_apply(
 
     # Gate 3: apply. A raised change is the worst case — restore if we can.
     try:
-        change(provider)
+        outcome = change(provider)
     except Exception as exc:  # any failure mid-change must trip rollback
         return _handle_failure(
             provider,
@@ -250,6 +258,22 @@ def guarded_apply(
             path,
             before=before,
             reason=f"change raised ({exc})",
+            rollback=rollback,
+        )
+
+    # A return-convention provider signals a refused write by RETURNING ok=False
+    # (it never raised). guarded_apply can only act on what it can SEE, so it
+    # inspects the returned OpResult: an ok=False is a failed apply (treated like a
+    # raise) and must NOT be allowed to reach the verify gate and commit. This
+    # closes the P2 low finding — a closure that returns the OpResult straight
+    # through can no longer silently discard an ok=False.
+    if outcome is not None and not outcome.ok:
+        return _handle_failure(
+            provider,
+            snap,
+            path,
+            before=before,
+            reason=f"change reported ok=False ({outcome.detail})",
             rollback=rollback,
         )
 

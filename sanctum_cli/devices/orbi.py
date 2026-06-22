@@ -128,6 +128,14 @@ class OrbiProvider:
 
     def __init__(self) -> None:
         self._client: Any = None
+        # Whether the last connect() genuinely authenticated. ``connect`` is
+        # deliberately BEST-EFFORT (it never raises on a rejected/unreachable
+        # login — we have no live creds yet, so the build must not block on a live
+        # call), so "connect did not raise" is NOT proof of auth for this brand.
+        # This flag records the real ``login()`` outcome so an auth-probe caller
+        # (onboard's pairing gate) can positively verify the session is authed via
+        # :meth:`auth_ok` instead of mis-reading a tolerated failure as success.
+        self._authed: bool = False
 
     @staticmethod
     def detect(net: NetContext) -> float:
@@ -158,7 +166,17 @@ class OrbiProvider:
             msg = "Orbi requires creds (host/username); got None"
             raise DeviceError(msg, fix="pass Creds(host=..., username='admin')")
 
-        password = keychain.read(account=KEYCHAIN_ACCOUNT, service=KEYCHAIN_SERVICE)
+        # Read the password under the RESOLVED (service, account) the CLI threaded
+        # through Creds — NOT the brand constants — so a haus that overrides
+        # devices.orbi.keychain.{service,account} actually reads from its own entry.
+        # The username is the resolved account; keychain_service is the resolved
+        # service. Both fall back to this module's per-brand default when the
+        # caller did not resolve them (a direct connect, e.g. in a test, or the
+        # default haus path — which resolves to exactly these constants anyway, so
+        # the default behavior is unchanged).
+        account = creds.username or KEYCHAIN_ACCOUNT
+        service = creds.keychain_service or KEYCHAIN_SERVICE
+        password = keychain.read(account=account, service=service)
         authed = Creds(
             host=creds.host,
             username=creds.username,
@@ -167,19 +185,38 @@ class OrbiProvider:
         )
         client = _make_client(authed)
         self._client = client
+        self._authed = False
         # Login is best-effort: a failed/unreachable login must not raise at
         # connect (we have no live creds yet). The client is retained either way;
         # a later get/set raises DeviceError on the transport failure per contract.
         # ``pynetgear.login()`` returns a bool — False (or any falsey) means the
         # box rejected the creds, so we do NOT refine the brand off a session that
         # is not authed (a stale get_info read could otherwise mislead). Only a
-        # truthy login refines ``brand`` to the concrete model.
+        # truthy login refines ``brand`` to the concrete model AND records the
+        # session as genuinely authenticated (see :meth:`auth_ok`).
         try:
             ok = client.login()
         except Exception:  # tolerate any login transport error (best-effort connect)
             return
         if ok:
+            self._authed = True
             self._refine_brand()
+
+    def auth_ok(self) -> bool:
+        """True iff the last :meth:`connect` genuinely authenticated.
+
+        The explicit auth oracle a read-only auth-probe (onboard's pairing gate)
+        needs for this brand. Because :meth:`connect` is BEST-EFFORT — a wrong
+        password or an unreachable box is swallowed and connect returns cleanly —
+        "connect did not raise" is NOT proof the creds are good. A caller that
+        infers pairing success from a non-raising connect would persist a false
+        "paired" against a box it cannot authenticate to (the secret kept, a
+        ``devices.orbi`` block written), which bites on the first real
+        ``sanctum net orbi`` op. This returns the recorded ``login()`` outcome —
+        the authoritative auth signal — so the gate can fail-close correctly: a
+        rejected/unreachable Orbi yields ``False`` → revoke + no devices block.
+        """
+        return self._authed
 
     def _refine_brand(self) -> None:
         """Best-effort: turn ``orbi`` into ``orbi-<model>`` post-connect."""
@@ -206,6 +243,7 @@ class OrbiProvider:
         Protocol mandates.
         """
         self._client = None
+        self._authed = False
 
     def _raw_get_info(self) -> dict[str, Any] | None:
         client = self._require_client()

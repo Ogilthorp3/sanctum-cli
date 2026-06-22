@@ -60,12 +60,22 @@ class Creds:
     that authenticate with a key instead. Exactly which the provider uses is the
     provider's business — both fields are optional so a single shape covers
     password-auth hubs and key-auth firewalls alike.
+
+    ``keychain_service`` carries the *resolved* Keychain service name a
+    password-auth provider should read its secret under (the ``username`` is the
+    resolved Keychain *account*). It is the seam that lets a haus override
+    ``devices.<kind>.keychain.service`` reach the provider's Keychain read,
+    instead of the provider hardcoding its brand's service constant. ``None``
+    means "the caller did not resolve a service" — a provider then falls back to
+    its own per-brand default, so a direct ``connect`` (e.g. in a test) and the
+    default haus path are unchanged.
     """
 
     host: str
     username: str
     secret: str | None = None
     key_path: str | None = None
+    keychain_service: str | None = None
 
 
 @dataclass(frozen=True)
@@ -210,4 +220,30 @@ class DeviceProvider(Protocol):
 
     def rollback(self, snap: Snapshot) -> OpResult:
         """Restore the device to a previously captured :class:`Snapshot`."""
+        ...
+
+
+@runtime_checkable
+class AuthProbeProvider(Protocol):
+    """An OPTIONAL provider capability: a positive, post-connect auth oracle.
+
+    Some providers' :meth:`DeviceProvider.connect` re-raise on a failed login
+    (fail-closed — e.g. the Sagemcom hub), so "connect did not raise" is itself
+    proof of authentication. But a BEST-EFFORT ``connect`` (e.g. the NETGEAR Orbi,
+    which tolerates a wrong password / unreachable box and returns cleanly so the
+    build never blocks on a live call) does NOT raise on a rejected login — so a
+    non-raising connect is NOT proof the creds are good.
+
+    A provider whose ``connect`` is best-effort MUST implement this so a read-only
+    auth-probe (onboard's pairing gate) can POSITIVELY verify the session
+    authenticated, rather than mis-reading a tolerated failure as success and
+    persisting a false "paired". ``auth_ok`` reads the recorded login outcome (or
+    confirms an authenticated read) — it opens no new session and mutates nothing,
+    so it is safe on the read-only probe path. The probe uses a structural
+    ``isinstance`` check, so a fail-closed provider that omits this is unaffected
+    (its connect-raises convention is the auth oracle).
+    """
+
+    def auth_ok(self) -> bool:
+        """True iff the last :meth:`DeviceProvider.connect` genuinely authenticated."""
         ...
