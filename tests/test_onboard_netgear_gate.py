@@ -114,7 +114,10 @@ def _invoke_family_onboard_yes() -> tuple[int, str]:
         patch("sanctum_cli.commands.onboard.backup_cmd.backup_estimate"),
         patch("sanctum_cli.commands.onboard.backup_cmd.backup_run"),
         patch("sanctum_cli.commands.onboard._dispatch_cloud_setup"),
-        patch("sanctum_cli.commands.onboard._run_canary"),
+        patch(
+            "sanctum_cli.commands.onboard._run_canary",
+            return_value=onboard.CanaryOutcome.VERIFIED,
+        ),
     ):
         result = runner.invoke(app, ["onboard", "--recipe", "family", "--yes"])
     return result.exit_code, " ".join(result.stdout.split())
@@ -343,7 +346,10 @@ def test_paired_gate_writes_hostile_password_verbatim_to_keychain_seam(
         patch("sanctum_cli.commands.onboard.backup_cmd.backup_estimate"),
         patch("sanctum_cli.commands.onboard.backup_cmd.backup_run"),
         patch("sanctum_cli.commands.onboard._dispatch_cloud_setup"),
-        patch("sanctum_cli.commands.onboard._run_canary"),
+        patch(
+            "sanctum_cli.commands.onboard._run_canary",
+            return_value=onboard.CanaryOutcome.VERIFIED,
+        ),
         patch("sanctum_cli.commands.onboard._run_identity_setup"),
         patch("sanctum_cli.commands.onboard._run_family_setup"),
         patch("sanctum_cli.commands.onboard._run_firewalla_pairing"),

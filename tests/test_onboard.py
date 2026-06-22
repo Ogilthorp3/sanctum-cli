@@ -17,6 +17,8 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
+    from sanctum_cli.config import Config
+
 runner = CliRunner()
 
 
@@ -51,11 +53,17 @@ def test_onboard_data_block_internal_order_is_invariant(
 
         return _fn
 
+    def _record_canary(*_a: object, **_k: object) -> onboard.CanaryOutcome:
+        # Records the call AND returns a valid outcome (the canary now returns a
+        # CanaryOutcome the orchestrator threads into the recap/green-check).
+        calls.append("canary")
+        return onboard.CanaryOutcome.VERIFIED
+
     with (
         patch("sanctum_cli.commands.onboard.backup_cmd.backup_estimate", _record("estimate")),
         patch("sanctum_cli.commands.onboard.backup_cmd.backup_run", _record("backup")),
         patch("sanctum_cli.commands.onboard._dispatch_cloud_setup", _record("cloud")),
-        patch("sanctum_cli.commands.onboard._run_canary", _record("canary")),
+        patch("sanctum_cli.commands.onboard._run_canary", _record_canary),
         patch("sanctum_cli.commands.screen_time._fetch_bridge_json", lambda path: None),
     ):
         result = runner.invoke(app, ["onboard", "--recipe", "family", "--yes"])
@@ -74,7 +82,10 @@ def test_onboard_with_existing_cloud_skips_setup_and_runs_backup(
         patch("sanctum_cli.commands.onboard.backup_cmd.backup_estimate") as estimate,
         patch("sanctum_cli.commands.onboard.backup_cmd.backup_run") as run_,
         patch("sanctum_cli.commands.onboard._dispatch_cloud_setup") as setup,
-        patch("sanctum_cli.commands.onboard._run_canary") as canary,
+        patch(
+            "sanctum_cli.commands.onboard._run_canary",
+            return_value=onboard.CanaryOutcome.VERIFIED,
+        ) as canary,
     ):
         result = runner.invoke(app, ["onboard", "--recipe", "family", "--yes"])
 
@@ -95,7 +106,10 @@ def test_onboard_runs_setup_when_cloud_unconfigured(
         patch("sanctum_cli.commands.onboard.backup_cmd.backup_estimate"),
         patch("sanctum_cli.commands.onboard.backup_cmd.backup_run"),
         patch("sanctum_cli.commands.onboard._dispatch_cloud_setup") as setup,
-        patch("sanctum_cli.commands.onboard._run_canary"),
+        patch(
+            "sanctum_cli.commands.onboard._run_canary",
+            return_value=onboard.CanaryOutcome.VERIFIED,
+        ),
         patch("sanctum_cli.commands.onboard.config.load") as load,
     ):
         # First load: no cloud_backup; second load: simulate it after setup.
@@ -117,7 +131,10 @@ def test_onboard_family_shows_photos_warning(
         patch("sanctum_cli.commands.onboard.backup_cmd.backup_estimate"),
         patch("sanctum_cli.commands.onboard.backup_cmd.backup_run"),
         patch("sanctum_cli.commands.onboard._dispatch_cloud_setup"),
-        patch("sanctum_cli.commands.onboard._run_canary"),
+        patch(
+            "sanctum_cli.commands.onboard._run_canary",
+            return_value=onboard.CanaryOutcome.VERIFIED,
+        ),
     ):
         result = runner.invoke(app, ["onboard", "--recipe", "family", "--yes"])
     assert result.exit_code == 0
@@ -132,7 +149,10 @@ def test_onboard_operator_skips_photos_warning(
         patch("sanctum_cli.commands.onboard.backup_cmd.backup_estimate"),
         patch("sanctum_cli.commands.onboard.backup_cmd.backup_run"),
         patch("sanctum_cli.commands.onboard._dispatch_cloud_setup"),
-        patch("sanctum_cli.commands.onboard._run_canary"),
+        patch(
+            "sanctum_cli.commands.onboard._run_canary",
+            return_value=onboard.CanaryOutcome.VERIFIED,
+        ),
     ):
         result = runner.invoke(app, ["onboard", "--recipe", "operator", "--yes"])
     assert result.exit_code == 0
@@ -168,7 +188,10 @@ def _invoke_family_onboard() -> tuple[int, str]:
         patch("sanctum_cli.commands.onboard.backup_cmd.backup_estimate"),
         patch("sanctum_cli.commands.onboard.backup_cmd.backup_run"),
         patch("sanctum_cli.commands.onboard._dispatch_cloud_setup"),
-        patch("sanctum_cli.commands.onboard._run_canary"),
+        patch(
+            "sanctum_cli.commands.onboard._run_canary",
+            return_value=onboard.CanaryOutcome.VERIFIED,
+        ),
     ):
         result = runner.invoke(app, ["onboard", "--recipe", "family", "--yes"])
     return result.exit_code, " ".join(result.stdout.split())
@@ -265,7 +288,10 @@ def _invoke_family_onboard_interactive(input_text: str) -> tuple[int, str]:
         patch("sanctum_cli.commands.onboard.backup_cmd.backup_estimate"),
         patch("sanctum_cli.commands.onboard.backup_cmd.backup_run"),
         patch("sanctum_cli.commands.onboard._dispatch_cloud_setup"),
-        patch("sanctum_cli.commands.onboard._run_canary"),
+        patch(
+            "sanctum_cli.commands.onboard._run_canary",
+            return_value=onboard.CanaryOutcome.VERIFIED,
+        ),
         # Firewalla pairing + the AI-providers chapter are separate interactive
         # gates (own tests); the family-interview tests mock them out so they
         # don't consume their stdin.
@@ -488,3 +514,187 @@ def test_onboard_family_interview_collects_child_device_mac(
     assert data["family"]["maya"]["personal_devices"] == [
         {"name": "Maya iPhone", "mac": "AA:BB:CC:DD:EE:FF"}
     ]
+
+
+# ── Boundary: _run_canary returns its REAL outcome (Contracts at the Boundary) ──
+# The false-verify bug: the orchestrator UNCONDITIONALLY printed "Backup verified by
+# restore canary ✓" + a "backup + canary" recap row regardless of whether the canary
+# actually round-tripped. These tests drive the REAL `_run_canary` (mocking ONLY the
+# cheap restic subprocess + the file reads — never a stub of the function under test)
+# and assert it RETURNS the honest tri-state: FAILED on a restic-restore failure and
+# on a sha mismatch, SKIPPED on the various pre-conditions, VERIFIED only on a clean
+# round-trip. The orchestrator gates the green-check + recap row on that return — so
+# proving the return is honest proves the user is never told "verified" when it wasn't.
+
+
+def _canary_cfg(repo: str = "/tmp/sanctum-canary-repo") -> Config:
+    """A Config with a configured cloud_backup.primary so the canary proceeds past skip."""
+    from sanctum_cli.config import (
+        CliConfig,
+        CloudBackup,
+        CloudBackupRepo,
+        Config,
+        InstanceMetadata,
+        KeychainRef,
+    )
+
+    return Config(
+        instance=InstanceMetadata(name="t", slug="t"),
+        cli=CliConfig(
+            cloud_backup=CloudBackup(
+                primary=CloudBackupRepo(
+                    kind="restic",
+                    repo=repo,
+                    keychain=KeychainRef(service="svc", account="acct"),
+                )
+            )
+        ),
+    )
+
+
+def _run_real_canary_with(
+    *,
+    restic_returncode: int,
+    restored_bytes: bytes | None,
+    live_bytes: bytes = b"export PATH=/usr/bin\n",
+) -> onboard.CanaryOutcome:
+    """Drive the REAL _run_canary, mocking only the cheap restic call + the file reads.
+
+    ``restored_bytes is None`` simulates the restored file being absent; otherwise it
+    is the bytes the canary reads back from the restore target. ``live_bytes`` is what
+    the live ``~/.zshrc`` reads as. restic's returncode is honored (non-zero == restore
+    failed). Nothing about ``_run_canary`` itself is stubbed — we exercise the real
+    sha-diff and branch logic, the boundary the bug lived at.
+    """
+    import subprocess
+    from pathlib import Path
+
+    fake_proc = subprocess.CompletedProcess(
+        args=["restic"], returncode=restic_returncode, stdout="", stderr="boom"
+    )
+
+    real_read_bytes = Path.read_bytes
+    real_exists = Path.exists
+
+    def fake_read_bytes(self: Path) -> bytes:
+        # The live probe is ~/.zshrc; the restored file lives under the temp restore dir.
+        if str(self).endswith(".zshrc") and "sanctum-onboard-canary" not in str(self):
+            return live_bytes
+        if restored_bytes is not None:
+            return restored_bytes
+        return real_read_bytes(self)
+
+    def fake_exists(self: Path) -> bool:
+        if str(self).endswith(".zshrc") and "sanctum-onboard-canary" not in str(self):
+            return True
+        if "sanctum-onboard-canary" in str(self):
+            return restored_bytes is not None
+        return real_exists(self)
+
+    with (
+        patch("sanctum_cli.commands.onboard.config.load", return_value=_canary_cfg()),
+        patch("sanctum_cli.keychain.read", return_value="restic-pw"),
+        patch("subprocess.run", return_value=fake_proc),
+        patch.object(Path, "read_bytes", fake_read_bytes),
+        patch.object(Path, "exists", fake_exists),
+    ):
+        return onboard._run_canary()
+
+
+def test_run_canary_returns_failed_on_restic_restore_failure() -> None:
+    """restic restore returncode != 0 → CanaryOutcome.FAILED (NOT verified)."""
+    outcome = _run_real_canary_with(restic_returncode=1, restored_bytes=b"whatever")
+    assert outcome is onboard.CanaryOutcome.FAILED
+
+
+def test_run_canary_returns_failed_on_sha_mismatch() -> None:
+    """Restored bytes differ from live → sha mismatch → CanaryOutcome.FAILED."""
+    outcome = _run_real_canary_with(
+        restic_returncode=0,
+        restored_bytes=b"DIFFERENT CONTENT - corrupted restore\n",
+        live_bytes=b"export PATH=/usr/bin\n",
+    )
+    assert outcome is onboard.CanaryOutcome.FAILED
+
+
+def test_run_canary_returns_verified_on_clean_round_trip() -> None:
+    """Restored bytes == live bytes → CanaryOutcome.VERIFIED."""
+    same = b"export PATH=/usr/bin\n"
+    outcome = _run_real_canary_with(restic_returncode=0, restored_bytes=same, live_bytes=same)
+    assert outcome is onboard.CanaryOutcome.VERIFIED
+
+
+def test_run_canary_returns_skipped_when_no_cloud_primary() -> None:
+    """No cloud_backup.primary → canary cannot run → CanaryOutcome.SKIPPED."""
+    from sanctum_cli.config import CliConfig, Config, InstanceMetadata
+
+    cfg = Config(instance=InstanceMetadata(name="t", slug="t"), cli=CliConfig(cloud_backup=None))
+    with patch("sanctum_cli.commands.onboard.config.load", return_value=cfg):
+        assert onboard._run_canary() is onboard.CanaryOutcome.SKIPPED
+
+
+def test_run_canary_returns_skipped_when_restored_file_missing() -> None:
+    """restic succeeds but the restored file isn't on disk → SKIPPED (can't verify)."""
+    outcome = _run_real_canary_with(restic_returncode=0, restored_bytes=None)
+    assert outcome is onboard.CanaryOutcome.SKIPPED
+
+
+# ── Boundary: the ORCHESTRATOR threads the canary outcome into recap + green-check ──
+# These complement the unit tests above: they prove the orchestrator does not print a
+# false "verified" when _run_canary reports a real failure. The canary OUTCOME is
+# patched (the unit tests above already prove _run_canary derives it honestly from the
+# real restic/sha path) and we assert the rendered recap row + green-check track it.
+
+
+def _onboard_out_with_canary(
+    outcome: onboard.CanaryOutcome, full_yaml: Path, monkeypatch: pytest.MonkeyPatch
+) -> str:
+    monkeypatch.setenv("SANCTUM_INSTANCE_FILE", str(full_yaml))
+    with (
+        patch("sanctum_cli.commands.onboard.backup_cmd.backup_estimate"),
+        patch("sanctum_cli.commands.onboard.backup_cmd.backup_run"),
+        patch("sanctum_cli.commands.onboard._dispatch_cloud_setup"),
+        patch("sanctum_cli.commands.onboard._run_canary", return_value=outcome),
+        patch("sanctum_cli.commands.screen_time._fetch_bridge_json", lambda path: None),
+    ):
+        result = runner.invoke(app, ["onboard", "--recipe", "family", "--yes"])
+    assert result.exit_code == 0, result.stdout + (result.stderr or "")
+    return " ".join(result.stdout.split())
+
+
+def _data_recap_status(out: str) -> str:
+    """The recap-card row status for 'Your Data' (whitespace-normalized output)."""
+    card = out[out.index("your Sanctum at a glance") :]
+    after = card[card.index("Your Data") + len("Your Data") :]
+    # Next row label after Your Data in the recap is 'You'.
+    region = after[: after.index(" You ")] if " You " in after else after
+    return region.strip().lower()
+
+
+def test_orchestrator_canary_failed_renders_honestly_no_false_verified(
+    full_instance_yaml: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A FAILED canary must NOT print 'verified'; recap says FAILED/needs attention."""
+    out = _onboard_out_with_canary(onboard.CanaryOutcome.FAILED, full_instance_yaml, monkeypatch)
+    assert "verified by restore canary" not in out.lower(), out
+    status = _data_recap_status(out)
+    assert "verified" not in status, out
+    assert "fail" in status or "attention" in status, out
+
+
+def test_orchestrator_canary_skipped_renders_honestly_no_false_verified(
+    full_instance_yaml: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A SKIPPED canary must NOT print 'verified'; recap says skipped."""
+    out = _onboard_out_with_canary(onboard.CanaryOutcome.SKIPPED, full_instance_yaml, monkeypatch)
+    assert "verified by restore canary" not in out.lower(), out
+    assert "skip" in _data_recap_status(out), out
+
+
+def test_orchestrator_canary_verified_renders_verified(
+    full_instance_yaml: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The honest POSITIVE: a VERIFIED canary DOES print the verified green-check."""
+    out = _onboard_out_with_canary(onboard.CanaryOutcome.VERIFIED, full_instance_yaml, monkeypatch)
+    assert "verified by restore canary" in out.lower(), out
+    assert "verified" in _data_recap_status(out) or "✓" in _data_recap_status(out), out

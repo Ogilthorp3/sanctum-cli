@@ -29,6 +29,7 @@ from typer.testing import CliRunner
 
 from sanctum_cli import onboard_experience as ux
 from sanctum_cli.cli import app
+from sanctum_cli.commands import onboard
 from sanctum_cli.providers.base import HealthSnapshot
 
 if TYPE_CHECKING:
@@ -90,13 +91,23 @@ def test_green_check_renders_a_check_and_the_label() -> None:
 
 
 def test_recap_card_lists_configured_and_skipped_items() -> None:
-    """recap_card renders each (label, status) row — configured AND skipped alike."""
+    """recap_card renders each (label, status) row — configured AND skipped alike.
+
+    The 'Your Data' row status is DERIVED from a canary outcome via the same mapping
+    the orchestrator uses (`onboard._canary_recap_status`), not hard-coded — so this
+    test can't silently agree with a bug where the recap claims 'verified' regardless
+    of the real round-trip (the original hard-coded 'backup + canary ✓' shared exactly
+    that wrong assumption). Here we pass a VERIFIED outcome, so the row reads verified.
+    """
+    from sanctum_cli.commands.onboard import CanaryOutcome, _canary_recap_status
+
+    data_status = _canary_recap_status(CanaryOutcome.VERIFIED)
     out = _render(
         ux.recap_card(
             [
                 ("Your AI", "Claude · Gemini"),
                 ("Your Network", "skipped"),
-                ("Your Data", "backup + canary ✓"),
+                ("Your Data", data_status),
             ]
         )
     )
@@ -105,6 +116,9 @@ def test_recap_card_lists_configured_and_skipped_items() -> None:
     assert "Your Network" in out
     assert "skipped" in out
     assert "Your Data" in out
+    # The derived status is what's rendered — a VERIFIED outcome reads as verified,
+    # never a blanket 'verified' regardless of the real outcome.
+    assert data_status.split()[0].lower() in out.lower()
 
 
 def test_recap_card_with_empty_items_still_renders() -> None:
@@ -126,7 +140,10 @@ def _invoke_onboard_yes(recipe: str = "family") -> tuple[int, str]:
         patch("sanctum_cli.commands.onboard.backup_cmd.backup_estimate"),
         patch("sanctum_cli.commands.onboard.backup_cmd.backup_run"),
         patch("sanctum_cli.commands.onboard._dispatch_cloud_setup"),
-        patch("sanctum_cli.commands.onboard._run_canary"),
+        patch(
+            "sanctum_cli.commands.onboard._run_canary",
+            return_value=onboard.CanaryOutcome.VERIFIED,
+        ),
         patch("sanctum_cli.commands.screen_time._fetch_bridge_json", lambda path: None),
     ):
         result = runner.invoke(app, ["onboard", "--recipe", recipe, "--yes"])
@@ -259,7 +276,10 @@ def _invoke_onboard_interactive(input_text: str) -> tuple[int, str]:
         patch("sanctum_cli.commands.onboard.backup_cmd.backup_estimate"),
         patch("sanctum_cli.commands.onboard.backup_cmd.backup_run"),
         patch("sanctum_cli.commands.onboard._dispatch_cloud_setup"),
-        patch("sanctum_cli.commands.onboard._run_canary"),
+        patch(
+            "sanctum_cli.commands.onboard._run_canary",
+            return_value=onboard.CanaryOutcome.VERIFIED,
+        ),
         patch("sanctum_cli.commands.onboard._run_identity_setup", return_value=False),
         patch("sanctum_cli.commands.onboard._run_family_setup", return_value=False),
         patch("sanctum_cli.commands.onboard._run_firewalla_pairing", return_value=False),

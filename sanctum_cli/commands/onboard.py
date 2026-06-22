@@ -22,6 +22,7 @@ need to run. Existing operators can use the underlying primitives
 from __future__ import annotations
 
 import contextlib
+import enum
 import os
 import re
 import shutil
@@ -48,6 +49,46 @@ if TYPE_CHECKING:
     from sanctum_cli.devices.base import DeviceProvider, NetContext
 
 console = Console()
+
+
+# ── Restore-canary outcome (honest verify) ────────────────────────────
+# The "Your Data" chapter proves the backup round-trips by restoring a known file
+# and sha-diffing it against live. The orchestrator must report what ACTUALLY
+# happened — never a blanket "verified" — so the canary returns a tri-state the
+# recap + green-check thread, exactly as the AI/Network/You gates thread their
+# CONFIGURED bool (design spec §2: "guided + verify, never 'probably worked'"). The
+# canary is NON-BLOCKING: every path returns an outcome, none raises, onboarding
+# continues regardless.
+class CanaryOutcome(enum.Enum):
+    """The honest result of the restore canary.
+
+    * ``VERIFIED`` — the round-trip succeeded (restored sha == live sha).
+    * ``SKIPPED`` — the canary could not run (no configured repo, no ``~/.zshrc``,
+      restored file absent): not a failure, just nothing to prove.
+    * ``FAILED`` — the canary RAN and the restore did NOT round-trip (restic restore
+      errored, or the restored bytes differ from live): a real backup-integrity
+      problem the operator must see, never papered over with a green check.
+    """
+
+    VERIFIED = "verified"
+    SKIPPED = "skipped"
+    FAILED = "failed"
+
+
+def _canary_recap_status(outcome: CanaryOutcome) -> str:
+    """Map a canary outcome to its recap-card row status string.
+
+    VERIFIED → a configured/verified status; SKIPPED → a gentle "skipped"; FAILED →
+    an honest "FAILED — needs attention". Shared by the orchestrator and the recap
+    test so the test's expectation is DERIVED from the outcome (not hard-coded) — a
+    test cannot catch a bug it shares.
+    """
+    return {
+        CanaryOutcome.VERIFIED: "backup + canary ✓",
+        CanaryOutcome.SKIPPED: "backup ✓ · canary skipped",
+        CanaryOutcome.FAILED: "FAILED — needs attention",
+    }[outcome]
+
 
 # ── Optional-module gates ─────────────────────────────────────────────
 # Post-backup steps, keyed by recipe name and run in listed order. A gate
@@ -203,10 +244,12 @@ def _run_data_chapter(
     cfg: config.Config,
     rcp: config.Recipe,
     yes: bool,
-) -> None:
+) -> CanaryOutcome:
     """The "Your Data" chapter: estimate → cloud setup → dry-run → backup → canary.
 
-    The internal order is invariant (pinned by
+    Returns the restore canary's :class:`CanaryOutcome` so the orchestrator can gate
+    the green-check + recap row on the REAL round-trip result (never a blanket
+    "verified"). The internal order is invariant (pinned by
     ``test_onboard_data_block_internal_order_is_invariant``): the pre-flight estimate
     precedes the backup runs, which precede the restore canary (the canary
     round-trips exactly what the live backup just wrote). The two interactive
@@ -252,7 +295,7 @@ def _run_data_chapter(
 
     # Restore canary.
     console.print("\n  [bold]Restore canary[/]")
-    _run_canary()
+    return _run_canary()
 
 
 # ── Surface polish ────────────────────────────────────────────────────
@@ -355,9 +398,24 @@ def onboard_command(
     # preserved (pinned by test_onboard_data_block_internal_order_is_invariant).
     title, why = _ARC_CHAPTERS[1]
     console.print(chapter_banner(2, total, title, why))
-    _run_data_chapter(recipe=recipe, backend=backend, no_open=no_open, cfg=cfg, rcp=rcp, yes=yes)
-    console.print(green_check("Backup verified by restore canary"))
-    recap_rows.append((title, "backup + canary"))
+    canary = _run_data_chapter(
+        recipe=recipe, backend=backend, no_open=no_open, cfg=cfg, rcp=rcp, yes=yes
+    )
+    # HONEST VERIFY: the green-check + recap row reflect the REAL round-trip outcome —
+    # never a blanket "verified". Mirrors how the AI/Network/You gates thread their
+    # CONFIGURED bool (design spec §2: "guided + verify, never 'probably worked'").
+    if canary is CanaryOutcome.VERIFIED:
+        console.print(green_check("Backup verified by restore canary"))
+    elif canary is CanaryOutcome.FAILED:
+        console.print(
+            Text.assemble(
+                ("  ✗ ", "bold red"),
+                ("Backup canary FAILED — your restore did not round-trip", "red"),
+            )
+        )
+    else:  # SKIPPED
+        console.print("  [dim]Backup canary skipped — nothing to round-trip[/]")
+    recap_rows.append((title, _canary_recap_status(canary)))
 
     # ── Chapter 3 — You (operator identity + family setup gates) ──
     title, why = _ARC_CHAPTERS[2]
@@ -1902,8 +1960,19 @@ def _revoke_device_secret(*, service: str, account: str) -> None:
         )
 
 
-def _run_canary() -> None:
-    """Lightweight canary — restore ~/.zshrc, sha256-diff against live."""
+def _run_canary() -> CanaryOutcome:
+    """Lightweight canary — restore ~/.zshrc, sha256-diff against live.
+
+    Returns the honest :class:`CanaryOutcome` for EVERY path so the orchestrator can
+    thread it into the recap + green-check instead of declaring a blanket "verified":
+
+    * SKIPPED — no configured repo, no ``~/.zshrc``, or the restored file is absent.
+    * FAILED — restic restore errored, or the restored bytes don't match live (a real
+      backup-integrity problem the operator must see).
+    * VERIFIED — the round-trip succeeded.
+
+    NON-BLOCKING: this never raises; onboarding continues regardless of the outcome.
+    """
     import hashlib
     import os
     import subprocess
@@ -1916,11 +1985,11 @@ def _run_canary() -> None:
         console.print(
             "  [yellow]skipped[/] — no cloud_backup.primary; canary needs a configured repo"
         )
-        return
+        return CanaryOutcome.SKIPPED
     probe = Path("~/.zshrc").expanduser()
     if not probe.exists():
         console.print("  [yellow]skipped[/] — no ~/.zshrc on this host; nothing to round-trip")
-        return
+        return CanaryOutcome.SKIPPED
     live_sha = hashlib.sha256(probe.read_bytes()).hexdigest()
     console.print(f"  live ~/.zshrc sha256={live_sha[:16]}…")
 
@@ -1952,15 +2021,16 @@ def _run_canary() -> None:
         )
         if proc.returncode != 0:
             console.print(f"  [red]✗[/] restic restore failed: {proc.stderr.strip()[:160]}")
-            return
+            return CanaryOutcome.FAILED
         restored = Path(tmp) / probe.relative_to(probe.anchor)
         if not restored.exists():
             console.print(f"  [yellow]skipped[/] — restored file not found at {restored}")
-            return
+            return CanaryOutcome.SKIPPED
         restored_sha = hashlib.sha256(restored.read_bytes()).hexdigest()
         if restored_sha == live_sha:
             console.print("  [green]✓[/] canary survived round-trip")
-        else:
-            console.print(
-                f"  [red]✗[/] canary diff: live={live_sha[:16]} != restored={restored_sha[:16]}"
-            )
+            return CanaryOutcome.VERIFIED
+        console.print(
+            f"  [red]✗[/] canary diff: live={live_sha[:16]} != restored={restored_sha[:16]}"
+        )
+        return CanaryOutcome.FAILED
