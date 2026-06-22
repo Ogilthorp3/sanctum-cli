@@ -222,6 +222,35 @@ def test_net_firewalla_pause_apply_rolls_back_on_verify_fail(
     assert p.rollback_calls == 1  # the cutover was undone
 
 
+def test_net_firewalla_pause_apply_rolls_back_when_set_returns_not_ok(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bridge-REFUSED set (OpResult ok=False, no raise) must trip rollback + exit 1.
+
+    FirewallaProvider.set signals a refused write by RETURNING ok=False, not by
+    raising (the divergence from Sagemcom/Generic). guarded_apply only rolls back
+    when the change RAISES, so if firewalla_pause discarded the OpResult the rails
+    would commit and report a green check on a write the box refused — a silent
+    false-success on a security-relevant mutation. This is the contract the
+    happy-path FakeFirewalla.set (always ok=True) never exercises: here ``set``
+    returns ok=False and we assert the cutover is undone and the CLI exits 1.
+    """
+
+    class RefusingFirewalla(FakeFirewalla):
+        def set(self, path: str, value: str) -> OpResult:
+            self.set_calls.append((path, value))
+            return OpResult(ok=False, detail="bridge refused set", before=None, after=None)
+
+    p = RefusingFirewalla()
+    _point_registry_at(monkeypatch, p)
+    result = runner.invoke(
+        app, ["net", "firewalla", "pause", "7", "--apply", "--force"]
+    )
+    assert result.exit_code == 1, result.stdout
+    assert len(p.set_calls) == 1  # the set was attempted
+    assert p.rollback_calls == 1  # ...and the refused write was rolled back
+
+
 def test_net_firewalla_disconnects_even_when_command_errors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

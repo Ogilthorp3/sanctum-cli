@@ -13,7 +13,7 @@ from rich.markup import escape
 from sanctum_cli import config
 from sanctum_cli.devices import firewalla as firewalla_provider
 from sanctum_cli.devices import intents, rails, registry, sagemcom
-from sanctum_cli.devices.base import Capability, Creds, NetContext
+from sanctum_cli.devices.base import Capability, Creds, DeviceError, NetContext
 from sanctum_cli.errors import SanctumError
 from sanctum_cli.net import detect, playbooks, render, safety, speedtest, system, verify
 from sanctum_cli.net.types import SpeedReport, Verdict
@@ -691,7 +691,21 @@ def firewalla_pause(
             def change(pv: DeviceProvider) -> None:
                 # target was percent-encoded into pause_path at the boundary; the
                 # value carries the imperative action the bridge POST applies.
-                pv.set(pause_path, "paused")
+                #
+                # FirewallaProvider.set signals a refused write by RETURNING
+                # OpResult(ok=False) — it does NOT raise (unlike SagemcomProvider /
+                # GenericReadOnlyProvider, which raise DeviceError on failure).
+                # guarded_apply only trips rollback when the change RAISES; a plain
+                # return is taken as a successful apply. So we MUST convert the
+                # return-convention into the raise-convention here, or a
+                # bridge-refused pause would be reported ok=True ("verified: change
+                # committed") — a silent false-success on a security-relevant
+                # mutation (CLAUDE.md "Contracts at the Boundary": the cross-layer
+                # contract, not the field). Raising makes the rails snapshot →
+                # rollback → report ok=False / exit 1 as the spec §8 guarantees.
+                result = pv.set(pause_path, "paused")
+                if not result.ok:
+                    raise DeviceError(result.detail)
 
             result = rails.guarded_apply(
                 provider,
