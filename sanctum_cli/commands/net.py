@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import socket
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
 
@@ -10,14 +11,32 @@ from rich.console import Console
 from rich.markup import escape
 
 from sanctum_cli import config
+from sanctum_cli.devices import intents, rails, registry, sagemcom
+from sanctum_cli.devices.base import Capability, Creds, NetContext
+from sanctum_cli.errors import SanctumError
 from sanctum_cli.net import detect, playbooks, render, safety, speedtest, system, verify
 from sanctum_cli.net.types import SpeedReport, Verdict
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+    from sanctum_cli.devices.base import DeviceProvider
     from sanctum_cli.net.detect import HttpProbe, Runner
 
 console = Console()
+err_console = Console(stderr=True)
 net_app = typer.Typer(help="Network topology wizard and diagnostics.")
+
+
+def _report(exc: SanctumError) -> None:
+    """Pretty-print a SanctumError to stderr with its optional fix suggestion.
+
+    Mirrors ``sanctum_cli.cli._report`` but is defined locally to avoid importing
+    from ``cli`` (which imports this module — a circular dependency).
+    """
+    err_console.print(f"[bold red]error:[/] {exc.message}")
+    if exc.fix:
+        err_console.print(f"[dim]fix:[/] {exc.fix}")
 
 _SNAP_ROOT = Path.home() / ".sanctum" / "net-optimize"
 
@@ -254,3 +273,223 @@ def net_speedtest(
         print(json.dumps(_speed_to_dict(report), indent=2))
         return
     render.render_speed(console, report)
+
+
+# ─── hub (network-gear provider surface) ─────────────────────────────
+#
+# Importing sanctum_cli.devices.sagemcom self-registers SagemcomHubProvider under
+# kind="hub" (see the module footer), so registry.resolve("hub", net) can find it.
+# Referenced here so the import is never pruned as unused.
+_ = sagemcom
+
+hub_app = typer.Typer(help="Drive the network gateway (hub) through the device-provider rails.")
+net_app.add_typer(hub_app, name="hub")
+
+# DeviceInfo read paths the status summary surfaces. These are the generic
+# TR-069 DeviceInfo leaves; a provider that does not expose one returns None and
+# the summary prints a dash (the brand-agnostic-via-None contract). The
+# bridge-mode read path is NOT hardcoded here — it is resolved from the
+# provider's capability_op(BRIDGE_MODE), so a non-TR-069 hub reports bridge mode
+# via its own leaf.
+_HUB_MODEL_PATH = "Device/DeviceInfo/ModelName"
+_HUB_FIRMWARE_PATH = "Device/DeviceInfo/SoftwareVersion"
+
+# Where the hub admin password lives (mirrors the Sagemcom provider's keychain
+# tuple); used to build Creds before connect. The provider re-reads the secret
+# from the Keychain itself, so a missing secret here is fine for providers that
+# self-resolve credentials.
+_HUB_KEYCHAIN_ACCOUNT = sagemcom.KEYCHAIN_ACCOUNT
+_HUB_KEYCHAIN_SERVICE = sagemcom.KEYCHAIN_SERVICE
+
+
+def _hub_netcontext() -> NetContext:
+    """Build the NetContext the registry fingerprints the hub over.
+
+    Parses the default gateway from the real ``route`` probe (read-only) and
+    threads the real runner so a provider's ``detect()`` can probe without owning
+    its own subprocess plumbing. Monkeypatched in tests so no shell-out occurs.
+    """
+    gw = detect.parse_default_gateway(system.real_runner(("route",)))
+    return NetContext(gateway_ip=gw, runner=system.real_runner)
+
+
+def _hub_creds(net: NetContext) -> Creds:
+    """Assemble Creds for the resolved hub.
+
+    The host is the detected gateway IP; the username is the hub admin account.
+    The secret is left ``None`` on purpose — the provider reads the password from
+    the Keychain at connect time (credentials never flow through the CLI layer).
+    """
+    return Creds(
+        host=net.gateway_ip or "",
+        username=_HUB_KEYCHAIN_ACCOUNT,
+        secret=None,
+        key_path=None,
+    )
+
+
+def _resolve_hub() -> DeviceProvider:
+    """Resolve + connect the hub provider for the local network.
+
+    Detection is read-only; ``connect`` opens the authenticated session. Any
+    transport/auth failure raises a ``SanctumError`` (DeviceError) which the
+    command wrappers map to a clean exit code.
+
+    NOTE: the caller MUST release the provider via ``disconnect()`` — a connected
+    provider owns a transport (the Sagemcom provider holds a persistent asyncio
+    loop + a loop-bound aiohttp session). Use :func:`_connected_hub` (a
+    context manager) instead of calling this directly so teardown is guaranteed.
+
+    An optional instance.yaml ``devices.hub.brand`` pins the provider explicitly,
+    bypassing ``detect()``. This is the escape hatch for a hub whose read-only
+    probe is not implemented: without it, resolution depends on a working
+    ``detect()`` and a stubbed probe degrades the real hub to the read-only
+    fallback (status prints dashes; set/single-nat refuse). Pin ``sagemcom`` to
+    drive a Bell Home Hub end-to-end today.
+    """
+    net = _hub_netcontext()
+    pinned = config.instance_value("devices.hub.brand", None)
+    brand_pin = str(pinned) if pinned is not None else None
+    provider = registry.resolve("hub", net, brand_pin=brand_pin)
+    provider.connect(_hub_creds(net))
+    return provider
+
+
+@contextmanager
+def _connected_hub() -> Iterator[DeviceProvider]:
+    """Yield a connected hub provider, guaranteeing ``disconnect()`` on exit.
+
+    Closes the lifecycle gap behind every ``sanctum net hub ...`` command: the
+    Sagemcom provider opens a persistent event loop + a loop-bound aiohttp
+    session at ``connect`` that only ``disconnect()`` releases cleanly. Without
+    this each invocation leaked the loop/session to GC (a ResourceWarning, no
+    clean SAH logout). ``disconnect`` is part of the ``DeviceProvider`` Protocol
+    and is idempotent + safe even if ``connect`` failed, so the ``finally`` can
+    always call it.
+    """
+    provider = _resolve_hub()
+    try:
+        yield provider
+    finally:
+        provider.disconnect()
+
+
+@hub_app.command("status", help="Read-only hub summary: model, firmware, bridge-mode.")
+def hub_status() -> None:
+    try:
+        with _connected_hub() as provider:
+            model = provider.get(_HUB_MODEL_PATH)
+            firmware = provider.get(_HUB_FIRMWARE_PATH)
+            # Resolve the bridge-mode leaf from the provider's own vocabulary so
+            # the CLI never hardcodes a Bell XPath; None → the provider has no
+            # bridge-mode op and we print a dash.
+            bridge_op = provider.capability_op(Capability.BRIDGE_MODE)
+            bridge = provider.get(bridge_op.path) if bridge_op is not None else None
+            brand, kind = provider.brand, provider.kind
+    except SanctumError as exc:
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code)) from exc
+    console.print(f"[bold]hub:[/] {escape(brand)} ({escape(kind)})")
+    console.print(f"[bold]model:[/] {escape(model or '-')}")
+    console.print(f"[bold]firmware:[/] {escape(firmware or '-')}")
+    console.print(f"[bold]bridge-mode:[/] {escape(bridge or '-')}")
+
+
+@hub_app.command("get", help="Read one hub leaf value by its provider path.")
+def hub_get(
+    path: Annotated[str, typer.Argument(help="Provider-specific path (e.g. an XPath).")],
+) -> None:
+    try:
+        with _connected_hub() as provider:
+            value = provider.get(path)
+    except SanctumError as exc:
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code)) from exc
+    console.print(escape(value if value is not None else "-"))
+
+
+@hub_app.command("set", help="Write one hub leaf value, guarded by snapshot→verify→rollback.")
+def hub_set(
+    path: Annotated[str, typer.Argument(help="Provider-specific path (e.g. an XPath).")],
+    value: Annotated[str, typer.Argument(help="New value to write.")],
+    force: Annotated[
+        bool, typer.Option("--force", help="Skip the confirmation prompt.")
+    ] = False,
+    no_rollback: Annotated[
+        bool,
+        typer.Option("--no-rollback", help="Leave a failed change in place for inspection."),
+    ] = False,
+) -> None:
+    try:
+        with _connected_hub() as provider:
+
+            def change(pv: DeviceProvider) -> None:
+                # path/value are passed straight through to the provider, which owns
+                # the SAH-boundary encoding (the hostile-input contract is enforced
+                # at the provider's transport seam, not re-encoded here).
+                pv.set(path, value)
+
+            result = rails.guarded_apply(
+                provider,
+                change,
+                # No real-world verify wired for an arbitrary leaf set — a single
+                # write is committed if it does not raise. Intents (single-nat)
+                # carry their own real-site verify.
+                verify_fn=lambda: True,
+                confirm=lambda plan: typer.confirm(f"{plan}\nProceed?"),
+                force=force,
+                rollback=not no_rollback,
+            )
+    except SanctumError as exc:
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code)) from exc
+    if result.ok:
+        console.print(f"[green]✓[/] {escape(result.detail)}")
+    else:
+        console.print(f"[yellow]{escape(result.detail)}[/]")
+        raise typer.Exit(code=1)
+
+
+@hub_app.command(
+    "single-nat",
+    help="Put the hub in bridge mode (single NAT). Dry-run by default; pass --apply to fire.",
+)
+def hub_single_nat(
+    apply: Annotated[
+        bool,
+        typer.Option("--apply", help="Actually fire the cutover (attended-only; drops internet)."),
+    ] = False,
+    force: Annotated[
+        bool, typer.Option("--force", help="Skip the confirmation prompt (with --apply).")
+    ] = False,
+) -> None:
+    try:
+        with _connected_hub() as provider:
+            # Verify must run over the Firewalla-key-bound runner (the same one
+            # net_optimize/net_check use), NOT the bare system.real_runner. Only
+            # _build_runner() → make_real_runner() resolves the ("fw_wan_ip",) /
+            # ("fw_wan_mac",) tags over the SSH seam; the bare real_runner returns
+            # "" for them (system.py:18), which would make verify.verify see a
+            # None WAN IP — disabling the APIPA/DHCP-fail auto-rollback trigger and
+            # biasing classify_nat toward NOT-VERIFIED on a successful cutover.
+            result = intents.single_nat(
+                provider,
+                force=force,
+                apply=apply,
+                runner=_build_runner() if apply else None,
+                confirm=lambda plan: typer.confirm(f"{plan}\nProceed?"),
+            )
+    except SanctumError as exc:
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code)) from exc
+    for line in result.plan:
+        console.print(escape(line))
+    if not result.applied:
+        console.print("\n[dim]dry-run: no changes made. Re-run with --apply to fire.[/]")
+        return
+    assert result.result is not None  # apply path always carries an OpResult
+    if result.result.ok:
+        console.print(f"\n[green]✓[/] {escape(result.result.detail)}")
+    else:
+        console.print(f"\n[yellow]{escape(result.result.detail)}[/]")
+        raise typer.Exit(code=1)

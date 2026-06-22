@@ -33,6 +33,17 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# The Sagemcom F@st (Bell "Home Hub") SAH transport. It is an OPTIONAL runtime
+# dependency — the provider imports it lazily and degrades with a "pip install
+# sagemcom_api" hint if absent (see sanctum_cli/devices/sagemcom.py) — but the
+# boundary test in tests/devices/test_sagemcom_boundary.py drives the REAL
+# library encoding path on purpose, so it must be in any install set that runs
+# the gate. `dev` includes `hub` so `pip install -e ".[dev]"` (what make
+# check / CI / the overnight gate use) brings it in; the test still
+# `pytest.importorskip`s it so a contributor without the extra SKIPs (not ERRORs).
+hub = [
+  "sagemcom_api>=1.4,<2",
+]
 dev = [
   "pytest>=8.0",
   "pytest-cov>=5.0",
@@ -41,6 +52,7 @@ dev = [
   "mypy>=1.10",
   "types-PyYAML",
   "respx>=0.21",
+  "sanctum-cli[hub]",
 ]
 
 [project.scripts]
@@ -107,6 +119,13 @@ plugins = ["pydantic.mypy"]
 [[tool.mypy.overrides]]
 module = "tests.*"
 disallow_untyped_defs = false
+
+# sagemcom_api (the SAH transport for the Sagemcom hub provider) ships no
+# py.typed marker and no stubs. It is imported lazily inside _make_client and
+# wrapped behind the typed DeviceProvider surface, so treat it as untyped.
+[[tool.mypy.overrides]]
+module = "sagemcom_api.*"
+ignore_missing_imports = true
 
 # ─── pytest ──────────────────────────────────────────────────────────
 [tool.pytest.ini_options]
