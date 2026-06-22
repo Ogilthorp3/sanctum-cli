@@ -246,6 +246,98 @@ def test_guarded_apply_change_raises_rolls_back(tmp_path: Path) -> None:
     assert p.rollback_calls == 1
 
 
+class RollbackRaisesProvider(FakeProvider):
+    """A provider whose rollback transport dies mid-recovery (the 2 a.m. case)."""
+
+    def rollback(self, snap: Snapshot) -> OpResult:
+        self.rollback_calls += 1
+        msg = "transport unreachable during rollback"
+        raise RuntimeError(msg)
+
+
+class RollbackReportsFailureProvider(FakeProvider):
+    """A provider whose rollback returns ok=False (restored nothing)."""
+
+    def rollback(self, snap: Snapshot) -> OpResult:
+        self.rollback_calls += 1
+        return OpResult(ok=False, detail="rolled back 0 key(s)")
+
+
+def test_guarded_apply_rollback_raise_is_caught_not_propagated(tmp_path: Path) -> None:
+    """A rollback that RAISES must not propagate — surface a clean half-applied result."""
+    from sanctum_cli.devices.rails import MANUAL_RECOVERY_FIX, ROLLBACK_FAILED_PREFIX
+
+    log = tmp_path / "audit.jsonl"
+    p = RollbackRaisesProvider()
+    res = guarded_apply(
+        p,
+        _set_wan("xgspon"),
+        verify_fn=lambda: False,  # force the rollback path
+        confirm=lambda _plan: True,
+        force=True,
+        rollback=True,
+        log_path=log,
+    )
+    # No exception leaked; the result is a clean, legible failure.
+    assert res.ok is False
+    assert ROLLBACK_FAILED_PREFIX in res.detail
+    assert MANUAL_RECOVERY_FIX in res.detail
+    assert p.rollback_calls == 1
+    # The most dangerous outcome STILL gets a paper trail, marked not-restored.
+    rec = json.loads(log.read_text(encoding="utf-8").splitlines()[0])
+    assert rec["ok"] is False
+    assert rec["rolled_back"] is False
+
+
+def test_guarded_apply_rollback_failure_on_change_raise(tmp_path: Path) -> None:
+    """change raises AND rollback raises → still a clean half-applied result + audit."""
+    from sanctum_cli.devices.rails import ROLLBACK_FAILED_PREFIX
+
+    log = tmp_path / "audit.jsonl"
+    p = RollbackRaisesProvider()
+
+    def boom(pv: FakeProvider) -> None:
+        pv.set("WanMode", "xgspon")
+        msg = "change transport died"
+        raise RuntimeError(msg)
+
+    res = guarded_apply(
+        p,
+        boom,
+        verify_fn=lambda: True,
+        confirm=lambda _plan: True,
+        force=True,
+        rollback=True,
+        log_path=log,
+    )
+    assert res.ok is False
+    assert "change raised" in res.detail
+    assert ROLLBACK_FAILED_PREFIX in res.detail
+    rec = json.loads(log.read_text(encoding="utf-8").splitlines()[0])
+    assert rec["rolled_back"] is False
+
+
+def test_guarded_apply_rollback_reports_failure_is_not_success(tmp_path: Path) -> None:
+    """A rollback that RETURNS ok=False must be treated as a failed restore."""
+    from sanctum_cli.devices.rails import ROLLBACK_FAILED_PREFIX
+
+    log = tmp_path / "audit.jsonl"
+    p = RollbackReportsFailureProvider()
+    res = guarded_apply(
+        p,
+        _set_wan("xgspon"),
+        verify_fn=lambda: False,
+        confirm=lambda _plan: True,
+        force=True,
+        rollback=True,
+        log_path=log,
+    )
+    assert res.ok is False
+    assert ROLLBACK_FAILED_PREFIX in res.detail
+    rec = json.loads(log.read_text(encoding="utf-8").splitlines()[0])
+    assert rec["rolled_back"] is False
+
+
 def test_guarded_apply_default_log_path_under_sanctum() -> None:
     """The default audit path resolves under ~/.sanctum/logs/ (not written here)."""
     from pathlib import Path

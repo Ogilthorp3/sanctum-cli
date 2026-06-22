@@ -33,7 +33,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from sanctum_cli.devices.base import DeviceProvider, OpResult
+    from sanctum_cli.devices.base import DeviceProvider, OpResult, Snapshot
 
 # Where the device-mutation audit trail lands by default. Mirrors the rest of the
 # fleet's convention (~/.sanctum/logs/<name>-audit.jsonl, append-only, 0600). A
@@ -45,6 +45,36 @@ DEFAULT_AUDIT_LOG = Path.home() / ".sanctum/logs/netgear-audit.jsonl"
 def _plan_text(provider: DeviceProvider) -> str:
     """A short human-readable description of what is about to be mutated."""
     return f"apply change to {provider.brand} ({provider.kind})"
+
+
+# Surfaced verbatim when a rollback ITSELF fails — the worst-case 2 a.m. path
+# (the change that triggered rollback may have killed the route to the hub). The
+# operator must know the device is half-applied and how to recover by hand.
+ROLLBACK_FAILED_PREFIX = "ROLLBACK FAILED — device left half-applied"
+MANUAL_RECOVERY_FIX = (
+    "restore the hub manually: open its admin UI (or re-run once the transport "
+    "is reachable) and revert the change to the pre-cutover state."
+)
+
+
+def _attempt_rollback(provider: DeviceProvider, snap: Snapshot) -> tuple[bool, str | None]:
+    """Try ``provider.rollback(snap)``; never raise.
+
+    Returns ``(restored, error)``: ``restored`` is True only when the provider
+    reported a successful restore (``OpResult.ok``); ``error`` is a short reason
+    string when the rollback raised or reported failure, else ``None``. Wrapping
+    this is essential — a rollback that raises (transport died after the change
+    dropped the WAN, a very plausible state) would otherwise propagate raw past
+    the audit + return, leaving the most dangerous outcome with no paper trail
+    and only a stack trace for the operator.
+    """
+    try:
+        res = provider.rollback(snap)
+    except Exception as exc:  # the rollback transport can die mid-recovery
+        return False, str(exc)
+    if not res.ok:
+        return False, res.detail
+    return True, None
 
 
 def _audit(
@@ -88,6 +118,65 @@ def _audit(
         # Audit is a best-effort side channel; a write failure must not change the
         # operational outcome the caller is relying on.
         pass
+
+
+def _handle_failure(
+    provider: DeviceProvider,
+    snap: Snapshot,
+    log_path: Path,
+    *,
+    before: str | None,
+    reason: str,
+    rollback: bool,
+) -> OpResult:
+    """Build the OpResult + audit line for a failed apply (raised or verify-fail).
+
+    Distinguishes three terminal states so the operator is never misled:
+
+    * ``rollback=False`` → the failed change is left in place for inspection.
+    * rollback ran and the device was restored → "rolled back".
+    * **rollback was attempted and FAILED** → the device is half-applied. This is
+      the worst case (e.g. the household internet is still down) and was the only
+      branch with no defensive handling: a raising ``rollback`` used to propagate
+      past the audit + return. We now catch it, audit it distinctly
+      (``ok=False, rolled_back=False``), and put an explicit manual-recovery
+      instruction in ``detail`` so the CLI surfaces it instead of a stack trace.
+    """
+    from sanctum_cli.devices.base import OpResult
+
+    if not rollback:
+        detail = f"{reason}: left in place"
+        result = OpResult(ok=False, detail=detail, before=before, after=None)
+        _audit(
+            log_path,
+            brand=provider.brand,
+            kind=provider.kind,
+            ok=False,
+            detail=detail,
+            rolled_back=False,
+            before=before,
+            after=None,
+        )
+        return result
+
+    restored, rb_error = _attempt_rollback(provider, snap)
+    if restored:
+        detail = f"{reason}: rolled back"
+    else:
+        # The dangerous half-applied state: name it loudly + how to recover.
+        detail = f"{reason}: {ROLLBACK_FAILED_PREFIX} ({rb_error}). {MANUAL_RECOVERY_FIX}"
+    result = OpResult(ok=False, detail=detail, before=before, after=None)
+    _audit(
+        log_path,
+        brand=provider.brand,
+        kind=provider.kind,
+        ok=False,
+        detail=detail,
+        rolled_back=restored,
+        before=before,
+        after=None,
+    )
+    return result
 
 
 def guarded_apply(
@@ -155,23 +244,14 @@ def guarded_apply(
     try:
         change(provider)
     except Exception as exc:  # any failure mid-change must trip rollback
-        rolled_back = False
-        if rollback:
-            provider.rollback(snap)
-            rolled_back = True
-        detail = f"change raised ({exc}); {'rolled back' if rolled_back else 'left in place'}"
-        result = OpResult(ok=False, detail=detail, before=before, after=None)
-        _audit(
+        return _handle_failure(
+            provider,
+            snap,
             path,
-            brand=provider.brand,
-            kind=provider.kind,
-            ok=False,
-            detail=detail,
-            rolled_back=rolled_back,
             before=before,
-            after=None,
+            reason=f"change raised ({exc})",
+            rollback=rollback,
         )
-        return result
 
     # Gates 4 + 5: verify, then commit or roll back.
     verified = verify_fn()
@@ -190,20 +270,11 @@ def guarded_apply(
         )
         return result
 
-    rolled_back = False
-    if rollback:
-        provider.rollback(snap)
-        rolled_back = True
-    detail = "verify failed: " + ("rolled back" if rolled_back else "left in place")
-    result = OpResult(ok=False, detail=detail, before=before, after=None)
-    _audit(
+    return _handle_failure(
+        provider,
+        snap,
         path,
-        brand=provider.brand,
-        kind=provider.kind,
-        ok=False,
-        detail=detail,
-        rolled_back=rolled_back,
         before=before,
-        after=None,
+        reason="verify failed",
+        rollback=rollback,
     )
-    return result
