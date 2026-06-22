@@ -458,16 +458,23 @@ def onboard_command(
     except OSError:
         who = os.environ.get("USER", "friend")
 
+    # The "verified the restore" boast is true ONLY on a clean round-trip — never
+    # claim it over a failed/skipped canary (the panel must agree with the recap).
+    _tail = (
+        "From here, Sanctum keeps running in the background — daily backups, "
+        "drift heals, audit trails — without asking you to do anything. The "
+        "next time you'll hear from it is when something interesting happens.\n"
+    )
+    if canary is CanaryOutcome.VERIFIED:
+        _intro = (
+            "It just ran its first backup and verified the restore by round-"
+            "tripping a known file through your cloud bucket. " + _tail
+        )
+    else:
+        _intro = _tail
     body = Group(
         Text.from_markup(f"[bold green]Your Sanctum is alive, {who}.[/]\n"),
-        Text.from_markup(
-            "It just ran its first backup and verified the restore by round-"
-            "tripping a known file through your cloud bucket. From here, "
-            "Sanctum keeps running in the background — daily backups, drift "
-            "heals, audit trails — without asking you to do anything. The "
-            "next time you'll hear from it is when something interesting "
-            "happens.\n"
-        ),
+        Text.from_markup(_intro),
         Text.from_markup("[dim]A few things to try when you're curious:[/]"),
         Text.from_markup(
             "  [cyan]sanctum status[/]            the whole haus at a glance\n"

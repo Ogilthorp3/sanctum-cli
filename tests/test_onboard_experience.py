@@ -243,6 +243,8 @@ def test_onboard_failed_canary_does_not_claim_setup_verified(
     out = " ".join(result.stdout.split())
     assert result.exit_code == 0, out
     assert "Setup verified" not in out, out  # never claimed over a failed canary
+    assert "verified the restore" not in out, out  # nor in the celebratory panel prose
+    assert "round-tripping" not in out, out  # the panel must agree with the recap
     assert "needs attention" in out, out  # the honest closing
     assert "Your Sanctum is alive" in out, out  # still alive via the mlx_local floor
 

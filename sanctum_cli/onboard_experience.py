@@ -91,8 +91,14 @@ def recap_card(items: list[tuple[str, str]]) -> Panel:
     table.add_column(justify="left", style="bold")
     table.add_column(justify="left")
     for label, status in items:
-        is_skip = status.strip().lower().startswith("skip")
-        status_text = Text(status, style="dim" if is_skip else "green")
+        low = status.strip().lower()
+        if "fail" in low or "needs attention" in low:
+            style = "yellow"  # a failure is NEVER shown in the success colour
+        elif "skip" in low:
+            style = "dim"  # a skipped piece is a gentle note, not a failure
+        else:
+            style = "green"
+        status_text = Text(status, style=style)
         table.add_row(Text(label), status_text)
     return Panel.fit(
         table,
