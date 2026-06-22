@@ -195,85 +195,55 @@ def test_net_firewalla_flows_prints_flow_read(
     assert p.set_calls == []  # read never mutates
 
 
-# ── pause (mutating → guarded_apply rails, dry-run default) ────────────
+# ── pause (DESCOPED to read-only preview — bridge routes do not exist yet) ──
+#
+# The mutating apply path is descoped (Task 6 finding 2): POST /policies/<id>/pause
+# (apply) and POST /policies/restore (rollback) appear NOWHERE in the established
+# Firewalla bridge contract — the shipping screen_time surface only GETs /info,
+# /policies, /host/<mac>, /hosts and references the one documented mutate
+# /policies/purge. Against the real box both invented routes 404, so the productized
+# pause/rollback path cannot succeed and emits a "ROLLBACK FAILED" message on the
+# happy path. Pause is therefore a read-only PREVIEW until the routes exist + an
+# env-gated contract smoke confirms their shapes. The rails-level contract for the
+# return-convention adapter (finding 1) lives durably in test_rails.py for the
+# future re-enable.
 
 
-def test_net_firewalla_pause_dryrun_mutates_nothing(
+def test_net_firewalla_pause_preview_mutates_nothing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`net firewalla pause <target>` with no --apply prints the plan, mutates nothing."""
+    """`net firewalla pause <target>` prints the preview plan and mutates nothing."""
     p = FakeFirewalla()
     _point_registry_at(monkeypatch, p)
     result = runner.invoke(app, ["net", "firewalla", "pause", "7"])
     assert result.exit_code == 0, result.stdout
     out = result.stdout
-    assert "7" in out  # the target policy is named in the plan
-    # The hard guardrail: a dry-run fires ZERO mutations.
+    assert "7" in out  # the target policy is named in the preview plan
+    # The hard guardrail: a preview fires ZERO mutations.
     assert p.set_calls == []
     assert p.rollback_calls == 0
 
 
-def test_net_firewalla_pause_apply_force_mutates_via_rails(
+def test_net_firewalla_pause_apply_is_descoped_and_fires_nothing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`net firewalla pause <target> --apply --force` flips the policy via the rails."""
-    p = FakeFirewalla()
-    _point_registry_at(monkeypatch, p)
-    result = runner.invoke(
-        app, ["net", "firewalla", "pause", "7", "--apply", "--force"]
-    )
-    assert result.exit_code == 0, result.stdout
-    # The mutating op fired through the provider's set (the pause endpoint).
-    assert len(p.set_calls) == 1
-    path, _value = p.set_calls[0]
-    assert "7" in path  # the target policy id is encoded in the bridge path
+    """`pause --apply` is DESCOPED: it must refuse with a nonzero exit and fire no set.
 
-
-def test_net_firewalla_pause_apply_rolls_back_on_verify_fail(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A failed verify on the apply path must roll the policy state back."""
-    p = FakeFirewalla()
-    _point_registry_at(monkeypatch, p)
-    # Force the post-change verify to fail so the rails trip rollback.
-    monkeypatch.setattr(
-        "sanctum_cli.commands.net._firewalla_pause_verify",
-        lambda provider, target: False,
-    )
-    result = runner.invoke(
-        app, ["net", "firewalla", "pause", "7", "--apply", "--force"]
-    )
-    assert result.exit_code == 1, result.stdout
-    assert p.rollback_calls == 1  # the cutover was undone
-
-
-def test_net_firewalla_pause_apply_rolls_back_when_set_returns_not_ok(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A bridge-REFUSED set (OpResult ok=False, no raise) must trip rollback + exit 1.
-
-    FirewallaProvider.set signals a refused write by RETURNING ok=False, not by
-    raising (the divergence from Sagemcom/Generic). guarded_apply only rolls back
-    when the change RAISES, so if firewalla_pause discarded the OpResult the rails
-    would commit and report a green check on a write the box refused — a silent
-    false-success on a security-relevant mutation. This is the contract the
-    happy-path FakeFirewalla.set (always ok=True) never exercises: here ``set``
-    returns ok=False and we assert the cutover is undone and the CLI exits 1.
+    The invented bridge routes (POST /policies/<id>/pause + /policies/restore) are
+    not in the bridge contract, so firing the mutation would 404 → ok=False →
+    a "ROLLBACK FAILED" message on a route that also does not exist. The command
+    refuses loudly (LOCAL_ERROR exit 4) instead of reaching provider.set /
+    guarded_apply — the hard guardrail for the overnight build.
     """
-
-    class RefusingFirewalla(FakeFirewalla):
-        def set(self, path: str, value: str) -> OpResult:
-            self.set_calls.append((path, value))
-            return OpResult(ok=False, detail="bridge refused set", before=None, after=None)
-
-    p = RefusingFirewalla()
+    p = FakeFirewalla()
     _point_registry_at(monkeypatch, p)
     result = runner.invoke(
         app, ["net", "firewalla", "pause", "7", "--apply", "--force"]
     )
-    assert result.exit_code == 1, result.stdout
-    assert len(p.set_calls) == 1  # the set was attempted
-    assert p.rollback_calls == 1  # ...and the refused write was rolled back
+    assert result.exit_code == 4, result.stdout  # descoped → LOCAL_ERROR, not a fire
+    # No mutation reached the provider — not even a connect for a write.
+    assert p.set_calls == []
+    assert p.rollback_calls == 0
 
 
 def test_net_firewalla_disconnects_even_when_command_errors(

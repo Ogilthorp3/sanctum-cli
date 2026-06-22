@@ -75,6 +75,15 @@ _SSH_PROBE_TIMEOUT_S = 1.0
 
 # The policy subtree we snapshot before a mutating intent. A policy-state
 # snapshot is the restorable baseline a pause/set rollback restores.
+#
+# PROVISIONAL (Task 6 finding 2): ``/policies/restore`` is NOT yet part of the
+# established Firewalla bridge contract — the shipping screen_time surface only
+# GETs /info, /policies, /host/<mac>, /hosts and references the one documented
+# mutate POST /policies/purge. ``snapshot``/``rollback`` below are retained so the
+# machinery exists for a future re-enable, but the CLI ``pause`` mutate path that
+# would drive them is DESCOPED (see ``commands/net.py``) until this route is
+# implemented in the bridge server and an env-gated read-only contract smoke
+# confirms its shape. No live POST to this route is fired in the shipped surface.
 _POLICIES_PATH = "/policies"
 _POLICIES_RESTORE_PATH = "/policies/restore"
 _INFO_PATH = "/info"
