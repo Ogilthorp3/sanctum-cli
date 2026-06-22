@@ -442,7 +442,15 @@ def onboard_command(
     recap_rows.insert(0, ("Welcome", "ready"))
     recap_rows.append(("Offline fallback", "always on (mlx_local)"))
     console.print(recap_card(recap_rows))
-    console.print(green_check("Setup verified — your Sanctum is alive"))
+    if canary is CanaryOutcome.FAILED:
+        # Honest finish: never claim "verified" over a recap that shows a failed
+        # backup canary. The Sanctum is alive (mlx_local floor), but say what's true.
+        console.print(
+            "[yellow]Your Sanctum is alive — your backup canary needs attention "
+            "(see above).[/]"
+        )
+    else:
+        console.print(green_check("Setup verified — your Sanctum is alive"))
 
     console.print()
     try:

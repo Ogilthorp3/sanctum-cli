@@ -219,6 +219,34 @@ def test_onboard_recap_lists_configured_and_skipped(
     assert "skipped" in out
 
 
+def test_onboard_failed_canary_does_not_claim_setup_verified(
+    full_instance_yaml: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Honest finish: a FAILED backup canary must NOT render 'Setup verified'.
+
+    The recap already shows the canary failed; the closing line must agree. The
+    Sanctum is still alive (mlx_local floor), but we never claim verification we
+    did not earn — the same doctrine the recap/green-checks now follow.
+    """
+    monkeypatch.setenv("SANCTUM_INSTANCE_FILE", str(full_instance_yaml))
+    with (
+        patch("sanctum_cli.commands.onboard.backup_cmd.backup_estimate"),
+        patch("sanctum_cli.commands.onboard.backup_cmd.backup_run"),
+        patch("sanctum_cli.commands.onboard._dispatch_cloud_setup"),
+        patch(
+            "sanctum_cli.commands.onboard._run_canary",
+            return_value=onboard.CanaryOutcome.FAILED,
+        ),
+        patch("sanctum_cli.commands.screen_time._fetch_bridge_json", lambda path: None),
+    ):
+        result = runner.invoke(app, ["onboard", "--recipe", "family", "--yes"])
+    out = " ".join(result.stdout.split())
+    assert result.exit_code == 0, out
+    assert "Setup verified" not in out, out  # never claimed over a failed canary
+    assert "needs attention" in out, out  # the honest closing
+    assert "Your Sanctum is alive" in out, out  # still alive via the mlx_local floor
+
+
 def test_onboard_yes_completes_non_interactively(
     full_instance_yaml: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
