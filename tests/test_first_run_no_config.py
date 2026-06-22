@@ -19,6 +19,7 @@ from typer.testing import CliRunner
 from sanctum_cli import cli
 from sanctum_cli.cli import app
 from sanctum_cli.commands import council as council_cmd
+from sanctum_cli.commands import onboard
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -83,7 +84,10 @@ def test_onboard_no_config_self_bootstraps(
         patch("sanctum_cli.commands.onboard.backup_cmd.backup_estimate"),
         patch("sanctum_cli.commands.onboard.backup_cmd.backup_run"),
         patch("sanctum_cli.commands.onboard._dispatch_cloud_setup"),
-        patch("sanctum_cli.commands.onboard._run_canary"),
+        patch(
+            "sanctum_cli.commands.onboard._run_canary",
+            return_value=onboard.CanaryOutcome.VERIFIED,
+        ),
     ):
         result = runner.invoke(app, ["onboard", "--recipe", "family", "--yes"])
 

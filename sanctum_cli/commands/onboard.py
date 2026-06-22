@@ -22,6 +22,7 @@ need to run. Existing operators can use the underlying primitives
 from __future__ import annotations
 
 import contextlib
+import enum
 import os
 import re
 import shutil
@@ -41,11 +42,53 @@ from sanctum_cli import config, recipes
 from sanctum_cli.backends import b2, gdrive, r2
 from sanctum_cli.commands import backup as backup_cmd
 from sanctum_cli.errors import LocalError, UserError
+from sanctum_cli.onboard_experience import chapter_banner, green_check, recap_card
+from sanctum_cli.providers.base import HealthSnapshot
 
 if TYPE_CHECKING:
     from sanctum_cli.devices.base import DeviceProvider, NetContext
 
 console = Console()
+
+
+# ── Restore-canary outcome (honest verify) ────────────────────────────
+# The "Your Data" chapter proves the backup round-trips by restoring a known file
+# and sha-diffing it against live. The orchestrator must report what ACTUALLY
+# happened — never a blanket "verified" — so the canary returns a tri-state the
+# recap + green-check thread, exactly as the AI/Network/You gates thread their
+# CONFIGURED bool (design spec §2: "guided + verify, never 'probably worked'"). The
+# canary is NON-BLOCKING: every path returns an outcome, none raises, onboarding
+# continues regardless.
+class CanaryOutcome(enum.Enum):
+    """The honest result of the restore canary.
+
+    * ``VERIFIED`` — the round-trip succeeded (restored sha == live sha).
+    * ``SKIPPED`` — the canary could not run (no configured repo, no ``~/.zshrc``,
+      restored file absent): not a failure, just nothing to prove.
+    * ``FAILED`` — the canary RAN and the restore did NOT round-trip (restic restore
+      errored, or the restored bytes differ from live): a real backup-integrity
+      problem the operator must see, never papered over with a green check.
+    """
+
+    VERIFIED = "verified"
+    SKIPPED = "skipped"
+    FAILED = "failed"
+
+
+def _canary_recap_status(outcome: CanaryOutcome) -> str:
+    """Map a canary outcome to its recap-card row status string.
+
+    VERIFIED → a configured/verified status; SKIPPED → a gentle "skipped"; FAILED →
+    an honest "FAILED — needs attention". Shared by the orchestrator and the recap
+    test so the test's expectation is DERIVED from the outcome (not hard-coded) — a
+    test cannot catch a bug it shares.
+    """
+    return {
+        CanaryOutcome.VERIFIED: "backup + canary ✓",
+        CanaryOutcome.SKIPPED: "backup ✓ · canary skipped",
+        CanaryOutcome.FAILED: "FAILED — needs attention",
+    }[outcome]
+
 
 # ── Optional-module gates ─────────────────────────────────────────────
 # Post-backup steps, keyed by recipe name and run in listed order. A gate
@@ -59,11 +102,201 @@ RECIPE_GATES: dict[str, tuple[str, ...]] = {
     "family": (
         "identity-setup",
         "family-setup",
+        "ai-providers",
         "firewalla-pairing",
         "firewalla-compat",
         "network-gear",
     ),
+    # The Apple arc is UNIVERSAL — the recipe only chooses the backup scope, so the
+    # "You" (identity) and "Your AI" chapters run on every recipe. operator/code are
+    # non-family contexts (no kids → no screen-time/Firewalla gates, no family
+    # interview), so their tuples are the minimal universal pair: operator identity,
+    # then the AI providers. ai-providers is placed AFTER identity-setup and (per the
+    # tools-before-data ordering decision) ahead of any network gates — matching the
+    # family ordering and the _CHAPTER_GATES partition, so the arc reads identically.
+    "operator": (
+        "identity-setup",
+        "ai-providers",
+    ),
+    "code": (
+        "identity-setup",
+        "ai-providers",
+    ),
 }
+
+# ── The Apple-grade arc (experience framing) ──────────────────────────
+# The onboarding flow is narrated as five named chapters, each with a one-line
+# *why* and a persistent "Step N of M" counter, capped by a recap card + the
+# celebratory "alive" panel ("You're Alive"). The recipe gates are partitioned
+# into the gate-driven chapters (You / Your AI / Your Network) by name; a chapter
+# whose gates aren't in this recipe still renders (the arc is universal) — its
+# recap row just reads "skipped". "Welcome" (splash + recipe panel) and "Your Data"
+# (the cloud/backup/canary block) are not gate-driven and are handled inline.
+#
+# ORDERING DECISION (design spec §5 wanted "tools before data"): we FIRST wrote a
+# characterization test pinning the current step order, then TRIED moving the recipe
+# gates ahead of the cloud/backup block. That reorder BROKE 18 existing interactive
+# onboard tests — their stdin sequences assume the proceed/backup confirms are
+# consumed BEFORE the gate prompts (the data block ran first historically). Per the
+# plan's explicit fallback ("if the reorder breaks anything, DO NOT force it — keep
+# the existing order and frame the arc + recap over it"), we KEPT the existing
+# execution order (Welcome → Your Data → You → Your AI → Your Network) and let the
+# recap card tie the journey together. The data block's internal estimate → backup →
+# canary order is preserved (pinned by test_onboard_data_block_internal_order_is_invariant).
+
+#: The arc's named chapters, in EXECUTION order, with their calm one-line *why*.
+#: The "Step N of M" counter is 1-indexed over this tuple; M is its length.
+_ARC_CHAPTERS: tuple[tuple[str, str], ...] = (
+    ("Welcome", "Let's wake up your Sanctum — here's what this recipe covers."),
+    ("Your Data", "Back up what matters and prove the restore round-trips."),
+    ("You", "Who you are, and who's in the haus — so Sanctum knows who to protect."),
+    ("Your AI", "Sanctum routes your prompts to the best model — let's connect yours."),
+    ("Your Network", "Pair the gear that guards your haus — your hub, mesh, and firewall."),
+)
+
+#: Which recipe gates belong to which gate-driven chapter title. The orchestrator
+#: runs only the gates present in the active recipe, in RECIPE_GATES order; a
+#: chapter with no matching gate in this recipe still shows its banner + a recap row.
+_CHAPTER_GATES: dict[str, tuple[str, ...]] = {
+    "You": ("identity-setup", "family-setup"),
+    "Your AI": ("ai-providers",),
+    "Your Network": ("firewalla-pairing", "firewalla-compat", "network-gear"),
+}
+
+#: Human label shown per gate inside the per-step header (calm, lowercase-free).
+_GATE_LABELS: dict[str, str] = {
+    "identity-setup": "Operator identity",
+    "family-setup": "Family setup",
+    "ai-providers": "AI providers",
+    "firewalla-pairing": "Firewalla pairing",
+    "firewalla-compat": "Firewalla compatibility",
+    "network-gear": "Network gear",
+}
+
+
+def _run_gate(gate: str, *, yes: bool) -> bool:
+    """Dispatch a single recipe gate to its handler (presentation lives in the arc).
+
+    Returns the handler's CONFIGURED signal: ``True`` iff the gate actually
+    persisted something real (a provider verified, a device paired, an identity
+    saved), ``False`` when it skipped / configured nothing. This is the truth the
+    chapter loop threads into the recap + green-check — never "did we run it", which
+    is the false-"connected" defect this dispatcher's return value closes. A gate
+    name with no handler is a silent no-op that configured nothing (``False``) —
+    defensive; the arc tuples are the source of truth.
+    """
+    if gate == "identity-setup":
+        return _run_identity_setup(yes=yes)
+    if gate == "family-setup":
+        return _run_family_setup(yes=yes)
+    if gate == "ai-providers":
+        return _run_ai_providers(yes=yes)
+    if gate == "firewalla-pairing":
+        return _run_firewalla_pairing(yes=yes)
+    if gate == "firewalla-compat":
+        return _run_firewalla_compat()
+    if gate == "network-gear":
+        return _run_network_gear(yes=yes)
+    return False
+
+
+def _chapter_active_gates(chapter_title: str, recipe: str) -> tuple[str, ...]:
+    """The gates for ``chapter_title`` that the active ``recipe`` actually lists.
+
+    Preserves RECIPE_GATES order (so per-recipe ordering tests stay authoritative),
+    filtered to the chapter's gate set. A chapter with nothing in this recipe yields
+    an empty tuple — the orchestrator still shows its banner (the arc is universal),
+    its recap row just reads "skipped".
+    """
+    recipe_gates = RECIPE_GATES.get(recipe, ())
+    chapter_gates = _CHAPTER_GATES.get(chapter_title, ())
+    return tuple(g for g in recipe_gates if g in chapter_gates)
+
+
+def _run_chapter_gates(chapter_title: str, *, recipe: str, yes: bool) -> bool:
+    """Run every active gate for a chapter, each under its own per-step header.
+
+    Returns True iff at least one gate in the chapter actually CONFIGURED something
+    (persisted a verified provider / paired a device / saved an identity) — the
+    truth the recap + green-check use to show "set up / connected / paired" vs a
+    gentle "skipped". This is the honest signal, NOT "did we run interactively":
+    an interactive run where the user enters no key / detects no gear configures
+    nothing and must read "skipped", never a false "connected" (design spec §2/§11,
+    "guided + verify — never 'probably worked'"). Under ``--yes`` every gate skips
+    (each prints its own note) and returns False, so the chapter reports "skipped"
+    honestly. The per-gate booleans are OR-ed, so a chapter with one configured gate
+    and one skipped gate still reads as configured.
+    """
+    gates = _chapter_active_gates(chapter_title, recipe)
+    configured = False
+    for gate in gates:
+        label = _GATE_LABELS.get(gate, gate)
+        console.print(f"\n  [bold]{label}[/]")
+        configured = _run_gate(gate, yes=yes) or configured
+    return configured
+
+
+def _run_data_chapter(
+    *,
+    recipe: str,
+    backend: str,
+    no_open: bool,
+    cfg: config.Config,
+    rcp: config.Recipe,
+    yes: bool,
+) -> CanaryOutcome:
+    """The "Your Data" chapter: estimate → cloud setup → dry-run → backup → canary.
+
+    Returns the restore canary's :class:`CanaryOutcome` so the orchestrator can gate
+    the green-check + recap row on the REAL round-trip result (never a blanket
+    "verified"). The internal order is invariant (pinned by
+    ``test_onboard_data_block_internal_order_is_invariant``): the pre-flight estimate
+    precedes the backup runs, which precede the restore canary (the canary
+    round-trips exactly what the live backup just wrote). The two interactive
+    confirms (``proceed?`` / ``run the real backup now?``) still ``Exit(0)`` on a
+    decline — the tool chapters above have already completed, so a user who stops
+    here keeps their configured AI/network gear (forgiving, tools-before-data).
+    ``--yes`` skips both confirms.
+    """
+    # Pre-flight estimate.
+    console.print("\n  [bold]Pre-flight estimate[/]")
+    backup_cmd.backup_estimate(recipe=recipe, json_output=False)
+
+    if not yes and not Confirm.ask("\nproceed?", default=True):
+        console.print("[dim]aborted by user[/]")
+        raise typer.Exit(code=0)
+
+    # Cloud setup if needed.
+    cb = cfg.cli.cloud_backup
+    needs_setup = (
+        cb is None
+        or (rcp.target == "primary" and cb.primary is None)
+        or (rcp.target == "secondary" and cb.secondary is None)
+    )
+    if needs_setup:
+        console.print(f"\n  [bold]Cloud setup ({backend})[/]")
+        _dispatch_cloud_setup(backend, no_open=no_open)
+    else:
+        console.print(
+            f"\n  [bold]Cloud target already configured ({rcp.target})[/] — skipping setup."
+        )
+
+    # Dry-run for transparency.
+    console.print("\n  [bold]Dry-run (no bytes written)[/]")
+    backup_cmd.backup_run(recipe=recipe, script=None, dry_run=True)
+
+    if not yes and not Confirm.ask("\nrun the real backup now?", default=True):
+        console.print("[dim]stopped before live run; rerun with --yes when ready[/]")
+        raise typer.Exit(code=0)
+
+    # First real backup.
+    console.print("\n  [bold]First backup[/]")
+    backup_cmd.backup_run(recipe=recipe, script=None, dry_run=False)
+
+    # Restore canary.
+    console.print("\n  [bold]Restore canary[/]")
+    return _run_canary()
+
 
 # ── Surface polish ────────────────────────────────────────────────────
 # The onboarding flow is the first time a new operator (or a friend of the
@@ -130,86 +363,94 @@ def onboard_command(
     ] = False,
     yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip confirmation prompts.")] = False,
 ) -> None:
-    """One-shot first-run: recipe → cloud setup → first backup → canary."""
+    """One-shot first-run: a narrated arc — Welcome → Your Data → You → Your AI → Your Network."""
     # ensure() (not load()) so a brand-new Mac with no ~/.sanctum/instance.yaml
     # gets a minimal one scaffolded here instead of hard-failing on first run.
     cfg = config.ensure()
     rcp = recipes.resolve(recipe, cfg.cli)
 
-    _print_splash()
+    total = len(_ARC_CHAPTERS)
+    recap_rows: list[tuple[str, str]] = []
 
+    # ── Chapter 1 — Welcome (splash + recipe panel + Photos notice) ──
+    title, why = _ARC_CHAPTERS[0]
+    console.print(chapter_banner(1, total, title, why))
+    _print_splash()
     console.print(
         Panel.fit(
             f"[bold]Sanctum onboarding — recipe: {recipe}[/]\n\n{rcp.description}",
             border_style="cyan",
         )
     )
-
     if recipe == "family":
         console.print()
         console.print(Panel.fit(PHOTOS_SCOPE_NOTICE, border_style="yellow"))
+    console.print(green_check("Welcome to Sanctum"))
 
-    # Step 1 — estimate
-    console.print("\n[bold]Step 1.[/] Pre-flight estimate")
-    backup_cmd.backup_estimate(recipe=recipe, json_output=False)
-
-    if not yes and not Confirm.ask("\nproceed?", default=True):
-        console.print("[dim]aborted by user[/]")
-        raise typer.Exit(code=0)
-
-    # Step 2 — cloud setup if needed
-    cb = cfg.cli.cloud_backup
-    needs_setup = (
-        cb is None
-        or (rcp.target == "primary" and cb.primary is None)
-        or (rcp.target == "secondary" and cb.secondary is None)
+    # ── Chapter 2 — Your Data (cloud setup → backup → canary) ──
+    # ORDERING: the existing flow runs the cloud/backup block FIRST, then the recipe
+    # gates. The characterized reorder (gates → data) broke 18 existing interactive
+    # onboard tests whose stdin sequence assumes the proceed/backup confirms come
+    # before the gate prompts — so per the plan we DID NOT force it and KEPT the
+    # existing order, framing the Apple arc + recap over it instead. The recap card
+    # (rendered at the end) is what ties the journey together regardless of the
+    # execution order. The data block's internal estimate → backup → canary order is
+    # preserved (pinned by test_onboard_data_block_internal_order_is_invariant).
+    title, why = _ARC_CHAPTERS[1]
+    console.print(chapter_banner(2, total, title, why))
+    canary = _run_data_chapter(
+        recipe=recipe, backend=backend, no_open=no_open, cfg=cfg, rcp=rcp, yes=yes
     )
-    if needs_setup:
-        console.print(f"\n[bold]Step 2.[/] Cloud setup ({backend})")
-        _dispatch_cloud_setup(backend, no_open=no_open)
-        # Reload config after cloud setup writes to instance.yaml
-        cfg = config.load()
-    else:
+    # HONEST VERIFY: the green-check + recap row reflect the REAL round-trip outcome —
+    # never a blanket "verified". Mirrors how the AI/Network/You gates thread their
+    # CONFIGURED bool (design spec §2: "guided + verify, never 'probably worked'").
+    if canary is CanaryOutcome.VERIFIED:
+        console.print(green_check("Backup verified by restore canary"))
+    elif canary is CanaryOutcome.FAILED:
         console.print(
-            f"\n[bold]Step 2.[/] Cloud target already configured ({rcp.target}) — skipping setup."
+            Text.assemble(
+                ("  ✗ ", "bold red"),
+                ("Backup canary FAILED — your restore did not round-trip", "red"),
+            )
         )
+    else:  # SKIPPED
+        console.print("  [dim]Backup canary skipped — nothing to round-trip[/]")
+    recap_rows.append((title, _canary_recap_status(canary)))
 
-    # Step 3 — dry-run for transparency
-    console.print("\n[bold]Step 3.[/] Dry-run (no bytes written)")
-    backup_cmd.backup_run(recipe=recipe, script=None, dry_run=True)
+    # ── Chapter 3 — You (operator identity + family setup gates) ──
+    title, why = _ARC_CHAPTERS[2]
+    console.print(chapter_banner(3, total, title, why))
+    you_did = _run_chapter_gates("You", recipe=recipe, yes=yes)
+    console.print(green_check("Operator + family set up" if you_did else "You step ready"))
+    recap_rows.append((title, "set up" if you_did else "skipped"))
 
-    if not yes and not Confirm.ask("\nrun the real backup now?", default=True):
-        console.print("[dim]stopped before live run; rerun with --yes when ready[/]")
-        raise typer.Exit(code=0)
+    # ── Chapter 4 — Your AI (ai-providers gate) ──
+    title, why = _ARC_CHAPTERS[3]
+    console.print(chapter_banner(4, total, title, why))
+    ai_did = _run_chapter_gates("Your AI", recipe=recipe, yes=yes)
+    console.print(green_check("AI connected" if ai_did else "AI step ready"))
+    recap_rows.append((title, "connected" if ai_did else "skipped"))
 
-    # Step 4 — first real backup
-    console.print("\n[bold]Step 4.[/] First backup")
-    backup_cmd.backup_run(recipe=recipe, script=None, dry_run=False)
+    # ── Chapter 5 — Your Network (firewalla + network-gear gates) ──
+    title, why = _ARC_CHAPTERS[4]
+    console.print(chapter_banner(5, total, title, why))
+    net_did = _run_chapter_gates("Your Network", recipe=recipe, yes=yes)
+    console.print(green_check("Network paired" if net_did else "Network step ready"))
+    recap_rows.append((title, "paired" if net_did else "skipped"))
 
-    # Step 5 — canary
-    console.print("\n[bold]Step 5.[/] Restore canary")
-    _run_canary()
-
-    # Step 6+ — optional-module gates, in recipe-listed order
-    # (family: interview → screen-time registry, then Firewalla compat)
-    step_no = 6
-    for gate in RECIPE_GATES.get(recipe, ()):
-        if gate == "identity-setup":
-            console.print(f"\n[bold]Step {step_no}.[/] Operator identity")
-            _run_identity_setup(yes=yes)
-        elif gate == "family-setup":
-            console.print(f"\n[bold]Step {step_no}.[/] Family setup")
-            _run_family_setup(yes=yes)
-        elif gate == "firewalla-pairing":
-            console.print(f"\n[bold]Step {step_no}.[/] Firewalla pairing")
-            _run_firewalla_pairing(yes=yes)
-        elif gate == "firewalla-compat":
-            console.print(f"\n[bold]Step {step_no}.[/] Firewalla compatibility")
-            _run_firewalla_compat()
-        elif gate == "network-gear":
-            console.print(f"\n[bold]Step {step_no}.[/] Network gear")
-            _run_network_gear(yes=yes)
-        step_no += 1
+    # ── You're Alive — recap card + the celebratory ending ──
+    recap_rows.insert(0, ("Welcome", "ready"))
+    recap_rows.append(("Offline fallback", "always on (mlx_local)"))
+    console.print(recap_card(recap_rows))
+    if canary is CanaryOutcome.FAILED:
+        # Honest finish: never claim "verified" over a recap that shows a failed
+        # backup canary. The Sanctum is alive (mlx_local floor), but say what's true.
+        console.print(
+            "[yellow]Your Sanctum is alive — your backup canary needs attention "
+            "(see above).[/]"
+        )
+    else:
+        console.print(green_check("Setup verified — your Sanctum is alive"))
 
     console.print()
     try:
@@ -217,16 +458,23 @@ def onboard_command(
     except OSError:
         who = os.environ.get("USER", "friend")
 
+    # The "verified the restore" boast is true ONLY on a clean round-trip — never
+    # claim it over a failed/skipped canary (the panel must agree with the recap).
+    _tail = (
+        "From here, Sanctum keeps running in the background — daily backups, "
+        "drift heals, audit trails — without asking you to do anything. The "
+        "next time you'll hear from it is when something interesting happens.\n"
+    )
+    if canary is CanaryOutcome.VERIFIED:
+        _intro = (
+            "It just ran its first backup and verified the restore by round-"
+            "tripping a known file through your cloud bucket. " + _tail
+        )
+    else:
+        _intro = _tail
     body = Group(
         Text.from_markup(f"[bold green]Your Sanctum is alive, {who}.[/]\n"),
-        Text.from_markup(
-            "It just ran its first backup and verified the restore by round-"
-            "tripping a known file through your cloud bucket. From here, "
-            "Sanctum keeps running in the background — daily backups, drift "
-            "heals, audit trails — without asking you to do anything. The "
-            "next time you'll hear from it is when something interesting "
-            "happens.\n"
-        ),
+        Text.from_markup(_intro),
         Text.from_markup("[dim]A few things to try when you're curious:[/]"),
         Text.from_markup(
             "  [cyan]sanctum status[/]            the whole haus at a glance\n"
@@ -538,26 +786,29 @@ def _devices_write_path() -> Path:
     return screen_time._DEVICES_CANDIDATES[0]
 
 
-def _run_family_setup(*, yes: bool) -> None:
+def _run_family_setup(*, yes: bool) -> bool:
     """Family interview gate — names, roles, smartphone numbers → devices.yaml.
 
-    Interactive by design, so ``--yes`` SKIPS it (prompting a scripted run
-    against a closed stdin would hang). Merge never clobbers: re-running
-    onboarding on a configured haus only adds new people; an existing slug
-    is skipped with a note. A fresh file gets the full engine-loadable
-    skeleton (family + empty shared_devices/screens maps).
+    Returns True iff at least one NEW member was actually written to the registry;
+    returns False when ``--yes`` skips, no member was entered, nothing new was
+    added, or the file could not be loaded — so the recap reads "skipped" rather
+    than a false "set up" (design spec §2/§11). Interactive by design, so ``--yes``
+    SKIPS it (prompting a scripted run against a closed stdin would hang). Merge
+    never clobbers: re-running onboarding on a configured haus only adds new people;
+    an existing slug is skipped with a note. A fresh file gets the full
+    engine-loadable skeleton (family + empty shared_devices/screens maps).
     """
     if yes:
         console.print(
             "  [yellow]skipped[/] — interactive step; run `sanctum onboard` "
             "without --yes to set up the family"
         )
-        return
+        return False
 
     members = _interview_family()
     if not members:
         console.print("  [dim]no family members added — registry untouched[/]")
-        return
+        return False
 
     from sanctum_cli.commands import screen_time
 
@@ -570,13 +821,13 @@ def _run_family_setup(*, yes: bool) -> None:
             if exc.fix:
                 console.print(f"  [dim]fix: {exc.fix}[/]")
             console.print("  [dim]registry not written — fix the file and re-run[/]")
-            return
+            return False
         merged, added, skipped = merge_family_members(devices_config, members)
         for slug in skipped:
             console.print(f"  [yellow]skipped[/] {slug} — already in {path.name}; not clobbering")
         if not added:
             console.print("  [dim]nothing new to write[/]")
-            return
+            return False
         backup = path.parent / (path.name + ".bak")
         backup.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
         path.write_text(
@@ -585,13 +836,355 @@ def _run_family_setup(*, yes: bool) -> None:
         console.print(
             f"  [green]✓[/] added {len(added)} member(s) to {path} (backup: {backup.name})"
         )
-    else:
-        skeleton: dict[str, Any] = {"family": members, "shared_devices": {}, "screens": {}}
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            yaml.safe_dump(skeleton, sort_keys=False, allow_unicode=True), encoding="utf-8"
+        return True
+    skeleton: dict[str, Any] = {"family": members, "shared_devices": {}, "screens": {}}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        yaml.safe_dump(skeleton, sort_keys=False, allow_unicode=True), encoding="utf-8"
+    )
+    console.print(f"  [green]✓[/] wrote {len(members)} member(s) to new {path}")
+    return True
+
+
+# ── AI-provider chapter ("Your AI") ──────────────────────────────────
+# The first chapter that connects the user's models. It reuses the P4 cred-capture
+# pattern (prompt → fail-closed Keychain → best-effort trifecta mirror → health-
+# probe → revoke-on-failure), generalized from device admin secrets to AI-provider
+# API keys. Claude is offered two ways, defaulting to the $0 Max/Pro subscription
+# (``via=proxy``, no Keychain write); the Anthropic-API-key path and Gemini both
+# capture a masked key into the Keychain and earn their persisted config ONLY on a
+# green health-probe — a rejected key REVOKES the entry and persists nothing
+# (fail-closed, mirroring _run_network_gear). Interactive by design, so ``--yes``
+# SKIPS the whole chapter (a scripted run against a closed stdin would hang). Every
+# external call — the claude-CLI presence/login probe, the proxy wiring, the
+# provider health() — is a module-level seam the tests monkeypatch, so no live API
+# call, no real ``claude`` shell-out, and no live network occurs in the suite.
+
+#: The Keychain (service, account) the Anthropic-API-key path captures the key
+#: under — the same pair ``cli.providers.claude.keychain`` defaults to, so the
+#: provider re-reads it at use time (registry.make_provider).
+_CLAUDE_KEYCHAIN = ("anthropic-api-key", "sanctum")
+#: The Keychain (service, account) for the Gemini key (matches the gemini default).
+_GEMINI_KEYCHAIN = ("google-ai-api-key", "sanctum")
+#: The local claude-cli-proxy endpoint the subscription path points the provider at.
+_CLAUDE_PROXY_ENDPOINT = "http://127.0.0.1:2001"
+
+
+def _claude_logged_in() -> bool:
+    """Cheap probe: is the local ``claude`` CLI logged in? — a module-level seam.
+
+    Runs a fast, READ-ONLY ``claude`` invocation and treats a clean exit as
+    "logged in". This is the one place a real ``claude`` shell-out would happen, so
+    it is a seam the tests monkeypatch (NO real ``claude`` is run in the suite). A
+    missing binary is handled by :func:`_claude_cli_ready` before this is reached;
+    any subprocess failure here is read as "not logged in" (fail-closed) rather
+    than raising out of onboarding.
+    """
+    import subprocess
+
+    claude_bin = shutil.which("claude")
+    if claude_bin is None:  # pragma: no cover - guarded by _claude_cli_ready upstream
+        return False
+    try:
+        proc = subprocess.run(
+            [claude_bin, "auth", "status"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
         )
-        console.print(f"  [green]✓[/] wrote {len(members)} member(s) to new {path}")
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0
+
+
+def _claude_cli_ready() -> bool:
+    """True iff the ``claude`` CLI is installed AND logged in.
+
+    ``shutil.which`` (cheap, no shell-out) short-circuits the login probe when the
+    binary is absent, so a stock Mac with no ``claude`` never shells out. Fail-
+    closed: anything short of "present and logged in" returns False, which makes
+    the subscription path persist NOTHING and show the install guidance instead of
+    a false ``via=proxy``.
+    """
+    if shutil.which("claude") is None:
+        return False
+    return _claude_logged_in()
+
+
+def _ensure_claude_proxy() -> None:
+    """Best-effort: ensure the ``claude-cli-proxy`` LaunchAgent is wired + running.
+
+    A module-level seam (tests monkeypatch it) so the subscription path can wire
+    the local proxy the ``via=proxy`` provider talks to without the onboarding test
+    touching launchctl. Best-effort by design — the health-probe that follows is
+    the real gate on whether the proxy actually serves — so any failure here is
+    surfaced as a note and never aborts the chapter.
+    """
+    from sanctum_cli.commands import agent
+    from sanctum_cli.commands.proxy import KNOWN_PROXIES
+
+    label, _url = KNOWN_PROXIES["claude-cli-proxy"]
+    with contextlib.suppress(Exception):
+        agent.agent_restart(label)
+
+
+def _provider_health(kind: str, cfg: config.Config) -> HealthSnapshot:
+    """Build provider ``kind`` from ``cfg`` and return its ``health()`` — a seam.
+
+    Mirrors ``doctor._provider``: a provider that cannot even be constructed (a
+    Keychain miss surfaces as ``LocalError`` at build time) OR whose ``health()``
+    raises is reported as a non-ok snapshot rather than crashing onboarding. The
+    tests monkeypatch THIS function so no provider is built and no live API/network
+    call fires; production builds the real provider, which re-reads the just-stored
+    key from the Keychain to authenticate the probe.
+    """
+    from sanctum_cli.providers import make_provider
+
+    try:
+        provider = make_provider(kind, cfg.cli.providers)
+        return provider.health()
+    except Exception as exc:  # build or health failure → fail-closed snapshot
+        return HealthSnapshot(ok=False, latency_ms=None, quota_remaining=None, detail=str(exc)[:160])
+
+
+def set_provider_config(
+    *,
+    claude: dict[str, Any] | None = None,
+    gemini: dict[str, Any] | None = None,
+    default_provider: str | None = None,
+    path: Path | None = None,
+) -> None:
+    """Persist VERIFIED provider config to ``cli.providers.*`` in instance.yaml.
+
+    Mirrors :func:`set_device_reference`'s atomic read-modify-write: every sibling
+    block (top-level AND inside ``cli:``) is preserved, a ``<file>.bak`` is written
+    first, and the parent dir is created for a fresh file. Only the arguments that
+    are given are written — a ``None`` ``claude``/``gemini``/``default_provider``
+    leaves any existing value untouched (so persisting only the provider that
+    passed its health-probe never clobbers the other). The captured SECRET never
+    lands here — it is in the Keychain (via :func:`store_device_secret`); only the
+    routing config (``via``/``endpoint``/``model``) and the default selection are
+    written. Callers must only invoke this AFTER a green health-probe.
+    """
+    target = Path(path) if path else config.instance_path()
+    data: dict[str, Any] = {}
+    if target.exists():
+        loaded = yaml.safe_load(target.read_text(encoding="utf-8"))
+        if isinstance(loaded, dict):
+            data = loaded
+    cli = data.get("cli")
+    if not isinstance(cli, dict):
+        cli = data["cli"] = {}
+    if claude is not None or gemini is not None:
+        providers = cli.get("providers")
+        if not isinstance(providers, dict):
+            providers = cli["providers"] = {}
+        if claude is not None:
+            providers["claude"] = claude
+        if gemini is not None:
+            providers["gemini"] = gemini
+    if default_provider is not None:
+        cli["default_provider"] = default_provider
+    if target.exists():
+        backup = target.parent / (target.name + ".bak")
+        backup.write_text(target.read_text(encoding="utf-8"), encoding="utf-8")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True), encoding="utf-8")
+
+
+_CLAUDE_INSTALL_GUIDANCE = (
+    "[bold]Claude subscription not connected[/]\n\n"
+    "Sanctum routes your prompts to your Claude Max/Pro subscription through a "
+    "local proxy — no API charges. It needs the [cyan]claude[/] CLI installed and "
+    "logged in.\n\n"
+    "[bold]One next step:[/] install the Claude CLI, run [cyan]claude login[/], "
+    "then re-run [cyan]sanctum onboard[/].\n\n"
+    "[dim]Prefer an API key instead? Re-run and choose option 2 at the Claude "
+    "prompt.[/]"
+)
+
+
+def _run_claude_subscription() -> dict[str, Any] | None:
+    """Subscription (``via=proxy``) path — returns the claude config or None.
+
+    Verifies the ``claude`` CLI is ready (installed + logged in); if not, shows the
+    calm install-guidance panel and returns None (persist NOTHING — no false
+    ``via=proxy``). If ready: wires the local proxy, health-probes it, and returns
+    the ``{via: proxy, endpoint}`` config ONLY on a green probe. A failing probe
+    surfaces the reason and returns None (nothing half-working persisted).
+    """
+    if not _claude_cli_ready():
+        console.print(Panel.fit(_CLAUDE_INSTALL_GUIDANCE, border_style="yellow"))
+        return None
+    _ensure_claude_proxy()
+    claude_cfg: dict[str, Any] = {"via": "proxy", "endpoint": _CLAUDE_PROXY_ENDPOINT}
+    cfg = _config_with_provider_overrides(claude=claude_cfg)
+    health = _provider_health("claude", cfg)
+    if not health.ok:
+        console.print(
+            f"  [yellow]Claude proxy not healthy[/] — {health.detail or 'no response'}. "
+            "Claude not configured; re-run after `claude login` or check "
+            "`sanctum proxy status`."
+        )
+        return None
+    console.print("  [green]✓[/] Claude connected (subscription, via proxy)")
+    return claude_cfg
+
+
+def _run_claude_api_key() -> dict[str, Any] | None:
+    """API-key (``via=direct``) path — masked key → store → probe → revoke-or-config.
+
+    Captures the masked Anthropic key into the Keychain FIRST (the provider re-reads
+    it from the Keychain to authenticate the health-probe — same ordering contract
+    as _run_network_gear), then probes. On a green probe returns the
+    ``{via: direct, endpoint}`` config; on a REJECTED key REVOKES the Keychain entry
+    and returns None (persist nothing — fail-closed). An empty key skips Claude.
+    """
+    key = Prompt.ask("  Anthropic API key", password=True).strip()
+    if not key:
+        console.print("  [dim]no key entered — Claude skipped (add later)[/]")
+        return None
+    service, account = _CLAUDE_KEYCHAIN
+    store_device_secret(service=service, account=account, secret=key)
+    claude_cfg: dict[str, Any] = {"via": "direct", "endpoint": "https://api.anthropic.com"}
+    cfg = _config_with_provider_overrides(claude=claude_cfg)
+    health = _provider_health("claude", cfg)
+    if not health.ok:
+        _revoke_device_secret(service=service, account=account)
+        console.print(
+            f"  [red]✗[/] Claude not configured — the API key was rejected "
+            f"({health.detail or 'auth failed'}). Nothing written; re-run to retry."
+        )
+        return None
+    console.print("  [green]✓[/] Claude connected (API key)")
+    return claude_cfg
+
+
+def _run_gemini() -> dict[str, Any] | None:
+    """Gemini API-key path — masked key → store → probe → revoke-or-config.
+
+    Same fail-closed shape as the Claude API-key path: store the masked key FIRST,
+    probe, and persist the ``{model}`` config ONLY on a green probe; a rejected key
+    REVOKES the Keychain entry and returns None. An empty key skips Gemini.
+    """
+    key = Prompt.ask(
+        "  Google AI / Gemini API key (enter to skip)", password=True, default="", show_default=False
+    ).strip()
+    if not key:
+        console.print(
+            "  [dim]Gemini skipped — add later with "
+            "`sanctum onboard` or store the key in your Keychain[/]"
+        )
+        return None
+    service, account = _GEMINI_KEYCHAIN
+    store_device_secret(service=service, account=account, secret=key)
+    gemini_cfg: dict[str, Any] = {"model": "gemini-2.5-pro"}
+    cfg = _config_with_provider_overrides(gemini=gemini_cfg)
+    health = _provider_health("gemini", cfg)
+    if not health.ok:
+        _revoke_device_secret(service=service, account=account)
+        console.print(
+            f"  [red]✗[/] Gemini not configured — the API key was rejected "
+            f"({health.detail or 'auth failed'}). Nothing written; re-run to retry."
+        )
+        return None
+    console.print("  [green]✓[/] Gemini connected (API key)")
+    return gemini_cfg
+
+
+def _config_with_provider_overrides(
+    *, claude: dict[str, Any] | None = None, gemini: dict[str, Any] | None = None
+) -> config.Config:
+    """Build an in-memory Config whose claude/gemini sub-config reflects the choice.
+
+    The health-probe builds the provider from a Config; before persisting we don't
+    yet have the new ``via``/``model`` on disk, so layer the chosen override onto a
+    fresh-loaded Config so ``make_provider`` constructs the RIGHT flavour
+    (``via=direct`` for the API-key probe, ``via=proxy`` for the subscription probe).
+    Reads the existing keychain refs from the schema defaults so the provider points
+    at the just-stored key. Never written — purely the probe's input.
+    """
+    cfg = config.ensure()
+    providers = cfg.cli.providers
+    new_claude = (
+        providers.claude.model_copy(update=claude) if claude is not None else providers.claude
+    )
+    new_gemini = (
+        providers.gemini.model_copy(update=gemini) if gemini is not None else providers.gemini
+    )
+    new_providers = providers.model_copy(update={"claude": new_claude, "gemini": new_gemini})
+    new_cli = cfg.cli.model_copy(update={"providers": new_providers})
+    return cfg.model_copy(update={"cli": new_cli})
+
+
+def _run_ai_providers(*, yes: bool) -> bool:
+    """AI-provider chapter — connect Claude (sub/API) + Gemini, fail-closed.
+
+    Returns True iff a provider was actually VERIFIED and persisted (so the chapter
+    honestly reports "connected" vs "skipped"); an interactive run where the user
+    enters no key / a rejected key configures nothing and returns False — never a
+    false "connected" (design spec §2/§11). Interactive by design, so ``--yes``
+    SKIPS (a scripted run against a closed stdin would hang) and returns False.
+    Claude is offered two ways, defaulting to the $0 Max/Pro subscription; both the
+    Anthropic-API-key and the Gemini paths capture a masked key into the Keychain
+    and earn their persisted config ONLY on a green health-probe — a rejected key
+    REVOKES the entry and persists nothing. Each provider is independent: a
+    failed/declined one never blocks the other. On success the verified
+    ``cli.providers.{claude,gemini}`` blocks + ``cli.default_provider`` are written
+    atomically (siblings preserved); ``mlx_local`` always remains as the offline
+    floor, so the chapter is fully skippable. Non-blocking: the backup already
+    succeeded, so a provider miss never fails the run.
+    """
+    if yes:
+        console.print(
+            "  [yellow]skipped[/] — interactive step; run `sanctum onboard` "
+            "without --yes to connect your AI providers"
+        )
+        return False
+
+    console.print(
+        "  [dim]Sanctum routes your prompts to the best model — let's connect "
+        "yours. (Your local offline model always stays as a fallback.)[/]"
+    )
+
+    # ── Claude ──
+    console.print(
+        "\n  How do you want to connect Claude?\n"
+        "    [bold]1[/] Claude Max/Pro subscription (free — recommended)\n"
+        "    [bold]2[/] Anthropic API key"
+    )
+    choice = Prompt.ask("  choose", choices=["1", "2"], default="1")
+    claude_cfg = _run_claude_subscription() if choice == "1" else _run_claude_api_key()
+
+    # ── Gemini ──
+    gemini_cfg = _run_gemini()
+
+    # ── Persist what was verified (each independent) ──
+    if claude_cfg is None and gemini_cfg is None:
+        console.print(
+            "  [dim]no cloud providers configured — your local offline model "
+            "(mlx_local) remains the default[/]"
+        )
+        return False
+
+    # Default to Claude when it configured, else Gemini — the verified provider the
+    # user most likely wants first; mlx_local stays the floor regardless.
+    default_provider = "claude" if claude_cfg is not None else "gemini"
+    set_provider_config(
+        claude=claude_cfg, gemini=gemini_cfg, default_provider=default_provider
+    )
+    summary = " · ".join(
+        bit
+        for bit in (
+            "Claude ✓" if claude_cfg is not None else "",
+            "Gemini ✓" if gemini_cfg is not None else "",
+            "offline fallback ✓",
+        )
+        if bit
+    )
+    console.print(f"  [green]✓[/] AI configured — {summary}")
+    return True
 
 
 def _prompt_signal_target() -> str | None:
@@ -631,10 +1224,14 @@ def _identity_configured(path: Path | None = None) -> bool:
     return bool(notif.get("owner_name")) and bool(number)
 
 
-def _run_identity_setup(*, yes: bool) -> None:
+def _run_identity_setup(*, yes: bool) -> bool:
     """Collect operator name + Signal alert number → instance.yaml notifications.
 
-    Interactive (``--yes`` skips). Skips silently when already configured so
+    Returns True iff an identity is configured after this step — either it was
+    ALREADY configured (a re-run; honestly "set up") or this run saved at least a
+    name or an alert number. Returns False when ``--yes`` skips or the user entered
+    nothing, so the recap reads "skipped" rather than a false "set up" (design spec
+    §2/§11). Interactive (``--yes`` skips). Skips silently when already configured so
     re-runs don't re-prompt. Without it a fresh haus has no one to address in
     briefings and nowhere to send alerts (they'd otherwise have to fall back to
     a baked-in number — exactly the per-setup leak we're closing).
@@ -644,10 +1241,10 @@ def _run_identity_setup(*, yes: bool) -> None:
             "  [yellow]skipped[/] — interactive step; run `sanctum onboard` "
             "without --yes to set your name + alert number"
         )
-        return
+        return False
     if _identity_configured():
         console.print("  [dim]operator identity already configured — skipping[/]")
-        return
+        return True
     try:
         who = os.getlogin()
     except OSError:
@@ -661,6 +1258,7 @@ def _run_identity_setup(*, yes: bool) -> None:
         if bit
     )
     console.print(f"  [green]✓[/] saved operator identity ({summary or 'nothing entered'})")
+    return bool(owner) or bool(number)
 
 
 def set_firewalla_bridge(
@@ -710,15 +1308,18 @@ def set_firewalla_bridge(
     tf.write_text(token.strip() + "\n", encoding="utf-8")
 
 
-def _run_firewalla_pairing(*, yes: bool) -> None:
+def _run_firewalla_pairing(*, yes: bool) -> bool:
     """Interactive Firewalla bridge pairing — fail-closed.
 
-    Collects the bridge URL/token + device IP/MAC, runs an AUTHENTICATED probe
-    (:func:`screen_time.validate_firewalla_pairing`), and persists the pairing
-    ONLY on a genuine authenticated 200. A wrong token, an unreachable bridge,
-    or a malformed response is surfaced with the precise reason and the pairing
-    is NOT written — because a curfew engine pointed at an unpaired bridge
-    enforces nothing, and a false "paired" hides that until the first missed
+    Returns True ONLY on a genuine authenticated 200 that persisted the pairing;
+    returns False when ``--yes`` skips, the operator declines, or every attempt is
+    rejected — so the recap reads "skipped" rather than a false "paired" (design
+    spec §2/§11). Collects the bridge URL/token + device IP/MAC, runs an
+    AUTHENTICATED probe (:func:`screen_time.validate_firewalla_pairing`), and
+    persists the pairing ONLY on a genuine authenticated 200. A wrong token, an
+    unreachable bridge, or a malformed response is surfaced with the precise reason
+    and the pairing is NOT written — because a curfew engine pointed at an unpaired
+    bridge enforces nothing, and a false "paired" hides that until the first missed
     bedtime. ``--yes`` skips (interactive); re-run later via the same gate.
     """
     from sanctum_cli.commands import screen_time
@@ -728,10 +1329,10 @@ def _run_firewalla_pairing(*, yes: bool) -> None:
             "  [yellow]skipped[/] — interactive step; run `sanctum onboard` without "
             "--yes to pair the Firewalla bridge"
         )
-        return
+        return False
     if not Confirm.ask("  pair the Firewalla screen-time bridge now?", default=True):
         console.print("  [dim]skipped — curfews stay inert until the bridge is paired[/]")
-        return
+        return False
 
     url = Prompt.ask("  bridge URL", default="http://127.0.0.1:1984").strip()
     for attempt in range(3):
@@ -747,7 +1348,7 @@ def _run_firewalla_pairing(*, yes: bool) -> None:
                 port=_port_from_url(url),
             )
             console.print(f"  [green]✓[/] bridge paired — {result.detail}")
-            return
+            return True
         console.print(f"  [red]✗[/] not paired: {result.detail}")
         if result.state == "auth_rejected" and attempt < 2:
             console.print("  [dim]check the token and try again[/]")
@@ -758,6 +1359,7 @@ def _run_firewalla_pairing(*, yes: bool) -> None:
         "complete pairing. Re-run `sanctum onboard` (or `sanctum screen-time compat`) after "
         "fixing the bridge."
     )
+    return False
 
 
 def _port_from_url(url: str) -> int:
@@ -768,18 +1370,21 @@ def _port_from_url(url: str) -> int:
     return parsed.port or 1984
 
 
-def _run_firewalla_compat() -> None:
+def _run_firewalla_compat() -> bool:
     """Firewalla screen-time gate — skip-if-absent, strict-if-present.
 
-    The /info probe distinguishes "module not paired" (bridge unreachable or
-    no token → SKIP, onboarding continues) from "paired but incompatible" —
-    ``compat_command`` raises :class:`LocalError` for both cases, so we probe
-    first instead of parsing exception messages. When the bridge answers, the
-    assessment runs STRICT: a spoof-mode box or a near-capacity policy table
-    is surfaced to the brand-new operator *now*, fix text included, instead
-    of via the first silently-unenforced curfew. The verdict is loud but
-    non-blocking (same stance as the restore canary): the backup already
-    succeeded, and `sanctum screen-time compat --strict` is the hard gate.
+    Always returns False: this is a read-only compatibility ASSESSMENT, not a
+    configuration step — it persists nothing, so it never contributes a "configured"
+    signal to the chapter recap (the recap reflects what was PAIRED, which the
+    pairing gate owns). The /info probe distinguishes "module not paired" (bridge
+    unreachable or no token → SKIP, onboarding continues) from "paired but
+    incompatible" — ``compat_command`` raises :class:`LocalError` for both cases, so
+    we probe first instead of parsing exception messages. When the bridge answers,
+    the assessment runs STRICT: a spoof-mode box or a near-capacity policy table is
+    surfaced to the brand-new operator *now*, fix text included, instead of via the
+    first silently-unenforced curfew. The verdict is loud but non-blocking (same
+    stance as the restore canary): the backup already succeeded, and `sanctum
+    screen-time compat --strict` is the hard gate.
     """
     from sanctum_cli.commands import screen_time
 
@@ -788,7 +1393,7 @@ def _run_firewalla_compat() -> None:
             "  [yellow]skipped[/] — screen-time module not paired yet — "
             "run `sanctum screen-time compat` after pairing"
         )
-        return
+        return False
     try:
         # Prints the per-check table (status + fix columns) before raising.
         screen_time.compat_command(strict=True)
@@ -796,6 +1401,7 @@ def _run_firewalla_compat() -> None:
         console.print(f"  [red]✗[/] {exc.message}")
         if exc.fix:
             console.print(f"  [dim]fix: {exc.fix}[/]")
+    return False
 
 
 # ── Network-gear detection + pairing gate ────────────────────────────
@@ -1169,14 +1775,18 @@ def store_device_secret(*, service: str, account: str, secret: str) -> None:
         _mirror_to_trifecta(service=service, account=account, secret=secret)
 
 
-def _run_network_gear(*, yes: bool) -> None:
+def _run_network_gear(*, yes: bool) -> bool:
     """Network-gear detection + guided pairing gate — additive, fail-closed.
 
-    Runs the registry's read-only detection across the registered providers over
-    the current network; for EACH detected kind it offers guided pairing that
-    mirrors :func:`_run_firewalla_pairing`: prompt the admin password → run a
-    READ-ONLY ``provider.connect()`` auth-probe → on a genuine success write the
-    password to the Keychain (the resolved ``(service, account)``) AND persist a
+    Returns True iff at least one device was actually PAIRED (a green auth-probe +
+    a persisted ``devices.<kind>`` block); returns False when ``--yes`` skips, no
+    gear is detected, the operator declines every device, or every probe is
+    rejected — so the recap reads "skipped" rather than a false "paired" (design
+    spec §2/§11). Runs the registry's read-only detection across the registered
+    providers over the current network; for EACH detected kind it offers guided
+    pairing that mirrors :func:`_run_firewalla_pairing`: prompt the admin password →
+    run a READ-ONLY ``provider.connect()`` auth-probe → on a genuine success write
+    the password to the Keychain (the resolved ``(service, account)``) AND persist a
     ``devices.<kind>`` reference block to instance.yaml. A rejected probe (wrong
     password / unreachable box) is surfaced loudly and NOTHING is written —
     because a ``devices`` block pointing at a box you cannot auth to is a false
@@ -1190,7 +1800,7 @@ def _run_network_gear(*, yes: bool) -> None:
             "  [yellow]skipped[/] — interactive step; run `sanctum onboard` "
             "without --yes to pair your network gear"
         )
-        return
+        return False
 
     from sanctum_cli.commands import net as net_cmd
 
@@ -1201,8 +1811,9 @@ def _run_network_gear(*, yes: bool) -> None:
             "  [dim]no network gear detected — nothing to pair "
             "(re-run `sanctum onboard` after connecting your hub/mesh)[/]"
         )
-        return
+        return False
 
+    paired_any = False
     label_map = dict(_NETWORK_GEAR_KINDS)
     for kind, provider in detected:
         label = label_map.get(kind, kind)
@@ -1267,6 +1878,8 @@ def _run_network_gear(*, yes: bool) -> None:
             keychain_account=account,
         )
         console.print(f"  [green]✓[/] {label} paired — {brand_pin} ({kind})")
+        paired_any = True
+    return paired_any
 
 
 def _probe_device(
@@ -1362,8 +1975,19 @@ def _revoke_device_secret(*, service: str, account: str) -> None:
         )
 
 
-def _run_canary() -> None:
-    """Lightweight canary — restore ~/.zshrc, sha256-diff against live."""
+def _run_canary() -> CanaryOutcome:
+    """Lightweight canary — restore ~/.zshrc, sha256-diff against live.
+
+    Returns the honest :class:`CanaryOutcome` for EVERY path so the orchestrator can
+    thread it into the recap + green-check instead of declaring a blanket "verified":
+
+    * SKIPPED — no configured repo, no ``~/.zshrc``, or the restored file is absent.
+    * FAILED — restic restore errored, or the restored bytes don't match live (a real
+      backup-integrity problem the operator must see).
+    * VERIFIED — the round-trip succeeded.
+
+    NON-BLOCKING: this never raises; onboarding continues regardless of the outcome.
+    """
     import hashlib
     import os
     import subprocess
@@ -1376,11 +2000,11 @@ def _run_canary() -> None:
         console.print(
             "  [yellow]skipped[/] — no cloud_backup.primary; canary needs a configured repo"
         )
-        return
+        return CanaryOutcome.SKIPPED
     probe = Path("~/.zshrc").expanduser()
     if not probe.exists():
         console.print("  [yellow]skipped[/] — no ~/.zshrc on this host; nothing to round-trip")
-        return
+        return CanaryOutcome.SKIPPED
     live_sha = hashlib.sha256(probe.read_bytes()).hexdigest()
     console.print(f"  live ~/.zshrc sha256={live_sha[:16]}…")
 
@@ -1412,15 +2036,16 @@ def _run_canary() -> None:
         )
         if proc.returncode != 0:
             console.print(f"  [red]✗[/] restic restore failed: {proc.stderr.strip()[:160]}")
-            return
+            return CanaryOutcome.FAILED
         restored = Path(tmp) / probe.relative_to(probe.anchor)
         if not restored.exists():
             console.print(f"  [yellow]skipped[/] — restored file not found at {restored}")
-            return
+            return CanaryOutcome.SKIPPED
         restored_sha = hashlib.sha256(restored.read_bytes()).hexdigest()
         if restored_sha == live_sha:
             console.print("  [green]✓[/] canary survived round-trip")
-        else:
-            console.print(
-                f"  [red]✗[/] canary diff: live={live_sha[:16]} != restored={restored_sha[:16]}"
-            )
+            return CanaryOutcome.VERIFIED
+        console.print(
+            f"  [red]✗[/] canary diff: live={live_sha[:16]} != restored={restored_sha[:16]}"
+        )
+        return CanaryOutcome.FAILED

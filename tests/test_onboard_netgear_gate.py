@@ -87,14 +87,16 @@ def test_gate_is_registered_data_referencing_a_real_recipe() -> None:
 def test_gate_is_wired_into_the_dispatch_loop() -> None:
     """The 'network-gear' branch is actually dispatched — registration is not enough.
 
-    A gate listed in RECIPE_GATES but with no matching branch in the dispatch loop
+    A gate listed in RECIPE_GATES but with no matching branch in the dispatcher
     would be dead data. Assert the source wires the listed name to
     ``_run_network_gear`` (the contract between the data table and the dispatcher),
-    so 'registered' genuinely means 'runs'.
+    so 'registered' genuinely means 'runs'. The Apple-arc framing (Task 2) extracted
+    the per-gate dispatch from ``onboard_command`` into the ``_run_gate`` helper, so
+    inspect THAT — the dispatcher's new home — rather than the orchestrator.
     """
     import inspect
 
-    src = inspect.getsource(onboard.onboard_command)
+    src = inspect.getsource(onboard._run_gate)
     assert 'gate == "network-gear"' in src
     assert "_run_network_gear(yes=yes)" in src
 
@@ -112,7 +114,10 @@ def _invoke_family_onboard_yes() -> tuple[int, str]:
         patch("sanctum_cli.commands.onboard.backup_cmd.backup_estimate"),
         patch("sanctum_cli.commands.onboard.backup_cmd.backup_run"),
         patch("sanctum_cli.commands.onboard._dispatch_cloud_setup"),
-        patch("sanctum_cli.commands.onboard._run_canary"),
+        patch(
+            "sanctum_cli.commands.onboard._run_canary",
+            return_value=onboard.CanaryOutcome.VERIFIED,
+        ),
     ):
         result = runner.invoke(app, ["onboard", "--recipe", "family", "--yes"])
     return result.exit_code, " ".join(result.stdout.split())
@@ -341,10 +346,14 @@ def test_paired_gate_writes_hostile_password_verbatim_to_keychain_seam(
         patch("sanctum_cli.commands.onboard.backup_cmd.backup_estimate"),
         patch("sanctum_cli.commands.onboard.backup_cmd.backup_run"),
         patch("sanctum_cli.commands.onboard._dispatch_cloud_setup"),
-        patch("sanctum_cli.commands.onboard._run_canary"),
+        patch(
+            "sanctum_cli.commands.onboard._run_canary",
+            return_value=onboard.CanaryOutcome.VERIFIED,
+        ),
         patch("sanctum_cli.commands.onboard._run_identity_setup"),
         patch("sanctum_cli.commands.onboard._run_family_setup"),
         patch("sanctum_cli.commands.onboard._run_firewalla_pairing"),
+        patch("sanctum_cli.commands.onboard._run_ai_providers"),
         # Prompt.ask(password=True) routes to getpass, which warns on a non-TTY
         # CliRunner; pyproject filterwarnings=error would crash the prompt. The
         # warning is a test-environment artifact (a real TTY never fires it), and

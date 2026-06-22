@@ -193,7 +193,10 @@ def _invoke_family_onboard_yes() -> tuple[int, str]:
         patch("sanctum_cli.commands.onboard.backup_cmd.backup_estimate"),
         patch("sanctum_cli.commands.onboard.backup_cmd.backup_run"),
         patch("sanctum_cli.commands.onboard._dispatch_cloud_setup"),
-        patch("sanctum_cli.commands.onboard._run_canary"),
+        patch(
+            "sanctum_cli.commands.onboard._run_canary",
+            return_value=onboard.CanaryOutcome.VERIFIED,
+        ),
     ):
         result = runner.invoke(app, ["onboard", "--recipe", "family", "--yes"])
     return result.exit_code, " ".join(result.stdout.split())
@@ -223,12 +226,16 @@ def _invoke_family_onboard_interactive(input_text: str) -> tuple[int, str]:
         patch("sanctum_cli.commands.onboard.backup_cmd.backup_estimate"),
         patch("sanctum_cli.commands.onboard.backup_cmd.backup_run"),
         patch("sanctum_cli.commands.onboard._dispatch_cloud_setup"),
-        patch("sanctum_cli.commands.onboard._run_canary"),
+        patch(
+            "sanctum_cli.commands.onboard._run_canary",
+            return_value=onboard.CanaryOutcome.VERIFIED,
+        ),
         # The other interactive gates have their own tests; mock them so they
         # don't consume this gate's stdin.
         patch("sanctum_cli.commands.onboard._run_identity_setup"),
         patch("sanctum_cli.commands.onboard._run_family_setup"),
         patch("sanctum_cli.commands.onboard._run_firewalla_pairing"),
+        patch("sanctum_cli.commands.onboard._run_ai_providers"),
         # The masked admin-password prompt (Prompt.ask(password=True)) routes to
         # getpass, which emits GetPassWarning when stdin is not a real TTY (every
         # CliRunner). The pyproject `filterwarnings=["error"]` would turn that
