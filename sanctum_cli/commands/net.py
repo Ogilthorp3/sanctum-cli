@@ -509,10 +509,9 @@ _firewalla_registered = firewalla_provider
 # devices.orbi.brand pin resolves to the real provider instead of the read-only
 # GenericReadOnlyProvider fallback. Registration is import-triggered and there is
 # NO dynamic provider auto-discovery, so this explicit import is the ONLY thing
-# that wires the Orbi provider into a real install. There is no `sanctum net orbi`
-# sub-app yet (guest-wifi / channel intents are not surfaced as commands), so this
-# module-scope reference is what keeps the import from being pruned as unused;
-# mirror the sagemcom/firewalla pattern above when the orbi command surface lands.
+# that wires the Orbi provider into a real install. Referenced here so the import
+# is never pruned as unused; the `sanctum net orbi` sub-app below is what surfaces
+# the provider's read + guest-wifi commands.
 _orbi_registered = orbi_provider
 
 firewalla_app = typer.Typer(
@@ -722,3 +721,229 @@ def firewalla_pause(
         raise typer.Exit(code=int(exc.exit_code))
 
     console.print(f"\n[dim]preview only: no changes made. {escape(_PAUSE_DESCOPED_FIX)}[/]")
+
+
+# ─── orbi (network-gear provider surface) ────────────────────────────
+#
+# Mirrors the hub + firewalla sub-apps: an `orbi` Typer sub-app under net_app,
+# resolved via registry.resolve("orbi", net) and connected through the same
+# DeviceProvider rails. Reads (status / firmware / channels) are read-only;
+# guest-wifi is MUTATING and defaults to a dry-run that fires ZERO set calls —
+# the apply path routes through guarded_apply via the provider's GUEST_WIFI
+# capability_op (snapshot → confirm → set → verify → rollback). The overnight
+# build never mutates live gear (we have no live Orbi creds yet either).
+
+orbi_app = typer.Typer(
+    help="Drive the NETGEAR Orbi mesh router through the device-provider rails."
+)
+net_app.add_typer(orbi_app, name="orbi")
+
+# Provider-path leaves the orbi read commands surface. These mirror the provider's
+# own path vocabulary (sanctum_cli.devices.orbi); a path the provider does not
+# expose returns None and the command prints a dash. The guest-wifi WRITE leaf is
+# NOT hardcoded here — it is resolved from the provider's capability_op(GUEST_WIFI),
+# so a non-pynetgear mesh brand toggles guest wifi via its own leaf.
+_ORBI_GUEST_2G = "guest_wifi/2g"
+_ORBI_GUEST_5G = "guest_wifi/5g"
+_ORBI_CHANNEL_2G = "channel/2g"
+_ORBI_CHANNEL_5G = "channel/5g"
+_ORBI_FIRMWARE_PATH = "firmware/new"
+_ORBI_MODEL_PATH = "info/model"
+
+# Where the Orbi admin password lives (mirrors the Orbi provider's keychain tuple);
+# used to build Creds before connect. The provider re-reads the secret from the
+# Keychain itself, so a None secret here is fine (credentials never flow through
+# the CLI layer).
+_ORBI_KEYCHAIN_ACCOUNT = orbi_provider.KEYCHAIN_ACCOUNT
+
+
+def _orbi_netcontext() -> NetContext:
+    """Build the NetContext the registry fingerprints the Orbi over.
+
+    Parses the default gateway from the real ``route`` probe (read-only) and
+    threads the real runner so a provider's ``detect()`` can probe without owning
+    its own subprocess plumbing. Monkeypatched in tests so no shell-out occurs.
+    """
+    gw = detect.parse_default_gateway(system.real_runner(("route",)))
+    return NetContext(gateway_ip=gw, runner=system.real_runner)
+
+
+def _orbi_creds(net: NetContext) -> Creds:
+    """Assemble Creds for the resolved Orbi.
+
+    The host is the detected gateway IP; the username is the Orbi admin account.
+    The secret is left ``None`` on purpose — the provider reads the password from
+    the Keychain at connect time (credentials never flow through the CLI layer).
+    """
+    return Creds(
+        host=net.gateway_ip or "",
+        username=_ORBI_KEYCHAIN_ACCOUNT,
+        secret=None,
+        key_path=None,
+    )
+
+
+def _resolve_orbi() -> DeviceProvider:
+    """Resolve + connect the Orbi provider for the local network.
+
+    Detection is read-only; ``connect`` opens the (best-effort) pynetgear session.
+    Any transport/auth failure on a later read raises a ``SanctumError``
+    (DeviceError) which the command wrappers map to a clean exit code.
+
+    NOTE: the caller MUST release the provider via ``disconnect()`` — use
+    :func:`_connected_orbi` (a context manager) instead of calling this directly
+    so teardown is guaranteed.
+
+    An optional instance.yaml ``devices.orbi.brand`` pins the provider explicitly,
+    bypassing ``detect()`` — the escape hatch for a box whose read-only probe is
+    not implemented (without it a stubbed probe degrades the real Orbi to the
+    read-only fallback). Pin ``orbi`` to drive a NETGEAR Orbi end-to-end.
+    """
+    net = _orbi_netcontext()
+    pinned = config.instance_value("devices.orbi.brand", None)
+    brand_pin = str(pinned) if pinned is not None else None
+    provider = registry.resolve("orbi", net, brand_pin=brand_pin)
+    provider.connect(_orbi_creds(net))
+    return provider
+
+
+@contextmanager
+def _connected_orbi() -> Iterator[DeviceProvider]:
+    """Yield a connected Orbi provider, guaranteeing ``disconnect()`` on exit.
+
+    Closes the lifecycle gap behind every ``sanctum net orbi ...`` command:
+    ``disconnect`` is part of the ``DeviceProvider`` Protocol and is idempotent +
+    safe even if ``connect`` failed, so the ``finally`` can always call it.
+    """
+    provider = _resolve_orbi()
+    try:
+        yield provider
+    finally:
+        provider.disconnect()
+
+
+@orbi_app.command("status", help="Read-only Orbi summary: brand, model, guest-wifi state.")
+def orbi_status() -> None:
+    try:
+        with _connected_orbi() as provider:
+            model = provider.get(_ORBI_MODEL_PATH)
+            guest_2g = provider.get(_ORBI_GUEST_2G)
+            guest_5g = provider.get(_ORBI_GUEST_5G)
+            brand, kind = provider.brand, provider.kind
+    except SanctumError as exc:
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code)) from exc
+    console.print(f"[bold]orbi:[/] {escape(brand)} ({escape(kind)})")
+    console.print(f"[bold]model:[/] {escape(model or '-')}")
+    console.print(f"[bold]guest-wifi 2g:[/] {escape(guest_2g or '-')}")
+    console.print(f"[bold]guest-wifi 5g:[/] {escape(guest_5g or '-')}")
+
+
+@orbi_app.command("firmware", help="Read-only: the Orbi's available firmware update, if any.")
+def orbi_firmware() -> None:
+    try:
+        with _connected_orbi() as provider:
+            new = provider.get(_ORBI_FIRMWARE_PATH)
+    except SanctumError as exc:
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code)) from exc
+    console.print(f"[bold]firmware (new):[/] {escape(new or '-')}")
+
+
+@orbi_app.command("channels", help="Read-only: the Orbi's 2.4 GHz / 5 GHz radio channels.")
+def orbi_channels() -> None:
+    try:
+        with _connected_orbi() as provider:
+            ch_2g = provider.get(_ORBI_CHANNEL_2G)
+            ch_5g = provider.get(_ORBI_CHANNEL_5G)
+    except SanctumError as exc:
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code)) from exc
+    console.print(f"[bold]channel 2g:[/] {escape(ch_2g or '-')}")
+    console.print(f"[bold]channel 5g:[/] {escape(ch_5g or '-')}")
+
+
+@orbi_app.command(
+    "guest-wifi",
+    help="Turn the Orbi guest network on/off. Dry-run by default; pass --apply to fire.",
+)
+def orbi_guest_wifi(
+    state: Annotated[str, typer.Argument(help="Desired guest-wifi state: on | off.")],
+    apply: Annotated[
+        bool,
+        typer.Option("--apply", help="Actually fire the change (guarded by snapshot→verify→rollback)."),
+    ] = False,
+    force: Annotated[
+        bool, typer.Option("--force", help="Skip the confirmation prompt (with --apply).")
+    ] = False,
+) -> None:
+    desired = state.strip().lower()
+    if desired not in ("on", "off"):
+        exc = DeviceError(
+            f"invalid guest-wifi state {state!r} (expected 'on' or 'off')",
+            fix="pass 'on' or 'off', e.g. `sanctum net orbi guest-wifi on`",
+        )
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code))
+
+    try:
+        with _connected_orbi() as provider:
+            # Resolve the guest-wifi leaf from the provider's own vocabulary so the
+            # CLI never hardcodes an Orbi path; None → the provider has no guest-wifi
+            # op and we refuse rather than mutate an unknown leaf.
+            op = provider.capability_op(Capability.GUEST_WIFI)
+            if op is None:
+                exc = DeviceError(
+                    f"{provider.brand} ({provider.kind}) does not support guest-wifi toggling",
+                    fix="use a provider that advertises Capability.GUEST_WIFI, or pin the right brand.",
+                )
+                _report(exc)
+                raise typer.Exit(code=int(exc.exit_code))
+            # The value that ENGAGES the capability is op.engaged ("on"); the
+            # disengaged value is the other state. Derive it so a brand whose
+            # engaged sentinel is not literally "on" still flips correctly.
+            target_value = op.engaged if desired == "on" else ("off" if op.engaged == "on" else "on")
+
+            plan = [
+                f"guest-wifi {desired} plan:",
+                f"  1. set {op.path} = {target_value}  (Orbi guest network → {desired})",
+                "  2. verify: the guest-wifi leaf reflects the requested state",
+                "  3. on verify failure: roll back to the pre-change snapshot",
+            ]
+            for line in plan:
+                console.print(escape(line))
+
+            if not apply:
+                # Dry-run: describe, do not mutate. The hard guardrail — no
+                # provider.set / guarded_apply is reached on this branch.
+                console.print(
+                    "\n[dim]dry-run: no changes made. Re-run with --apply to fire.[/]"
+                )
+                return
+
+            def change(pv: DeviceProvider) -> None:
+                pv.set(op.path, target_value)
+
+            def verify_fn() -> bool:
+                # Real-world verify: re-read the leaf and confirm it reflects the
+                # requested state (a refused/no-op set leaves the old value, which
+                # trips rollback). This is a read of the SAME leaf we wrote.
+                return provider.get(op.path) == target_value
+
+            result = rails.guarded_apply(
+                provider,
+                change,
+                verify_fn=verify_fn,
+                confirm=lambda p: typer.confirm(f"{p}\nProceed?"),
+                force=force,
+                rollback=True,
+            )
+    except SanctumError as exc:
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code)) from exc
+
+    if result.ok:
+        console.print(f"\n[green]✓[/] {escape(result.detail)}")
+    else:
+        console.print(f"\n[yellow]{escape(result.detail)}[/]")
+        raise typer.Exit(code=1)
