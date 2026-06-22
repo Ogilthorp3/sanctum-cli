@@ -148,6 +148,69 @@ def test_ai_providers_gate_listed_in_family_recipe() -> None:
     assert set(onboard.RECIPE_GATES) <= set(recipes.BUILTINS)
 
 
+# ── Universal arc: ai-providers is wired into EVERY recipe (Task 3) ──
+# The Apple-arc is universal — the recipe only chooses the backup scope, so the
+# "Your AI" chapter must run on `family`, `operator`, AND `code`. A recipe that
+# lists no gates would render the chapter banner but silently never connect a
+# provider, so each built-in recipe carries the `ai-providers` gate.
+
+
+def test_ai_providers_gate_listed_in_every_builtin_recipe() -> None:
+    """`ai-providers` is in family, operator, AND code — the arc is universal."""
+    for recipe in ("family", "operator", "code"):
+        assert "ai-providers" in onboard.RECIPE_GATES[recipe], recipe
+    # Gates may only key on recipes that actually exist (no phantom recipes).
+    assert set(onboard.RECIPE_GATES) <= set(recipes.BUILTINS)
+    # operator and code carry their own gate tuple (not just family).
+    assert "operator" in onboard.RECIPE_GATES
+    assert "code" in onboard.RECIPE_GATES
+
+
+def test_ai_providers_dispatch_branch_exists() -> None:
+    """The dispatcher wires the listed name to `_run_ai_providers` — registration
+    is not enough; a listed gate with no branch would be dead data."""
+    import inspect
+
+    src = inspect.getsource(onboard._run_gate)
+    assert 'gate == "ai-providers"' in src
+    assert "_run_ai_providers(yes=yes)" in src
+
+
+def test_ai_providers_dispatch_invokes_handler() -> None:
+    """`_run_gate('ai-providers', ...)` behaviorally routes to `_run_ai_providers`."""
+    seen: dict[str, Any] = {}
+    with patch(
+        "sanctum_cli.commands.onboard._run_ai_providers",
+        lambda *, yes: seen.update(yes=yes),
+    ):
+        onboard._run_gate("ai-providers", yes=True)
+    assert seen == {"yes": True}
+
+
+def test_ai_providers_runs_in_operator_and_code_chapters() -> None:
+    """The "Your AI" chapter actually activates `ai-providers` for operator + code.
+
+    The orchestrator runs only the gates the active recipe lists, partitioned by
+    chapter (`_chapter_active_gates`). For the arc to read identically on every
+    recipe, the "Your AI" chapter must resolve to `('ai-providers',)` on operator
+    and code, not the empty tuple (which would render the banner but connect nothing).
+    """
+    for recipe in ("family", "operator", "code"):
+        assert onboard._chapter_active_gates("Your AI", recipe) == ("ai-providers",), recipe
+
+
+def test_ai_providers_precedes_network_gates_in_every_recipe() -> None:
+    """Placement (tools-before-data): `ai-providers` is listed ahead of the network
+    gates in each recipe tuple, matching the family ordering decision — so the
+    RECIPE_GATES order honors AI → Network within the gate-driven chapters."""
+    network_gates = {"firewalla-pairing", "firewalla-compat", "network-gear"}
+    for recipe in ("family", "operator", "code"):
+        gates = onboard.RECIPE_GATES[recipe]
+        ai_idx = gates.index("ai-providers")
+        for net_gate in network_gates & set(gates):
+            assert ai_idx < gates.index(net_gate), (recipe, net_gate)
+
+
 # ── --yes skips the whole chapter (no prompt, no write) ──────────────
 
 

@@ -66,6 +66,21 @@ RECIPE_GATES: dict[str, tuple[str, ...]] = {
         "firewalla-compat",
         "network-gear",
     ),
+    # The Apple arc is UNIVERSAL — the recipe only chooses the backup scope, so the
+    # "You" (identity) and "Your AI" chapters run on every recipe. operator/code are
+    # non-family contexts (no kids → no screen-time/Firewalla gates, no family
+    # interview), so their tuples are the minimal universal pair: operator identity,
+    # then the AI providers. ai-providers is placed AFTER identity-setup and (per the
+    # tools-before-data ordering decision) ahead of any network gates — matching the
+    # family ordering and the _CHAPTER_GATES partition, so the arc reads identically.
+    "operator": (
+        "identity-setup",
+        "ai-providers",
+    ),
+    "code": (
+        "identity-setup",
+        "ai-providers",
+    ),
 }
 
 # ── The Apple-grade arc (experience framing) ──────────────────────────
