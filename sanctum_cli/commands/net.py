@@ -5,7 +5,6 @@ import socket
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
-from urllib.parse import quote
 
 import typer
 from rich.console import Console
@@ -589,15 +588,19 @@ def _connected_firewalla() -> Iterator[DeviceProvider]:
 
 
 def _fw_pause_path(target: str) -> str:
-    """The bridge path that pauses policy ``target`` (target id encoded in path).
+    """The bridge path that pauses policy ``target`` (RAW — encoding is the provider's).
 
-    ``target`` crosses into the bridge URL, so it is percent-encoded here at the
-    boundary (``quote`` with ``safe=''``) rather than relying on the HTTP client's
-    incidental behavior — a target carrying a ``/`` or ``%`` must not silently
-    address the wrong policy. The path shape (``/policies/<id>/pause``) mirrors the
-    provider's existing ``/policies`` vocabulary.
+    ``target`` is interpolated VERBATIM here; the percent-encoding is owned by ONE
+    layer — the provider's bridge seam (``firewalla._encode_path``, applied inside
+    ``_fetch_bridge_json`` / ``_post_bridge_json``). Encoding here *as well* would
+    double-encode: a literal-``%`` target id would become ``%2525`` at the wire —
+    the exact footgun the boundary fix is meant to prevent — because both layers
+    would percent-encode the same bytes (CLAUDE.md "a test cannot catch a bug it
+    shares"). The path shape (``/policies/<id>/pause``) mirrors the provider's
+    existing ``/policies`` vocabulary; the provider seam keeps the ``/`` separators
+    literal and encodes everything else exactly once.
     """
-    return f"/policies/{quote(target, safe='')}/pause"
+    return f"/policies/{target}/pause"
 
 
 def _firewalla_pause_verify(provider: DeviceProvider, target: str) -> bool:

@@ -82,6 +82,18 @@ _INFO_PATH = "/info"
 # HTTP timeout for bridge calls (seconds). Matches the screen_time engine.
 _HTTP_TIMEOUT_S = 15
 
+# RFC-3986 path-character safe set for boundary encoding. Keeps every byte that
+# is *already* legal, un-encoded, in a URL path literal — the '/' separators,
+# ':' (so a ``/host/AA:BB:CC:..`` MAC read rides byte-identical to the prior
+# wire), '@', the sub-delims ``!$&'()*+,;=``, and the unreserved punctuation
+# ``-._~``. Only a byte that is NOT in this set is percent-encoded — crucially a
+# literal '%' (NOT listed) becomes '%25', so an id literally containing ``%41``
+# encodes once to ``%2541`` (the id's own bytes) instead of being preserved by
+# httpx and mis-decoded server-side to the letter 'A'. Spaces and non-ASCII are
+# likewise encoded. This is the prior code's literal-'%' fix WITHOUT the
+# colon-encoding regression the bare ``safe="/"`` introduced.
+_PATH_SAFE = "/:@!$&'()*+,;=~-._"
+
 
 def _bridge_url() -> str:
     """Resolve the bridge base URL (env override → loopback default)."""
@@ -96,12 +108,21 @@ def _encode_path(path: str) -> str:
     ``%``, a space, or a non-ASCII char. ``httpx`` *preserves* an existing
     ``%``-sequence, so without this an id literally containing ``%41`` would ride
     to the box as ``%41`` (decoding server-side to the letter ``A``) and silently
-    address the WRONG policy. ``quote(path, safe="/")`` turns that literal ``%``
-    into ``%25`` (``%41`` → ``%2541``, the id's own bytes) while keeping the path's
-    ``/`` separators literal — one layer of encoding the provider owns, so httpx
-    has nothing left to encode and cannot double-encode it to ``%2525``.
+    address the WRONG policy. ``quote(path, safe=_PATH_SAFE)`` turns that literal
+    ``%`` into ``%25`` (``%41`` → ``%2541``, the id's own bytes) — one layer of
+    encoding the provider owns, so httpx has nothing left to encode and cannot
+    double-encode it to ``%2525``.
+
+    The safe set is the full RFC-3986 path-character class (``_PATH_SAFE``), NOT
+    the bare ``"/"`` an earlier cut used. That earlier set encoded ``':'`` to
+    ``%3A``, which silently changed the shipped screen-time read path
+    ``/host/AA:BB:CC:..`` (a colon is a legal, literal path char) and rests on an
+    unverifiable cross-layer assumption that the bridge route-matches ``%3A`` the
+    same as ``':'``. Keeping ``':'`` and the other pchars literal sends every
+    previously-working path byte-identical to the pre-refactor wire while still
+    closing the literal-``%`` footgun.
     """
-    return quote(path, safe="/")
+    return quote(path, safe=_PATH_SAFE)
 
 
 def _bridge_transport() -> httpx.BaseTransport | None:

@@ -130,6 +130,70 @@ def test_already_safe_path_unchanged_through_boundary(
     assert capture_transport[-1].url.raw_path.decode("ascii") == "/info"
 
 
+def test_host_mac_colon_stays_literal_through_boundary(
+    capture_transport: list[httpx.Request],
+) -> None:
+    """REGRESSION: the screen-time ``/host/<mac>`` read path keeps its colons literal.
+
+    A MAC like ``AA:BB:CC:00:00:01`` is a legal, literal URL path string — every
+    ``:`` is an RFC-3986 sub-delim-adjacent pchar. The screen-time compat gate
+    (``screen_time.compat_command`` → ``_fetch_bridge_json(f"/host/{mac}")``)
+    decides whether a child's device is enforced, so the wire path MUST be
+    byte-identical to the pre-refactor ``/host/AA:BB:CC:00:00:01``. An earlier cut
+    used ``quote(path, safe="/")``, which encoded each ``:`` to ``%3A`` and rested
+    on the unverifiable cross-layer assumption that the bridge route-matches
+    ``%3A`` the same as ``:`` — an unrequested behavior change to a shipped live
+    read path. Driven through the REAL httpx encoding seam (the safety-net hole
+    was that the characterization test monkeypatched ``st._fetch_bridge_json``
+    wholesale, bypassing exactly this seam).
+    """
+    mac = "AA:BB:CC:00:00:01"
+    fw._fetch_bridge_json(f"/host/{mac}")
+
+    assert capture_transport, "no request reached the transport"
+    raw = capture_transport[-1].url.raw_path.decode("ascii")
+    assert raw == "/host/AA:BB:CC:00:00:01"  # byte-identical to the old wire path
+    assert "%3A" not in raw  # the colon must NOT be percent-encoded
+
+
+# ── net.py + provider seam: encoding owned by exactly ONE layer ───────
+
+
+def test_pause_path_plus_provider_seam_encode_hostile_target_exactly_once(
+    capture_transport: list[httpx.Request],
+) -> None:
+    """END-TO-END: ``_fw_pause_path`` + the provider POST seam encode a hostile
+    target exactly once — no double-encoding to ``%2525``.
+
+    The bug class (CLAUDE.md "a test cannot catch a bug it shares"): both
+    ``net._fw_pause_path`` and the provider seam used to percent-encode, both unit
+    tests passed in isolation, but a literal-``%`` policy id misfired end-to-end as
+    ``%2525``. This test drives the TWO layers TOGETHER — the CLI builds the path,
+    the provider seam puts it on the real httpx wire — with a target carrying a
+    literal ``%41``, a space, AND a non-ASCII char, and asserts the wire bytes are
+    encoded ONCE. Ownership now lives solely in the provider seam; ``_fw_pause_path``
+    interpolates the target verbatim.
+    """
+    from sanctum_cli.commands import net
+
+    target = "abc%41 café"  # literal '%41' (data, not an escape), space, non-ASCII
+    path = net._fw_pause_path(target)
+    # The CLI path is RAW — the per-call quote was removed (single-ownership).
+    assert path == "/policies/abc%41 café/pause"
+
+    # Cross the provider boundary exactly as the apply path does (provider.set →
+    # _post_bridge_json). The mock transport records the real wire bytes.
+    fw._post_bridge_json(path, {"value": "paused"})
+
+    assert capture_transport, "no request reached the transport"
+    raw = capture_transport[-1].url.raw_path.decode("ascii")
+    # Encoded EXACTLY once: '%41' → '%2541' (the id's own bytes), space → '%20',
+    # 'é' → '%C3%A9', the '/policies/.../pause' separators kept literal.
+    assert raw == "/policies/abc%2541%20caf%C3%A9/pause"
+    assert "%2525" not in raw  # the double-encoding the design must prevent
+    assert "abc%2541" in raw  # the literal '%41' survived as data, encoded once
+
+
 # ── registry now lists "firewalla" ────────────────────────────────────
 
 
