@@ -36,6 +36,13 @@ import os
 
 import pytest
 
+# This module drives the REAL ``sagemcom_api`` encoding path on purpose (the
+# whole premise of the boundary test). It is an OPTIONAL transport dependency
+# declared in the ``hub`` extra (pulled in by ``dev``); guard the whole module
+# so a contributor who installed without it gets a clean SKIP rather than a
+# collection ERROR. The gate (``pip install -e ".[dev]"``) has it, so it runs.
+pytest.importorskip("sagemcom_api")
+
 from sanctum_cli.devices.base import Creds
 
 BRIDGE_PATH = "Device/Services/BellNetworkCfg/SetBridgeMode"
