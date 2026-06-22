@@ -44,6 +44,14 @@ dependencies = [
 hub = [
   "sagemcom_api>=1.4,<2",
 ]
+# The NETGEAR Orbi SOAP transport. Like `hub`, it is an OPTIONAL runtime
+# dependency — the Orbi provider imports it lazily inside _make_client and
+# degrades with a "pip install pynetgear" hint if absent (see
+# sanctum_cli/devices/orbi.py). The unit tests mock the factory so they run
+# without it, but `dev` includes `orbi` so the gate / CI install set has it.
+orbi = [
+  "pynetgear>=0.10,<1",
+]
 dev = [
   "pytest>=8.0",
   "pytest-cov>=5.0",
@@ -53,6 +61,7 @@ dev = [
   "types-PyYAML",
   "respx>=0.21",
   "sanctum-cli[hub]",
+  "sanctum-cli[orbi]",
 ]
 
 [project.scripts]
@@ -125,6 +134,13 @@ disallow_untyped_defs = false
 # wrapped behind the typed DeviceProvider surface, so treat it as untyped.
 [[tool.mypy.overrides]]
 module = "sagemcom_api.*"
+ignore_missing_imports = true
+
+# pynetgear (the SOAP transport for the Orbi provider) likewise ships no py.typed
+# marker and no stubs. It is imported lazily inside orbi._make_client and wrapped
+# behind the typed DeviceProvider surface, so treat it as untyped.
+[[tool.mypy.overrides]]
+module = "pynetgear.*"
 ignore_missing_imports = true
 
 # ─── pytest ──────────────────────────────────────────────────────────
