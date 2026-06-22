@@ -295,6 +295,48 @@ def test_op_before_connect_raises(monkeypatch: pytest.MonkeyPatch) -> None:
         p.get(BRIDGE_PATH)
 
 
+# ── auth_ok: the uniform auth oracle (fail-closed-connect brand) ──────
+
+
+def test_auth_ok_true_after_successful_connect(
+    patched: FakeSahClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A genuine connect (login succeeded, _client set) → auth_ok() is True."""
+    p = _connected(monkeypatch, patched)
+    assert p.auth_ok() is True
+
+
+def test_auth_ok_false_before_connect() -> None:
+    """A fresh provider has not authenticated — auth_ok() is False."""
+    from sanctum_cli.devices.sagemcom import SagemcomHubProvider
+
+    assert SagemcomHubProvider().auth_ok() is False
+
+
+def test_auth_ok_false_after_failed_login(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A rejected login RAISES (fail-closed) and never sets _client → auth_ok() False.
+
+    Unlike Orbi, this provider's connect re-raises on a failed login, so the probe
+    fails-close on the raise alone — but auth_ok must STILL report False (the
+    _client was never set), so the two auth oracles never disagree.
+    """
+    from sanctum_cli.devices.sagemcom import SagemcomHubProvider
+
+    class _RejectingClient:
+        async def login(self) -> None:
+            msg = "bad password"
+            raise RuntimeError(msg)
+
+    monkeypatch.setattr(
+        "sanctum_cli.devices.sagemcom._make_client", lambda creds: _RejectingClient()
+    )
+    monkeypatch.setattr("sanctum_cli.keychain.read", lambda account, service: "pw")
+    p = SagemcomHubProvider()
+    with pytest.raises(DeviceError):
+        p.connect(Creds(host="192.168.2.1", username="admin", secret=None, key_path=None))
+    assert p.auth_ok() is False
+
+
 def test_detect_returns_one_when_sagemcom(monkeypatch: pytest.MonkeyPatch) -> None:
     """detect() probes the gateway read-only; Sagemcom shape → ~1.0."""
     from sanctum_cli.devices import sagemcom

@@ -215,6 +215,20 @@ class SagemcomHubProvider:
         self._client = client
         self._refine_brand()
 
+    def auth_ok(self) -> bool:
+        """True iff the last :meth:`connect` opened a genuinely authenticated session.
+
+        The explicit auth oracle a read-only auth-probe (onboard's pairing gate)
+        calls. This provider is ALREADY fail-closed at connect — a rejected login
+        re-raises :class:`DeviceError`, and ``self._client`` is set ONLY after a
+        successful login — so ``_client is not None`` is exactly "we authenticated".
+        Exposing it uniformly (alongside Orbi's :meth:`OrbiProvider.auth_ok`) lets
+        the probe verify auth the SAME way for every brand, instead of relying on a
+        connect-raises convention that is faithful for this brand but not for a
+        best-effort one.
+        """
+        return self._client is not None
+
     def _refine_brand(self) -> None:
         """Best-effort: turn ``sagemcom`` into ``sagemcom-<model>`` post-connect."""
         try:

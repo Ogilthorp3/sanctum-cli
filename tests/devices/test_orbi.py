@@ -185,6 +185,60 @@ def test_connect_tolerates_login_failure(monkeypatch: pytest.MonkeyPatch) -> Non
     assert p.brand == "orbi"
 
 
+# ── auth_ok: the positive auth oracle for a best-effort connect ───────
+
+
+def test_auth_ok_true_after_successful_login(
+    patched: FakeNetgear, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A genuine login (login_ok=True) → auth_ok() reports the session authed."""
+    p = _connected(monkeypatch, patched)
+    assert p.auth_ok() is True
+
+
+def test_auth_ok_false_when_login_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A REJECTED login (login() → False) → auth_ok() is False even though connect
+    did NOT raise. This is the contract the onboard pairing gate relies on to
+    fail-close: connect is best-effort, so only auth_ok positively confirms auth.
+    """
+    fake = FakeNetgear(login_ok=False)
+    p = _connected(monkeypatch, fake)
+    assert p.auth_ok() is False
+
+
+def test_auth_ok_false_when_login_raises_unreachable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An UNREACHABLE box (login() raises) → connect tolerates it, auth_ok() is False."""
+    from sanctum_cli.devices.orbi import OrbiProvider
+
+    class _Unreachable:
+        def login(self) -> bool:
+            msg = "no route to host"
+            raise OSError(msg)
+
+    monkeypatch.setattr("sanctum_cli.devices.orbi._make_client", lambda creds: _Unreachable())
+    monkeypatch.setattr("sanctum_cli.keychain.read", lambda account, service: "pw")
+    p = OrbiProvider()
+    p.connect(Creds(host="192.168.1.1", username="admin", secret=None, key_path=None))  # no raise
+    assert p.auth_ok() is False
+
+
+def test_auth_ok_false_before_connect() -> None:
+    """A fresh provider has not authenticated — auth_ok() is False."""
+    from sanctum_cli.devices.orbi import OrbiProvider
+
+    assert OrbiProvider().auth_ok() is False
+
+
+def test_disconnect_resets_auth_ok(
+    patched: FakeNetgear, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """disconnect() drops the authed flag so a stale session never reads as authed."""
+    p = _connected(monkeypatch, patched)
+    assert p.auth_ok() is True
+    p.disconnect()
+    assert p.auth_ok() is False
+
+
 def test_connect_none_creds_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     """connect(None) is not allowed — the provider needs host/username."""
     from sanctum_cli.devices.orbi import OrbiProvider

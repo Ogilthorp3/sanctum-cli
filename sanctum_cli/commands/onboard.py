@@ -1287,15 +1287,29 @@ def _probe_device(
     a return-convention / test provider that DOES honor it works too. ``connect``
     opens a session and changes nothing on the box.
 
-    Returns True on a clean connect (the credential is good), False on a
-    :class:`~sanctum_cli.errors.LocalError` — the base class of both
+    The probe must POSITIVELY verify auth, not merely that connect did not raise.
+    "connect did not raise" is a faithful auth oracle ONLY for a fail-closed
+    provider (the Sagemcom hub re-raises :class:`DeviceError` on a rejected login).
+    It is NOT faithful for a BEST-EFFORT connect: ``OrbiProvider.connect`` tolerates
+    a wrong password / unreachable box and returns cleanly (so the build never
+    blocks on a live call), so a non-raising Orbi connect would FALSELY read as
+    "paired" — persisting a kept Keychain secret + a ``devices.orbi`` block pointing
+    at a box you cannot auth to, the exact false "paired" that bites on the first
+    real ``sanctum net orbi`` op. So when the provider exposes the optional
+    :class:`~sanctum_cli.devices.base.AuthProbeProvider` capability (``auth_ok``),
+    we REQUIRE it to confirm the session authenticated; a provider without it falls
+    back to the connect-raises convention (its own auth oracle). ``auth_ok`` reads
+    the recorded login outcome — no new session, no mutation — so it is safe here.
+
+    Returns True only on a clean connect AND a positive ``auth_ok`` (when offered),
+    False on a :class:`~sanctum_cli.errors.LocalError` — the base class of both
     :class:`~sanctum_cli.devices.base.DeviceError` (wrong password / unreachable
-    box) AND the Keychain errors a provider's ``keychain.read`` can raise — so a
-    rejected probe is reported as a failed pairing rather than crashing
-    onboarding. ``disconnect`` is always called so a connected provider's
-    transport is released.
+    box) AND the Keychain errors a provider's ``keychain.read`` can raise — or on a
+    rejected ``auth_ok``, so a rejected probe is reported as a failed pairing rather
+    than crashing onboarding. ``disconnect`` is always called so a connected
+    provider's transport is released.
     """
-    from sanctum_cli.devices.base import Creds
+    from sanctum_cli.devices.base import AuthProbeProvider, Creds
     from sanctum_cli.errors import LocalError
 
     creds = Creds(
@@ -1307,6 +1321,13 @@ def _probe_device(
     )
     try:
         provider.connect(creds)
+        # Positive auth verification for best-effort-connect brands. A provider
+        # whose connect() swallows a rejected login (Orbi) MUST expose auth_ok();
+        # require it to confirm the session genuinely authenticated. A fail-closed
+        # provider (Sagemcom) omits it — its connect already raised on failure, so
+        # reaching here is itself proof of auth.
+        if isinstance(provider, AuthProbeProvider) and not provider.auth_ok():
+            return False
     except LocalError:
         return False
     finally:

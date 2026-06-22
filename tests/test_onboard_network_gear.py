@@ -444,6 +444,134 @@ def test_network_gear_decline_pairing_skips_that_kind(
     assert "devices" not in data
 
 
+# ── Probe faithfulness against the REAL best-effort Orbi connect ─────
+#
+# CLAUDE.md "Contracts at the Boundary" §2: the happy-path _FakeProvider models
+# connect() as raise-on-failure (faithful to Sagemcom, NOT to Orbi's best-effort
+# connect that SWALLOWS a rejected/unreachable login). So the gate tests above
+# share the production bug they were meant to catch. These tests drive the probe
+# against the REAL OrbiProvider — the actual consumer — so a non-raising connect
+# on a rejected/unreachable box correctly reads as a FAILED probe, not a false
+# "paired". The real pynetgear client is faked at the _make_client + keychain
+# seams (the provider's own test seams), so no socket and no Keychain are touched.
+
+
+def _real_orbi_with_login(monkeypatch: pytest.MonkeyPatch, *, login: Any) -> Any:
+    """A REAL OrbiProvider whose pynetgear client's login() behaves per ``login``.
+
+    ``login`` is a zero-arg callable the fake client's ``login()`` delegates to (it
+    may return a bool or raise). Mocks the provider's own _make_client + keychain
+    seams — never a socket, never the Keychain.
+    """
+    from sanctum_cli.devices.orbi import OrbiProvider
+
+    class _FakeNetgear:
+        def login(self) -> Any:
+            return login()
+
+        def get_info(self, use_cache: bool = True) -> dict[str, str]:
+            # A genuinely-authed session would return the model; an un-authed one
+            # never reaches here in these tests (login() False/raises first).
+            return {"ModelName": "RBR850"}
+
+    monkeypatch.setattr("sanctum_cli.devices.orbi._make_client", lambda creds: _FakeNetgear())
+    monkeypatch.setattr("sanctum_cli.keychain.read", lambda account, service: "pw")
+    return OrbiProvider()
+
+
+def test_probe_real_orbi_rejected_password_is_a_failed_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """REAL OrbiProvider: a REJECTED login (login() → False) → _probe_device False.
+
+    The bug: OrbiProvider.connect is best-effort — it swallows a falsey login and
+    returns cleanly, so the OLD "connect didn't raise → paired" logic returned True
+    for a wrong password. The fix asserts auth via the provider's auth_ok() oracle,
+    so a rejected login now correctly yields a FAILED probe.
+    """
+    provider = _real_orbi_with_login(monkeypatch, login=lambda: False)
+    net = NetContext(gateway_ip="192.168.1.1", runner=None)
+    ok = onboard._probe_device(
+        provider, net=net, account="admin", service="orbi-admin", secret="wrong-pass"
+    )
+    assert ok is False
+
+
+def test_probe_real_orbi_unreachable_box_is_a_failed_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """REAL OrbiProvider: an UNREACHABLE box (login() raises) → _probe_device False.
+
+    connect() tolerates the transport error (returns cleanly), but auth_ok() reports
+    the session never authenticated, so the probe fails-close.
+    """
+
+    def _boom() -> bool:
+        msg = "no route to host"
+        raise OSError(msg)
+
+    provider = _real_orbi_with_login(monkeypatch, login=_boom)
+    net = NetContext(gateway_ip="192.168.1.1", runner=None)
+    ok = onboard._probe_device(
+        provider, net=net, account="admin", service="orbi-admin", secret="any"
+    )
+    assert ok is False
+
+
+def test_probe_real_orbi_good_password_is_a_successful_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """REAL OrbiProvider: a GENUINE login (login() → True) → _probe_device True.
+
+    The fix must not over-rotate: a real, authenticated Orbi still pairs.
+    """
+    provider = _real_orbi_with_login(monkeypatch, login=lambda: True)
+    net = NetContext(gateway_ip="192.168.1.1", runner=None)
+    ok = onboard._probe_device(
+        provider, net=net, account="admin", service="orbi-admin", secret="right-pass"
+    )
+    assert ok is True
+
+
+def test_gate_real_orbi_rejected_password_revokes_and_persists_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End-to-end gate against the REAL OrbiProvider with a WRONG password.
+
+    The fail-closed contract the findings demand: a rejected best-effort Orbi
+    login → the just-written Keychain secret is REVOKED and NO devices.orbi block
+    is persisted (no false "paired"). Drives the whole interactive gate with the
+    real provider (the actual consumer), not a raise-on-failure fake.
+    """
+    inst = tmp_path / "instance.yaml"
+    inst.write_text("instance:\n  name: X\n  slug: x\n", encoding="utf-8")
+    monkeypatch.setenv("SANCTUM_INSTANCE_FILE", str(inst))
+
+    provider = _real_orbi_with_login(monkeypatch, login=lambda: False)  # rejected creds
+    monkeypatch.setattr(
+        "sanctum_cli.commands.onboard.detect_network_gear", lambda net: [("orbi", provider)]
+    )
+    revoked: dict[str, Any] = {}
+    monkeypatch.setattr(
+        "sanctum_cli.commands.onboard._revoke_device_secret",
+        lambda *, service, account: revoked.update(service=service, account=account),
+    )
+
+    code, out = _invoke_family_onboard_interactive(
+        "\n\n"
+        "y\n"  # pair the detected orbi
+        "wrong-pass\n"  # rejected by the (real) best-effort connect → auth_ok False
+    )
+    assert code == 0, out  # non-blocking (the backup already succeeded)
+    assert "not paired" in out
+    # The keychain write was rolled back under the resolved (service, account).
+    assert revoked == {"service": "orbi-admin", "account": "admin"}
+    # NO devices.orbi block persisted — the false "paired" is prevented.
+    data = yaml.safe_load(inst.read_text(encoding="utf-8"))
+    assert "devices" not in data or "orbi" not in data.get("devices", {})
+    assert "onboarding complete" in out
+
+
 # ── Trifecta mirror best-effort (keychain is the guaranteed tier) ────
 
 
