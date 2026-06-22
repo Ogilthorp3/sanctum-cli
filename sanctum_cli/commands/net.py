@@ -13,6 +13,7 @@ from rich.markup import escape
 from sanctum_cli import config
 from sanctum_cli.devices import firewalla as firewalla_provider
 from sanctum_cli.devices import intents, rails, registry, sagemcom
+from sanctum_cli.devices import orbi as orbi_provider
 from sanctum_cli.devices.base import Capability, Creds, DeviceError, NetContext
 from sanctum_cli.errors import SanctumError
 from sanctum_cli.net import detect, playbooks, render, safety, speedtest, system, verify
@@ -502,6 +503,17 @@ def hub_single_nat(
 # kind="firewalla" (see the module footer), so registry.resolve("firewalla", net)
 # can find it. Referenced here so the import is never pruned as unused.
 _firewalla_registered = firewalla_provider
+
+# Importing sanctum_cli.devices.orbi self-registers OrbiProvider under kind="orbi"
+# (see the module footer), so registry.resolve("orbi", net) can find it — and a
+# devices.orbi.brand pin resolves to the real provider instead of the read-only
+# GenericReadOnlyProvider fallback. Registration is import-triggered and there is
+# NO dynamic provider auto-discovery, so this explicit import is the ONLY thing
+# that wires the Orbi provider into a real install. There is no `sanctum net orbi`
+# sub-app yet (guest-wifi / channel intents are not surfaced as commands), so this
+# module-scope reference is what keeps the import from being pruned as unused;
+# mirror the sagemcom/firewalla pattern above when the orbi command surface lands.
+_orbi_registered = orbi_provider
 
 firewalla_app = typer.Typer(
     help="Drive the Firewalla box (firewall) through the device-provider rails."
