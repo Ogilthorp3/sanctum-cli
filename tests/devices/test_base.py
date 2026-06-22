@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING
 
 from sanctum_cli.devices.base import (
     Capability,
+    CapabilityOp,
     Creds,
     DeviceError,
     DeviceProvider,
@@ -44,6 +45,11 @@ class FakeProvider:
 
     def capabilities(self) -> set[Capability]:
         return {Capability.READ, Capability.SET}
+
+    def capability_op(self, capability: Capability) -> CapabilityOp | None:
+        if capability is Capability.BRIDGE_MODE:
+            return CapabilityOp(path="WanMode", engaged="bridge")
+        return None
 
     def snapshot(self, scope: str | None = None) -> Snapshot:
         return Snapshot(brand=self.brand, taken_at="t", data=dict(self._v))

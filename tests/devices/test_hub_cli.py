@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 from typer.testing import CliRunner
 
 from sanctum_cli.cli import app
-from sanctum_cli.devices.base import Capability, OpResult, Snapshot
+from sanctum_cli.devices.base import Capability, CapabilityOp, OpResult, Snapshot
 from sanctum_cli.devices.intents import BRIDGE_MODE_PATH
 
 if TYPE_CHECKING:
@@ -66,6 +66,11 @@ class FakeProvider:
 
     def capabilities(self) -> set[Capability]:
         return {Capability.READ, Capability.SET, Capability.BRIDGE_MODE}
+
+    def capability_op(self, capability: Capability) -> CapabilityOp | None:
+        if capability is Capability.BRIDGE_MODE:
+            return CapabilityOp(path=BRIDGE_MODE_PATH, engaged="on")
+        return None
 
     def snapshot(self, scope: str | None = None) -> Snapshot:
         return Snapshot(brand=self.brand, taken_at="t", data=dict(self._v))

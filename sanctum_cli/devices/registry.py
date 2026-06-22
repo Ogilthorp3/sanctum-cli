@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING
 
 from sanctum_cli.devices.base import (
     Capability,
+    CapabilityOp,
     Creds,
     DeviceError,
     DeviceProvider,
@@ -145,6 +146,10 @@ class GenericReadOnlyProvider:
 
     def capabilities(self) -> AbstractSet[Capability]:
         return {Capability.READ}
+
+    def capability_op(self, capability: Capability) -> CapabilityOp | None:  # noqa: ARG002
+        """The generic fallback supports no mutating capability."""
+        return None
 
     def snapshot(self, scope: str | None = None) -> Snapshot:  # noqa: ARG002
         raise self._refuse()

@@ -16,6 +16,7 @@ import pytest
 
 from sanctum_cli.devices.base import (
     Capability,
+    CapabilityOp,
     Creds,
     DeviceError,
     DeviceProvider,
@@ -59,6 +60,9 @@ class FakeProvider:
     def capabilities(self) -> set[Capability]:
         return {Capability.READ, Capability.SET}
 
+    def capability_op(self, capability: Capability) -> CapabilityOp | None:
+        return None
+
     def snapshot(self, scope: str | None = None) -> Snapshot:
         return Snapshot(brand=self.brand, taken_at="t", data=dict(self._v))
 
@@ -92,6 +96,9 @@ class WeakHub:
     def capabilities(self) -> set[Capability]:  # pragma: no cover
         return {Capability.READ}
 
+    def capability_op(self, cap: Capability) -> CapabilityOp | None:  # pragma: no cover
+        return None
+
     def snapshot(self, scope: str | None = None) -> Snapshot:  # pragma: no cover
         return Snapshot(brand=self.brand, taken_at="t", data={})
 
@@ -123,6 +130,9 @@ class NeverHub:
 
     def capabilities(self) -> set[Capability]:  # pragma: no cover
         return {Capability.READ}
+
+    def capability_op(self, cap: Capability) -> CapabilityOp | None:  # pragma: no cover
+        return None
 
     def snapshot(self, scope: str | None = None) -> Snapshot:  # pragma: no cover
         return Snapshot(brand=self.brand, taken_at="t", data={})

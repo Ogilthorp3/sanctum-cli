@@ -27,6 +27,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from sanctum_cli.devices.base import Capability, CapabilityOp, DeviceError
 from sanctum_cli.devices.rails import guarded_apply
 from sanctum_cli.net import verify
 from sanctum_cli.net.types import Verdict
@@ -38,17 +39,36 @@ if TYPE_CHECKING:
     from sanctum_cli.devices.base import DeviceProvider, OpResult
     from sanctum_cli.net.detect import Runner
 
-# The Bell hub leaf that, set to ``"on"``, puts the gateway into bridge mode so a
-# downstream router (the Firewalla) holds the single public-side NAT. Kept in sync
-# with :data:`sanctum_cli.devices.sagemcom._BRIDGE_MODE_XPATH`; the intent is
-# brand-agnostic but this is the path the Sagemcom provider understands.
+# Reference binding for a Bell/Sagemcom hub: the leaf that, set to ``"on"``, puts
+# the gateway into bridge mode. The intent NO LONGER hardcodes this — it resolves
+# the concrete (path, engaged) from ``provider.capability_op(BRIDGE_MODE)`` so a
+# non-TR-069 brand is driven through its own vocabulary. This constant is kept
+# only as the documented Sagemcom default + a back-compat export (tests); it is
+# not what single_nat mutates.
 BRIDGE_MODE_PATH = "Device/Services/BellNetworkCfg/SetBridgeMode"
-BRIDGE_MODE_ON = "on"
 
 # Bell's PPPoE/GPON path black-holes >1492-byte DF packets: after bridge mode the
 # downstream router's WAN MTU must be 1492 (+ MSS clamp) or HTTPS silently hangs
 # while ping still works. Surfaced in every plan so the operator sets it.
 MTU_NOTE = "After cutover, set the downstream router's WAN MTU to 1492 (+MSS clamp) — Bell's path MTU."
+
+
+def _resolve_bridge_op(provider: DeviceProvider) -> CapabilityOp:
+    """Resolve the provider's brand-specific bridge-mode op, or fail legibly.
+
+    The single seam through which the brand-agnostic intent reaches a concrete
+    path/value. A provider that does not support :attr:`Capability.BRIDGE_MODE`
+    (e.g. the read-only generic fallback) returns ``None`` and we raise a clean
+    :class:`DeviceError` instead of mutating an unknown leaf.
+    """
+    op = provider.capability_op(Capability.BRIDGE_MODE)
+    if op is None:
+        msg = f"{provider.brand} ({provider.kind}) does not support bridge mode (single-NAT)"
+        raise DeviceError(
+            msg,
+            fix="use a hub provider that advertises Capability.BRIDGE_MODE, or pin the right brand.",
+        )
+    return op
 
 
 @dataclass(frozen=True)
@@ -79,11 +99,15 @@ def _default_confirm(_plan: str) -> bool:
     return False
 
 
-def _bridge_mode_plan() -> list[str]:
-    """The ordered, human-readable steps the single-NAT intent performs."""
+def _bridge_mode_plan(op: CapabilityOp) -> list[str]:
+    """The ordered, human-readable steps the single-NAT intent performs.
+
+    ``op`` is the provider-resolved bridge-mode binding, so the plan reflects the
+    actual (brand-specific) path/value rather than a hardcoded Bell XPath.
+    """
     return [
         "single-NAT cutover plan:",
-        f"  1. set {BRIDGE_MODE_PATH} = {BRIDGE_MODE_ON}  (hub → bridge mode)",
+        f"  1. set {op.path} = {op.engaged}  (hub → bridge mode)",
         "  2. verify: real-site reachability through the downstream router",
         "  3. on verify failure: roll back to the pre-change snapshot",
         f"  note: {MTU_NOTE}",
@@ -103,9 +127,11 @@ def single_nat(
 ) -> IntentResult:
     """Put the hub behind a single NAT (bridge mode), guarded + dry-run by default.
 
-    Composes the brand-agnostic ``set BRIDGE_MODE_PATH = "on"`` change with the
-    :func:`~sanctum_cli.devices.rails.guarded_apply` rails. The flip briefly drops
-    the household's internet, so:
+    Resolves the brand-specific bridge-mode op via
+    ``provider.capability_op(Capability.BRIDGE_MODE)`` and composes that change
+    with the :func:`~sanctum_cli.devices.rails.guarded_apply` rails — so the
+    intent stays brand-agnostic and never hardcodes a TR-069 XPath. The flip
+    briefly drops the household's internet, so:
 
     * ``apply=False`` (the default) is a **dry-run**: it returns the plan and makes
       **no** ``set`` calls. This is what the overnight build runs.
@@ -118,20 +144,24 @@ def single_nat(
     over ``runner`` (a single-NAT :class:`~sanctum_cli.net.types.Verdict.VERIFIED`
     is the only passing verdict). A real apply therefore needs *either* a
     ``verify_fn`` or a ``runner``.
+
+    Raises :class:`DeviceError` if the provider does not support bridge mode.
     """
-    plan = _bridge_mode_plan()
+    # Resolve the provider's bridge-mode binding up front so even a dry-run plan
+    # reflects the real (brand-specific) path/value — and an unsupported provider
+    # fails legibly before any mutation.
+    op = _resolve_bridge_op(provider)
+    plan = _bridge_mode_plan(op)
     if not apply:
         # Dry-run: describe, do not mutate. The hard guardrail for the overnight
         # build — no provider.set / guarded_apply is reached on this branch.
         return IntentResult(plan=plan, applied=False, result=None)
 
     def change(pv: DeviceProvider) -> None:
-        pv.set(BRIDGE_MODE_PATH, BRIDGE_MODE_ON)
+        pv.set(op.path, op.engaged)
 
     if verify_fn is None:
         if runner is None:
-            from sanctum_cli.devices.base import DeviceError
-
             msg = "single_nat(apply=True) needs a verify_fn or a runner to verify the cutover"
             raise DeviceError(
                 msg,

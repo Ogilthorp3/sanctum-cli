@@ -43,6 +43,7 @@ from sanctum_cli import keychain
 from sanctum_cli.devices import registry
 from sanctum_cli.devices.base import (
     Capability,
+    CapabilityOp,
     Creds,
     DeviceError,
     NetContext,
@@ -67,13 +68,23 @@ _BRIDGE_MODE_XPATH = "Device/Services/BellNetworkCfg/SetBridgeMode"
 _ADVANCED_DMZ_XPATH = "Device/Services/BellNetworkCfg/AdvancedDMZ"
 _SNAPSHOT_XPATHS = (_BRIDGE_MODE_XPATH, _ADVANCED_DMZ_XPATH)
 
-# The leaves a single-NAT cutover actually MUTATES. The snapshot MUST carry a
-# restorable baseline for each of these even if the read returns None at
-# snapshot time — otherwise a rollback after a failed cutover would have nothing
-# to restore and would silently "succeed" while leaving the household in bridge
-# mode (internet down). A None read of the bridge-mode leaf means the hub is not
-# in bridge mode, so the safe pre-cutover baseline is "off".
-_MUTATED_XPATHS = (_BRIDGE_MODE_XPATH,)
+# The brand-owned vocabulary: high-level Capability → the Bell TR-069 (path,
+# engaged-value) that achieves it. A Layer-2 intent reaches bridge mode through
+# this map (via capability_op), so it never hardcodes a Bell XPath — adding a
+# non-TR-069 brand is one new provider with its own map, no intent change.
+_CAPABILITY_OPS: dict[Capability, CapabilityOp] = {
+    Capability.BRIDGE_MODE: CapabilityOp(path=_BRIDGE_MODE_XPATH, engaged="on"),
+    Capability.DMZ: CapabilityOp(path=_ADVANCED_DMZ_XPATH, engaged="on"),
+}
+
+# The leaves a single-NAT cutover actually MUTATES (derived from the bridge-mode
+# capability op so the two never drift). The snapshot MUST carry a restorable
+# baseline for each even if the read returns None at snapshot time — otherwise a
+# rollback after a failed cutover would have nothing to restore and would
+# silently "succeed" while leaving the household in bridge mode (internet down).
+# A None read of the bridge-mode leaf means the hub is not in bridge mode, so the
+# safe pre-cutover baseline is "off".
+_MUTATED_XPATHS = (_CAPABILITY_OPS[Capability.BRIDGE_MODE].path,)
 _SAFE_BASELINE = "off"
 
 # XPath that identifies the device class once authenticated, used to refine the
@@ -277,15 +288,22 @@ class SagemcomHubProvider:
 
     def capabilities(self) -> AbstractSet[Capability]:
         """Operations this hub actually supports."""
-        return {
+        return set(_CAPABILITY_OPS) | {
             Capability.READ,
             Capability.SET,
-            Capability.BRIDGE_MODE,
-            Capability.DMZ,
             Capability.WAN_MODE,
             Capability.FIRMWARE,
             Capability.REBOOT,
         }
+
+    def capability_op(self, capability: Capability) -> CapabilityOp | None:
+        """The Bell-specific (path, engaged) binding for ``capability``, or None.
+
+        This is the brand-owned vocabulary a Layer-2 intent reaches through, so
+        the intent never hardcodes a Bell TR-069 XPath. A non-TR-069 hub maps the
+        same capabilities to its own paths/values via its own ``capability_op``.
+        """
+        return _CAPABILITY_OPS.get(capability)
 
     def snapshot(self, scope: str | None = None) -> Snapshot:  # noqa: ARG002 - whole-subtree
         """Capture the Bell network-config leaves we may need to restore.

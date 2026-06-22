@@ -263,6 +263,29 @@ def test_capabilities_advertise_hub_surface(
     assert Capability.WAN_MODE in caps
 
 
+def test_capability_op_maps_bridge_mode_to_bell_xpath(
+    patched: FakeSahClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """capability_op(BRIDGE_MODE) returns the Bell (path, engaged) the intent uses."""
+    from sanctum_cli.devices.base import Capability
+
+    p = _connected(monkeypatch, patched)
+    op = p.capability_op(Capability.BRIDGE_MODE)
+    assert op is not None
+    assert op.path == BRIDGE_PATH
+    assert op.engaged == "on"
+
+
+def test_capability_op_none_for_unsupported(
+    patched: FakeSahClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A capability the provider does not bind returns None (no blind mutation)."""
+    from sanctum_cli.devices.base import Capability
+
+    p = _connected(monkeypatch, patched)
+    assert p.capability_op(Capability.SCREEN_TIME) is None
+
+
 def test_op_before_connect_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     """Using the provider before connect() must fail legibly, not AttributeError."""
     from sanctum_cli.devices.sagemcom import SagemcomHubProvider

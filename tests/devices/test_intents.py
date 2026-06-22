@@ -14,7 +14,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from sanctum_cli.devices.base import Capability, OpResult, Snapshot
+import pytest
+
+from sanctum_cli.devices.base import Capability, CapabilityOp, OpResult, Snapshot
 from sanctum_cli.devices.intents import BRIDGE_MODE_PATH, single_nat
 
 if TYPE_CHECKING:
@@ -53,6 +55,11 @@ class FakeProvider:
 
     def capabilities(self) -> set[Capability]:
         return {Capability.READ, Capability.SET, Capability.BRIDGE_MODE}
+
+    def capability_op(self, capability: Capability) -> CapabilityOp | None:
+        if capability is Capability.BRIDGE_MODE:
+            return CapabilityOp(path=BRIDGE_MODE_PATH, engaged="on")
+        return None
 
     def snapshot(self, scope: str | None = None) -> Snapshot:
         return Snapshot(brand=self.brand, taken_at="t", data=dict(self._v))
@@ -122,6 +129,61 @@ def test_single_nat_apply_rolls_back_on_verify_fail(tmp_path: Path) -> None:
     assert res.result.ok is False
     assert p.get(BRIDGE_MODE_PATH) == "off"  # rolled back
     assert p.rollback_calls == 1
+
+
+def test_single_nat_is_brand_agnostic_uses_provider_op(tmp_path: Path) -> None:
+    """The intent mutates the provider's OWN bridge-mode path, not a hardcoded XPath.
+
+    A non-Bell provider whose capability_op returns a different path/value must be
+    driven through THAT path — proving the intent reaches bridge mode via the
+    provider abstraction, not the module-level Bell constant (spec criterion #1).
+    """
+
+    class OrbiLikeProvider(FakeProvider):
+        brand = "orbi-like"
+
+        def __init__(self) -> None:
+            super().__init__()
+            self._v = {"router/wan/mode": "router"}
+
+        def capability_op(self, capability: Capability) -> CapabilityOp | None:
+            if capability is Capability.BRIDGE_MODE:
+                return CapabilityOp(path="router/wan/mode", engaged="bridge")
+            return None
+
+    p = OrbiLikeProvider()
+    # Plan reflects the brand's own vocabulary, NOT the Bell XPath.
+    dry = single_nat(p, force=False, apply=False)
+    plan_text = "\n".join(dry.plan)
+    assert "router/wan/mode" in plan_text
+    assert BRIDGE_MODE_PATH not in plan_text  # no Bell XPath leaks in
+    # Apply drives the brand's path/value.
+    res = single_nat(
+        p,
+        force=True,
+        apply=True,
+        verify_fn=lambda: True,
+        confirm=lambda _plan: True,
+        log_path=tmp_path / "audit.jsonl",
+    )
+    assert res.result is not None and res.result.ok is True
+    assert p.get("router/wan/mode") == "bridge"
+
+
+def test_single_nat_unsupported_provider_raises_legibly() -> None:
+    """A provider with no bridge-mode op fails legibly instead of mutating blindly."""
+    from sanctum_cli.devices.base import DeviceError
+
+    class NoBridgeProvider(FakeProvider):
+        def capability_op(self, capability: Capability) -> CapabilityOp | None:
+            return None
+
+    p = NoBridgeProvider()
+    with pytest.raises(DeviceError) as ei:
+        single_nat(p, force=False, apply=False)
+    assert "bridge mode" in str(ei.value)
+    # And it must not have mutated anything.
+    assert p.set_calls == 0
 
 
 def test_single_nat_apply_default_verify_uses_real_site(monkeypatch, tmp_path: Path) -> None:

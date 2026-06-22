@@ -12,7 +12,7 @@ from rich.markup import escape
 
 from sanctum_cli import config
 from sanctum_cli.devices import intents, rails, registry, sagemcom
-from sanctum_cli.devices.base import Creds, NetContext
+from sanctum_cli.devices.base import Capability, Creds, NetContext
 from sanctum_cli.errors import SanctumError
 from sanctum_cli.net import detect, playbooks, render, safety, speedtest, system, verify
 from sanctum_cli.net.types import SpeedReport, Verdict
@@ -285,11 +285,14 @@ _ = sagemcom
 hub_app = typer.Typer(help="Drive the network gateway (hub) through the device-provider rails.")
 net_app.add_typer(hub_app, name="hub")
 
-# Read paths the status summary surfaces. Kept brand-agnostic: a provider that does
-# not expose a leaf returns None for it and the summary prints a dash.
+# DeviceInfo read paths the status summary surfaces. These are the generic
+# TR-069 DeviceInfo leaves; a provider that does not expose one returns None and
+# the summary prints a dash (the brand-agnostic-via-None contract). The
+# bridge-mode read path is NOT hardcoded here — it is resolved from the
+# provider's capability_op(BRIDGE_MODE), so a non-TR-069 hub reports bridge mode
+# via its own leaf.
 _HUB_MODEL_PATH = "Device/DeviceInfo/ModelName"
 _HUB_FIRMWARE_PATH = "Device/DeviceInfo/SoftwareVersion"
-_HUB_BRIDGE_PATH = intents.BRIDGE_MODE_PATH
 
 # Where the hub admin password lives (mirrors the Sagemcom provider's keychain
 # tuple); used to build Creds before connect. The provider re-reads the secret
@@ -377,7 +380,11 @@ def hub_status() -> None:
         with _connected_hub() as provider:
             model = provider.get(_HUB_MODEL_PATH)
             firmware = provider.get(_HUB_FIRMWARE_PATH)
-            bridge = provider.get(_HUB_BRIDGE_PATH)
+            # Resolve the bridge-mode leaf from the provider's own vocabulary so
+            # the CLI never hardcodes a Bell XPath; None → the provider has no
+            # bridge-mode op and we print a dash.
+            bridge_op = provider.capability_op(Capability.BRIDGE_MODE)
+            bridge = provider.get(bridge_op.path) if bridge_op is not None else None
             brand, kind = provider.brand, provider.kind
     except SanctumError as exc:
         _report(exc)

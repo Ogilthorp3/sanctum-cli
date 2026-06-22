@@ -107,6 +107,26 @@ class OpResult:
     after: str | None = None
 
 
+@dataclass(frozen=True)
+class CapabilityOp:
+    """A brand-specific binding for a high-level :class:`Capability`.
+
+    The seam that keeps Layer-2 intents brand-agnostic: an intent names a
+    *capability* (``Capability.BRIDGE_MODE``), and the provider returns the
+    concrete ``path`` + ``engaged`` value that achieves it on *this* brand. So a
+    Bell/Sagemcom hub maps ``BRIDGE_MODE`` to
+    ``("Device/Services/BellNetworkCfg/SetBridgeMode", "on")`` while a SOAP Orbi
+    would map the same capability to its own path/value — and the intent code,
+    the snapshot baseline, and the wizard never learn either brand's vocabulary.
+
+    ``path`` is the provider-specific leaf the intent ``set``s; ``engaged`` is the
+    value that turns the capability *on*. Both are owned entirely by the brand.
+    """
+
+    path: str
+    engaged: str
+
+
 class DeviceError(LocalError):
     """A device transport/op failed, or an op is unsupported by this provider.
 
@@ -169,6 +189,18 @@ class DeviceProvider(Protocol):
         Typed as an abstract ``Set`` (not the builtin ``set``) so the annotation
         does not collide with the ``set`` *method* defined above in class scope —
         and so implementations may return any set-like (``set``, ``frozenset``).
+        """
+        ...
+
+    def capability_op(self, capability: Capability) -> CapabilityOp | None:
+        """Map a high-level :class:`Capability` to this brand's concrete op.
+
+        Returns the brand-specific ``(path, engaged)`` binding a Layer-2 intent
+        uses to engage ``capability``, or ``None`` when this provider does not
+        support it. This is the seam that keeps intents brand-agnostic: the
+        intent asks for ``BRIDGE_MODE`` and the provider supplies the path/value —
+        so adding a brand is one new ``devices/<brand>.py`` + a registry line,
+        with no Layer-2 or wizard change (spec success criterion #1).
         """
         ...
 
