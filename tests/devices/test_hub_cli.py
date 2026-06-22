@@ -144,6 +144,56 @@ def test_net_hub_single_nat_dryrun_mutates_nothing(monkeypatch: pytest.MonkeyPat
     assert p.get(BRIDGE_MODE_PATH) == "off"
 
 
+def test_net_hub_single_nat_apply_threads_fw_bound_runner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`single-nat --apply` must verify over the Firewalla-key-bound runner.
+
+    Regression: the apply path used to pass the bare ``system.real_runner``,
+    which returns "" for the ("fw_wan_ip",)/("fw_wan_mac",) tags — so
+    ``verify.verify`` always saw a None WAN IP and could never fire the
+    APIPA/DHCP-fail auto-rollback. We assert the runner actually handed to
+    ``intents.single_nat`` resolves ("fw_wan_ip",) to the fw-bound value, i.e.
+    it is ``_build_runner()`` and not the bare runner.
+    """
+    p = FakeProvider()
+    _point_registry_at(monkeypatch, p)
+
+    # _build_runner() shells out to `route`/SSH in production; replace it with a
+    # runner that resolves the fw tags (what make_real_runner does on real gear).
+    def fake_build_runner() -> object:
+        def runner_fn(tag: tuple[str, ...]) -> str:
+            if tag == ("fw_wan_ip",):
+                return "169.254.1.5"  # APIPA → the rollback trigger MUST see it
+            return ""
+
+        return runner_fn
+
+    monkeypatch.setattr("sanctum_cli.commands.net._build_runner", fake_build_runner)
+
+    captured: dict[str, object] = {}
+    real_single_nat = __import__(
+        "sanctum_cli.devices.intents", fromlist=["single_nat"]
+    ).single_nat
+
+    def spy_single_nat(provider: object, **kwargs: object) -> object:
+        captured["runner"] = kwargs.get("runner")
+        return real_single_nat(provider, **kwargs)
+
+    monkeypatch.setattr("sanctum_cli.commands.net.intents.single_nat", spy_single_nat)
+
+    result = runner.invoke(app, ["net", "hub", "single-nat", "--apply", "--force"])
+    # The runner threaded into single_nat must resolve the fw WAN IP tag — proof
+    # it is the fw-key-bound runner, not the bare system.real_runner (which
+    # would return "" and silently disable the APIPA rollback signal).
+    threaded = captured["runner"]
+    assert callable(threaded)
+    assert threaded(("fw_wan_ip",)) == "169.254.1.5"
+    # With an APIPA WAN, verify must trip the rollback (the cutover is undone).
+    assert result.exit_code == 1, result.stdout
+    assert p.rollback_calls == 1
+
+
 def test_net_hub_set_unsupported_is_legible(monkeypatch: pytest.MonkeyPatch) -> None:
     """A provider that refuses set (generic read-only) surfaces a clean error code."""
     from sanctum_cli.devices.base import DeviceError

@@ -421,11 +421,18 @@ def hub_single_nat(
 ) -> None:
     try:
         provider = _resolve_hub()
+        # Verify must run over the Firewalla-key-bound runner (the same one
+        # net_optimize/net_check use), NOT the bare system.real_runner. Only
+        # _build_runner() → make_real_runner() resolves the ("fw_wan_ip",) /
+        # ("fw_wan_mac",) tags over the SSH seam; the bare real_runner returns
+        # "" for them (system.py:18), which would make verify.verify see a
+        # None WAN IP — disabling the APIPA/DHCP-fail auto-rollback trigger and
+        # biasing classify_nat toward NOT-VERIFIED on a successful cutover.
         result = intents.single_nat(
             provider,
             force=force,
             apply=apply,
-            runner=system.real_runner if apply else None,
+            runner=_build_runner() if apply else None,
             confirm=lambda plan: typer.confirm(f"{plan}\nProceed?"),
         )
     except SanctumError as exc:
