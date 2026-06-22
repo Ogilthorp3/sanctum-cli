@@ -4,7 +4,7 @@ import json
 import socket
 from contextlib import contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Annotated, Any
 
 import typer
 from rich.console import Console
@@ -14,13 +14,13 @@ from sanctum_cli import config
 from sanctum_cli.devices import firewalla as firewalla_provider
 from sanctum_cli.devices import intents, rails, registry, sagemcom
 from sanctum_cli.devices import orbi as orbi_provider
-from sanctum_cli.devices.base import Capability, Creds, DeviceError, NetContext
+from sanctum_cli.devices.base import Capability, Creds, DeviceError, NetContext, OpResult
 from sanctum_cli.errors import SanctumError
 from sanctum_cli.net import detect, playbooks, render, safety, speedtest, system, verify
 from sanctum_cli.net.types import SpeedReport, Verdict
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
 
     from sanctum_cli.devices.base import DeviceProvider
     from sanctum_cli.net.detect import HttpProbe, Runner
@@ -41,6 +41,63 @@ def _report(exc: SanctumError) -> None:
         err_console.print(f"[dim]fix:[/] {exc.fix}")
 
 _SNAP_ROOT = Path.home() / ".sanctum" / "net-optimize"
+
+# Per-kind default Keychain (service, account) for a device's admin credential.
+# Discovery-first: instance.yaml ``devices.<kind>.keychain.{service,account}``
+# overrides these, but a fresh box with no devices block resolves the default so
+# the CLI still has a tuple to read the password under. Firewalla is deliberately
+# ABSENT — it authenticates with a bearer token from an on-disk secret file, not
+# a Keychain password, so it has no entry here (its creds path is unchanged).
+_DEVICE_KEYCHAIN_DEFAULTS: dict[str, tuple[str, str]] = {
+    "hub": ("bell-hub-admin", "admin"),
+    "orbi": ("orbi-admin", "admin"),
+}
+
+
+def device_keychain_ref(
+    kind: str,
+    *,
+    instance_lookup: Callable[..., Any] | None = None,
+) -> tuple[str, str]:
+    """Resolve the (service, account) Keychain tuple for ``kind``, discovery-first.
+
+    Reads ``devices.<kind>.keychain.service`` / ``.account`` from instance.yaml
+    (via :func:`config.instance_value`), falling back to the per-kind default in
+    :data:`_DEVICE_KEYCHAIN_DEFAULTS`. A ``kind`` with no built-in default and
+    nothing configured resolves to ``("", "")`` — NEVER another kind's tuple — so
+    a misconfiguration misses loudly (the provider's Keychain read fails) instead
+    of silently addressing the wrong entry. This closes the prior low finding that
+    :func:`_hub_creds` hardcoded the Sagemcom tuple: the tuple now comes from
+    config-or-default, brand-agnostically, for every kind that uses a Keychain
+    password.
+
+    ``instance_lookup`` is an injection seam (defaults to ``config.instance_value``)
+    so a test can drive the resolution without a real instance.yaml on disk.
+    """
+    lookup = instance_lookup if instance_lookup is not None else config.instance_value
+    default_service, default_account = _DEVICE_KEYCHAIN_DEFAULTS.get(kind, ("", ""))
+    service = str(lookup(f"devices.{kind}.keychain.service", default_service))
+    account = str(lookup(f"devices.{kind}.keychain.account", default_account))
+    return service, account
+
+
+def device_creds(kind: str, net: NetContext) -> Creds:
+    """Assemble Creds for a resolved device of ``kind``, discovery-first.
+
+    The host is the detected gateway IP; the username is the Keychain *account*
+    resolved by :func:`device_keychain_ref` (instance.yaml override → per-kind
+    default). The ``secret`` is left ``None`` on purpose — the provider re-reads
+    the password/token from the Keychain at connect time (credentials never flow
+    through the CLI layer). Generalizes the old per-kind ``_hub_creds`` /
+    ``_orbi_creds`` so the Keychain tuple is no longer hardcoded per brand.
+    """
+    _service, account = device_keychain_ref(kind)
+    return Creds(
+        host=net.gateway_ip or "",
+        username=account,
+        secret=None,
+        key_path=None,
+    )
 
 
 def _firewalla_key_path() -> Path:
@@ -296,12 +353,12 @@ net_app.add_typer(hub_app, name="hub")
 _HUB_MODEL_PATH = "Device/DeviceInfo/ModelName"
 _HUB_FIRMWARE_PATH = "Device/DeviceInfo/SoftwareVersion"
 
-# Where the hub admin password lives (mirrors the Sagemcom provider's keychain
-# tuple); used to build Creds before connect. The provider re-reads the secret
-# from the Keychain itself, so a missing secret here is fine for providers that
-# self-resolve credentials.
-_HUB_KEYCHAIN_ACCOUNT = sagemcom.KEYCHAIN_ACCOUNT
-_HUB_KEYCHAIN_SERVICE = sagemcom.KEYCHAIN_SERVICE
+# The hub admin Keychain (service, account) is NO LONGER hardcoded here to the
+# Sagemcom tuple — it is resolved discovery-first by :func:`device_keychain_ref`
+# (instance.yaml ``devices.hub.keychain.*`` → per-kind default), so a non-Bell hub
+# whose admin account is not "admin" can still be addressed. The provider re-reads
+# the password from the Keychain itself; the CLI only supplies the account as the
+# Creds username.
 
 
 def _hub_netcontext() -> NetContext:
@@ -316,18 +373,15 @@ def _hub_netcontext() -> NetContext:
 
 
 def _hub_creds(net: NetContext) -> Creds:
-    """Assemble Creds for the resolved hub.
+    """Assemble Creds for the resolved hub via the generalized resolver.
 
-    The host is the detected gateway IP; the username is the hub admin account.
-    The secret is left ``None`` on purpose — the provider reads the password from
-    the Keychain at connect time (credentials never flow through the CLI layer).
+    Delegates to :func:`device_creds` so the hub admin account is read from
+    instance.yaml (``devices.hub.keychain.account``) or the per-kind default,
+    NOT a constant pinned to the Sagemcom module (the prior low finding). The
+    secret stays ``None`` — the provider reads the password from the Keychain at
+    connect time (credentials never flow through the CLI layer).
     """
-    return Creds(
-        host=net.gateway_ip or "",
-        username=_HUB_KEYCHAIN_ACCOUNT,
-        secret=None,
-        key_path=None,
-    )
+    return device_creds("hub", net)
 
 
 def _resolve_hub() -> DeviceProvider:
@@ -425,11 +479,14 @@ def hub_set(
     try:
         with _connected_hub() as provider:
 
-            def change(pv: DeviceProvider) -> None:
+            def change(pv: DeviceProvider) -> OpResult:
                 # path/value are passed straight through to the provider, which owns
                 # the SAH-boundary encoding (the hostile-input contract is enforced
-                # at the provider's transport seam, not re-encoded here).
-                pv.set(path, value)
+                # at the provider's transport seam, not re-encoded here). Return the
+                # OpResult so the rails catch a return-convention provider's ok=False
+                # (Sagemcom raises, but a generic/return-convention hub does not) —
+                # no call site silently discards a refused write.
+                return pv.set(path, value)
 
             result = rails.guarded_apply(
                 provider,
@@ -750,11 +807,11 @@ _ORBI_CHANNEL_5G = "channel/5g"
 _ORBI_FIRMWARE_PATH = "firmware/new"
 _ORBI_MODEL_PATH = "info/model"
 
-# Where the Orbi admin password lives (mirrors the Orbi provider's keychain tuple);
-# used to build Creds before connect. The provider re-reads the secret from the
-# Keychain itself, so a None secret here is fine (credentials never flow through
-# the CLI layer).
-_ORBI_KEYCHAIN_ACCOUNT = orbi_provider.KEYCHAIN_ACCOUNT
+# The Orbi admin Keychain (service, account) is resolved discovery-first by
+# :func:`device_keychain_ref` (instance.yaml ``devices.orbi.keychain.*`` → per-kind
+# default) rather than hardcoded to the Orbi-provider tuple. The provider re-reads
+# the password from the Keychain itself; the CLI only supplies the account as the
+# Creds username (credentials never flow through the CLI layer).
 
 
 def _orbi_netcontext() -> NetContext:
@@ -769,18 +826,14 @@ def _orbi_netcontext() -> NetContext:
 
 
 def _orbi_creds(net: NetContext) -> Creds:
-    """Assemble Creds for the resolved Orbi.
+    """Assemble Creds for the resolved Orbi via the generalized resolver.
 
-    The host is the detected gateway IP; the username is the Orbi admin account.
-    The secret is left ``None`` on purpose — the provider reads the password from
-    the Keychain at connect time (credentials never flow through the CLI layer).
+    Delegates to :func:`device_creds` so the Orbi admin account is read from
+    instance.yaml (``devices.orbi.keychain.account``) or the per-kind default.
+    The secret stays ``None`` — the provider reads the password from the Keychain
+    at connect time (credentials never flow through the CLI layer).
     """
-    return Creds(
-        host=net.gateway_ip or "",
-        username=_ORBI_KEYCHAIN_ACCOUNT,
-        secret=None,
-        key_path=None,
-    )
+    return device_creds("orbi", net)
 
 
 def _resolve_orbi() -> DeviceProvider:
@@ -921,8 +974,14 @@ def orbi_guest_wifi(
                 )
                 return
 
-            def change(pv: DeviceProvider) -> None:
-                pv.set(op.path, target_value)
+            def change(pv: DeviceProvider) -> OpResult:
+                # Return the OpResult straight through so the rails can inspect it:
+                # OrbiProvider.set signals a refused write by RETURNING ok=False (no
+                # raise), and guarded_apply now treats a returned ok=False as a
+                # failed apply (rollback + ok=False). Discarding it here would let a
+                # refused write reach the verify gate and commit if the leaf merely
+                # LOOKS correct on re-read — the P2 silent-discard finding.
+                return pv.set(op.path, target_value)
 
             def verify_fn() -> bool:
                 # Real-world verify: re-read the leaf and confirm it reflects the
