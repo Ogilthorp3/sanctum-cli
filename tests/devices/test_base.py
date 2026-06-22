@@ -31,6 +31,9 @@ class FakeProvider:
     def connect(self, creds: Creds | None) -> None:
         self._conn = True
 
+    def disconnect(self) -> None:
+        self._conn = False
+
     def get(self, path: str) -> str:
         return self._v[path]
 

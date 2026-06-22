@@ -43,6 +43,7 @@ class FakeProvider:
         self.set_calls: list[tuple[str, str]] = []
         self.rollback_calls = 0
         self.connected = False
+        self.disconnected = False
 
     @staticmethod
     def detect(net: object) -> float:
@@ -50,6 +51,9 @@ class FakeProvider:
 
     def connect(self, creds: object | None) -> None:
         self.connected = True
+
+    def disconnect(self) -> None:
+        self.disconnected = True
 
     def get(self, path: str) -> str | None:
         return self._v.get(path)
@@ -142,6 +146,35 @@ def test_net_hub_single_nat_dryrun_mutates_nothing(monkeypatch: pytest.MonkeyPat
     assert p.set_calls == []
     assert p.rollback_calls == 0
     assert p.get(BRIDGE_MODE_PATH) == "off"
+
+
+def test_net_hub_status_disconnects_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every hub command must release the provider via disconnect() (no loop leak)."""
+    p = FakeProvider()
+    _point_registry_at(monkeypatch, p)
+    result = runner.invoke(app, ["net", "hub", "status"])
+    assert result.exit_code == 0, result.stdout
+    assert p.connected is True
+    assert p.disconnected is True  # the lifecycle teardown ran
+
+
+def test_net_hub_disconnects_even_when_command_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """disconnect() must fire in a finally even when the command body raises."""
+    from sanctum_cli.devices.base import DeviceError
+
+    class GetRaisesProvider(FakeProvider):
+        def get(self, path: str) -> str | None:
+            msg = "transport died mid-read"
+            raise DeviceError(msg)
+
+    p = GetRaisesProvider()
+    _point_registry_at(monkeypatch, p)
+    result = runner.invoke(app, ["net", "hub", "get", BRIDGE_MODE_PATH])
+    # DeviceError → clean exit code, AND the provider was still disconnected.
+    assert result.exit_code == 4
+    assert p.disconnected is True
 
 
 def test_net_hub_single_nat_apply_threads_fw_bound_runner(

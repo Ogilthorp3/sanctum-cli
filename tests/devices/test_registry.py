@@ -45,6 +45,9 @@ class FakeProvider:
     def connect(self, creds: Creds | None) -> None:
         self._conn = True
 
+    def disconnect(self) -> None:
+        self._conn = False
+
     def get(self, path: str) -> str:
         return self._v[path]
 
@@ -77,6 +80,9 @@ class WeakHub:
     def connect(self, creds: Creds | None) -> None:  # pragma: no cover - trivial
         return None
 
+    def disconnect(self) -> None:  # pragma: no cover - not exercised
+        return None
+
     def get(self, path: str) -> str:  # pragma: no cover - not exercised
         return ""
 
@@ -104,6 +110,9 @@ class NeverHub:
         return 0.0
 
     def connect(self, creds: Creds | None) -> None:  # pragma: no cover
+        return None
+
+    def disconnect(self) -> None:  # pragma: no cover
         return None
 
     def get(self, path: str) -> str:  # pragma: no cover

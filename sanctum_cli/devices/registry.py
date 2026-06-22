@@ -98,6 +98,10 @@ class GenericReadOnlyProvider:
         """No session to open — the generic provider holds no transport."""
         return None
 
+    def disconnect(self) -> None:
+        """No transport held — teardown is a no-op (keeps the Protocol uniform)."""
+        return None
+
     def get(self, path: str) -> str | None:  # noqa: ARG002
         """Best-effort read. Knows nothing, so always returns ``None``."""
         return None

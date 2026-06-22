@@ -138,6 +138,17 @@ class DeviceProvider(Protocol):
         """Open an authenticated session (or no-op for credential-less providers)."""
         ...
 
+    def disconnect(self) -> None:
+        """Release any transport this provider holds (session, loop, socket).
+
+        The uniform lifecycle-close primitive: a consumer that programs against
+        the :class:`DeviceProvider` type can deterministically release a
+        provider's resources without knowing the brand. MUST be idempotent and
+        safe to call when never connected (so a ``finally`` block can always call
+        it). Credential-less / transport-less providers implement it as a no-op.
+        """
+        ...
+
     def get(self, path: str) -> str | None:
         """Read one value addressed by a provider-specific ``path``.
 

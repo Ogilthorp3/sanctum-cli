@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import socket
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
 
@@ -17,6 +18,8 @@ from sanctum_cli.net import detect, playbooks, render, safety, speedtest, system
 from sanctum_cli.net.types import SpeedReport, Verdict
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from sanctum_cli.devices.base import DeviceProvider
     from sanctum_cli.net.detect import HttpProbe, Runner
 
@@ -328,6 +331,11 @@ def _resolve_hub() -> DeviceProvider:
     Detection is read-only; ``connect`` opens the authenticated session. Any
     transport/auth failure raises a ``SanctumError`` (DeviceError) which the
     command wrappers map to a clean exit code.
+
+    NOTE: the caller MUST release the provider via ``disconnect()`` — a connected
+    provider owns a transport (the Sagemcom provider holds a persistent asyncio
+    loop + a loop-bound aiohttp session). Use :func:`_connected_hub` (a
+    context manager) instead of calling this directly so teardown is guaranteed.
     """
     net = _hub_netcontext()
     provider = registry.resolve("hub", net)
@@ -335,17 +343,37 @@ def _resolve_hub() -> DeviceProvider:
     return provider
 
 
+@contextmanager
+def _connected_hub() -> Iterator[DeviceProvider]:
+    """Yield a connected hub provider, guaranteeing ``disconnect()`` on exit.
+
+    Closes the lifecycle gap behind every ``sanctum net hub ...`` command: the
+    Sagemcom provider opens a persistent event loop + a loop-bound aiohttp
+    session at ``connect`` that only ``disconnect()`` releases cleanly. Without
+    this each invocation leaked the loop/session to GC (a ResourceWarning, no
+    clean SAH logout). ``disconnect`` is part of the ``DeviceProvider`` Protocol
+    and is idempotent + safe even if ``connect`` failed, so the ``finally`` can
+    always call it.
+    """
+    provider = _resolve_hub()
+    try:
+        yield provider
+    finally:
+        provider.disconnect()
+
+
 @hub_app.command("status", help="Read-only hub summary: model, firmware, bridge-mode.")
 def hub_status() -> None:
     try:
-        provider = _resolve_hub()
-        model = provider.get(_HUB_MODEL_PATH)
-        firmware = provider.get(_HUB_FIRMWARE_PATH)
-        bridge = provider.get(_HUB_BRIDGE_PATH)
+        with _connected_hub() as provider:
+            model = provider.get(_HUB_MODEL_PATH)
+            firmware = provider.get(_HUB_FIRMWARE_PATH)
+            bridge = provider.get(_HUB_BRIDGE_PATH)
+            brand, kind = provider.brand, provider.kind
     except SanctumError as exc:
         _report(exc)
         raise typer.Exit(code=int(exc.exit_code)) from exc
-    console.print(f"[bold]hub:[/] {escape(provider.brand)} ({escape(provider.kind)})")
+    console.print(f"[bold]hub:[/] {escape(brand)} ({escape(kind)})")
     console.print(f"[bold]model:[/] {escape(model or '-')}")
     console.print(f"[bold]firmware:[/] {escape(firmware or '-')}")
     console.print(f"[bold]bridge-mode:[/] {escape(bridge or '-')}")
@@ -356,8 +384,8 @@ def hub_get(
     path: Annotated[str, typer.Argument(help="Provider-specific path (e.g. an XPath).")],
 ) -> None:
     try:
-        provider = _resolve_hub()
-        value = provider.get(path)
+        with _connected_hub() as provider:
+            value = provider.get(path)
     except SanctumError as exc:
         _report(exc)
         raise typer.Exit(code=int(exc.exit_code)) from exc
@@ -377,25 +405,25 @@ def hub_set(
     ] = False,
 ) -> None:
     try:
-        provider = _resolve_hub()
+        with _connected_hub() as provider:
 
-        def change(pv: DeviceProvider) -> None:
-            # path/value are passed straight through to the provider, which owns
-            # the SAH-boundary encoding (the hostile-input contract is enforced at
-            # the provider's transport seam, not re-encoded here).
-            pv.set(path, value)
+            def change(pv: DeviceProvider) -> None:
+                # path/value are passed straight through to the provider, which owns
+                # the SAH-boundary encoding (the hostile-input contract is enforced
+                # at the provider's transport seam, not re-encoded here).
+                pv.set(path, value)
 
-        result = rails.guarded_apply(
-            provider,
-            change,
-            # No real-world verify wired for an arbitrary leaf set — a single
-            # write is committed if it does not raise. Intents (single-nat) carry
-            # their own real-site verify.
-            verify_fn=lambda: True,
-            confirm=lambda plan: typer.confirm(f"{plan}\nProceed?"),
-            force=force,
-            rollback=not no_rollback,
-        )
+            result = rails.guarded_apply(
+                provider,
+                change,
+                # No real-world verify wired for an arbitrary leaf set — a single
+                # write is committed if it does not raise. Intents (single-nat)
+                # carry their own real-site verify.
+                verify_fn=lambda: True,
+                confirm=lambda plan: typer.confirm(f"{plan}\nProceed?"),
+                force=force,
+                rollback=not no_rollback,
+            )
     except SanctumError as exc:
         _report(exc)
         raise typer.Exit(code=int(exc.exit_code)) from exc
@@ -420,21 +448,21 @@ def hub_single_nat(
     ] = False,
 ) -> None:
     try:
-        provider = _resolve_hub()
-        # Verify must run over the Firewalla-key-bound runner (the same one
-        # net_optimize/net_check use), NOT the bare system.real_runner. Only
-        # _build_runner() → make_real_runner() resolves the ("fw_wan_ip",) /
-        # ("fw_wan_mac",) tags over the SSH seam; the bare real_runner returns
-        # "" for them (system.py:18), which would make verify.verify see a
-        # None WAN IP — disabling the APIPA/DHCP-fail auto-rollback trigger and
-        # biasing classify_nat toward NOT-VERIFIED on a successful cutover.
-        result = intents.single_nat(
-            provider,
-            force=force,
-            apply=apply,
-            runner=_build_runner() if apply else None,
-            confirm=lambda plan: typer.confirm(f"{plan}\nProceed?"),
-        )
+        with _connected_hub() as provider:
+            # Verify must run over the Firewalla-key-bound runner (the same one
+            # net_optimize/net_check use), NOT the bare system.real_runner. Only
+            # _build_runner() → make_real_runner() resolves the ("fw_wan_ip",) /
+            # ("fw_wan_mac",) tags over the SSH seam; the bare real_runner returns
+            # "" for them (system.py:18), which would make verify.verify see a
+            # None WAN IP — disabling the APIPA/DHCP-fail auto-rollback trigger and
+            # biasing classify_nat toward NOT-VERIFIED on a successful cutover.
+            result = intents.single_nat(
+                provider,
+                force=force,
+                apply=apply,
+                runner=_build_runner() if apply else None,
+                confirm=lambda plan: typer.confirm(f"{plan}\nProceed?"),
+            )
     except SanctumError as exc:
         _report(exc)
         raise typer.Exit(code=int(exc.exit_code)) from exc
