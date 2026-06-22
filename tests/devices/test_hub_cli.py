@@ -80,7 +80,7 @@ def _point_registry_at(monkeypatch: pytest.MonkeyPatch, provider: FakeProvider) 
     """Make ``net hub`` resolve to ``provider`` and never touch creds/network."""
     monkeypatch.setattr(
         "sanctum_cli.commands.net.registry.resolve",
-        lambda _kind, _net: provider,
+        lambda _kind, _net, brand_pin=None: provider,
     )
     # Build NetContext without shelling out to `route`, and creds without Keychain.
     monkeypatch.setattr(
@@ -146,6 +146,47 @@ def test_net_hub_single_nat_dryrun_mutates_nothing(monkeypatch: pytest.MonkeyPat
     assert p.set_calls == []
     assert p.rollback_calls == 0
     assert p.get(BRIDGE_MODE_PATH) == "off"
+
+
+def test_net_hub_brand_pin_threaded_from_instance_yaml(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An instance.yaml devices.hub.brand pin reaches registry.resolve(brand_pin=).
+
+    This is the escape hatch that lets the real Bell hub resolve end-to-end even
+    though the Sagemcom read-only probe is a stub (detect()→0). We assert the pin
+    configured in instance.yaml is the brand_pin handed to resolve.
+    """
+    p = FakeProvider()
+    # Build creds/netcontext without shelling out (mirrors _point_registry_at),
+    # but spy on resolve to capture the brand_pin kwarg.
+    monkeypatch.setattr(
+        "sanctum_cli.commands.net._hub_netcontext",
+        lambda: __import__(
+            "sanctum_cli.devices.base", fromlist=["NetContext"]
+        ).NetContext(gateway_ip="192.168.2.1", runner=None),
+    )
+    monkeypatch.setattr(
+        "sanctum_cli.commands.net._hub_creds",
+        lambda net: __import__("sanctum_cli.devices.base", fromlist=["Creds"]).Creds(
+            host="192.168.2.1", username="admin", secret=None, key_path=None
+        ),
+    )
+    monkeypatch.setattr(
+        "sanctum_cli.commands.net.config.instance_value",
+        lambda key, default=None: "sagemcom" if key == "devices.hub.brand" else default,
+    )
+    captured: dict[str, object] = {}
+
+    def spy_resolve(kind: str, net: object, *, brand_pin: object = None) -> object:
+        captured["brand_pin"] = brand_pin
+        return p
+
+    monkeypatch.setattr("sanctum_cli.commands.net.registry.resolve", spy_resolve)
+
+    result = runner.invoke(app, ["net", "hub", "status"])
+    assert result.exit_code == 0, result.stdout
+    assert captured["brand_pin"] == "sagemcom"
 
 
 def test_net_hub_status_disconnects_provider(monkeypatch: pytest.MonkeyPatch) -> None:

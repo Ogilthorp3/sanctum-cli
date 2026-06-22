@@ -336,9 +336,18 @@ def _resolve_hub() -> DeviceProvider:
     provider owns a transport (the Sagemcom provider holds a persistent asyncio
     loop + a loop-bound aiohttp session). Use :func:`_connected_hub` (a
     context manager) instead of calling this directly so teardown is guaranteed.
+
+    An optional instance.yaml ``devices.hub.brand`` pins the provider explicitly,
+    bypassing ``detect()``. This is the escape hatch for a hub whose read-only
+    probe is not implemented: without it, resolution depends on a working
+    ``detect()`` and a stubbed probe degrades the real hub to the read-only
+    fallback (status prints dashes; set/single-nat refuse). Pin ``sagemcom`` to
+    drive a Bell Home Hub end-to-end today.
     """
     net = _hub_netcontext()
-    provider = registry.resolve("hub", net)
+    pinned = config.instance_value("devices.hub.brand", None)
+    brand_pin = str(pinned) if pinned is not None else None
+    provider = registry.resolve("hub", net, brand_pin=brand_pin)
     provider.connect(_hub_creds(net))
     return provider
 

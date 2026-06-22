@@ -50,18 +50,43 @@ def register(cls: type[DeviceProvider]) -> type[DeviceProvider]:
     return cls
 
 
-def resolve(kind: str, net: NetContext) -> DeviceProvider:
-    """Return the most-confident provider for ``kind`` on ``net``.
+def resolve(kind: str, net: NetContext, *, brand_pin: str | None = None) -> DeviceProvider:
+    """Return the provider for ``kind`` on ``net``, optionally pinned by brand.
 
-    Each registered provider for ``kind`` is instantiated and its ``detect(net)``
-    is scored; the highest score *strictly above zero* wins. If no provider is
-    registered for ``kind``, or every ``detect`` returns ``0`` (nothing recognized
-    the network), a :class:`GenericReadOnlyProvider` for ``kind`` is returned so
-    the caller always gets a usable, read-only object.
+    Two resolution paths:
+
+    * **brand_pin set** — the operator has explicitly named the gear (via
+      instance.yaml ``devices.hub.brand``). The registered provider whose
+      class-level ``brand`` matches ``brand_pin`` is selected *regardless of its
+      ``detect`` score*. This is the escape hatch for gear whose read-only probe
+      is not (yet) implemented — without it, resolution depends on a working
+      ``detect()`` and a stubbed probe silently degrades the real hub to the
+      read-only fallback. An unknown pin raises a legible :class:`DeviceError`
+      so a typo fails loudly instead of silently falling back.
+    * **brand_pin None** (default) — each registered provider for ``kind`` is
+      instantiated and its ``detect(net)`` scored; the highest score *strictly
+      above zero* wins. If no provider is registered for ``kind``, or every
+      ``detect`` returns ``0``, a :class:`GenericReadOnlyProvider` is returned so
+      the caller always gets a usable, read-only object.
     """
+    candidates = _REGISTRY.get(kind, [])
+    if brand_pin is not None:
+        for cls in candidates:
+            if cls.brand == brand_pin:
+                return cls()
+        known = ", ".join(sorted(c.brand for c in candidates)) or "(none registered)"
+        msg = f"no registered {kind} provider for pinned brand {brand_pin!r}"
+        raise DeviceError(
+            msg,
+            fix=(
+                f"set devices.{kind}.brand in instance.yaml to one of: {known} — "
+                "or remove the pin to fall back to auto-detection."
+            ),
+        )
+
     best: DeviceProvider | None = None
     best_score = 0.0
-    for cls in _REGISTRY.get(kind, []):
+    for cls in candidates:
         candidate = cls()
         score = cls.detect(net)
         if score > best_score:

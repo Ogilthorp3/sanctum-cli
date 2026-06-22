@@ -223,6 +223,38 @@ def test_generic_error_names_brand_and_invites_contribution(clean_registry: None
     assert "contribute" in msg
 
 
+def test_resolve_brand_pin_selects_regardless_of_detect(clean_registry: None) -> None:
+    """A brand pin selects the named provider even when its detect() scores 0.
+
+    This is the escape hatch for gear whose read-only probe is unimplemented
+    (the real Sagemcom probe is a stub returning 0). NeverHub.detect() → 0.0,
+    so without the pin it would never be chosen; with the pin it must be.
+    """
+    from sanctum_cli.devices import registry
+
+    registry.register(NeverHub)
+    net = NetContext(gateway_ip="192.168.2.1", runner=None)
+    # No pin → NeverHub scores 0 → generic fallback.
+    assert registry.resolve("hub", net).brand != "never-hub"
+    # Pinned → NeverHub is selected despite a 0.0 detect score.
+    p = registry.resolve("hub", net, brand_pin="never-hub")
+    assert p.brand == "never-hub"
+
+
+def test_resolve_unknown_brand_pin_raises_legibly(clean_registry: None) -> None:
+    """A pin naming no registered provider fails loudly (typo ≠ silent fallback)."""
+    from sanctum_cli.devices import registry
+
+    registry.register(FakeProvider)
+    net = NetContext(gateway_ip="192.168.2.1", runner=None)
+    with pytest.raises(DeviceError) as ei:
+        registry.resolve("hub", net, brand_pin="orbi")
+    msg = str(ei.value)
+    assert "orbi" in msg
+    # The error names the brands the operator could have meant.
+    assert "fake-hub" in str(ei.value.fix)
+
+
 def test_resolve_returns_a_device_provider(clean_registry: None) -> None:
     from sanctum_cli.devices import registry
 
