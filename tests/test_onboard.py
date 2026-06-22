@@ -230,9 +230,11 @@ def _invoke_family_onboard_interactive(input_text: str) -> tuple[int, str]:
         patch("sanctum_cli.commands.onboard.backup_cmd.backup_run"),
         patch("sanctum_cli.commands.onboard._dispatch_cloud_setup"),
         patch("sanctum_cli.commands.onboard._run_canary"),
-        # Firewalla pairing is a separate interactive gate (own tests); the
-        # family-interview tests mock it out so it doesn't consume their stdin.
+        # Firewalla pairing + the AI-providers chapter are separate interactive
+        # gates (own tests); the family-interview tests mock them out so they
+        # don't consume their stdin.
         patch("sanctum_cli.commands.onboard._run_firewalla_pairing"),
+        patch("sanctum_cli.commands.onboard._run_ai_providers"),
     ):
         result = runner.invoke(app, ["onboard", "--recipe", "family"], input=input_text)
     return result.exit_code, " ".join(result.stdout.split())

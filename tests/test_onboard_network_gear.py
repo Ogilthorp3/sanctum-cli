@@ -229,6 +229,7 @@ def _invoke_family_onboard_interactive(input_text: str) -> tuple[int, str]:
         patch("sanctum_cli.commands.onboard._run_identity_setup"),
         patch("sanctum_cli.commands.onboard._run_family_setup"),
         patch("sanctum_cli.commands.onboard._run_firewalla_pairing"),
+        patch("sanctum_cli.commands.onboard._run_ai_providers"),
         # The masked admin-password prompt (Prompt.ask(password=True)) routes to
         # getpass, which emits GetPassWarning when stdin is not a real TTY (every
         # CliRunner). The pyproject `filterwarnings=["error"]` would turn that

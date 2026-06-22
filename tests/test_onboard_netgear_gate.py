@@ -345,6 +345,7 @@ def test_paired_gate_writes_hostile_password_verbatim_to_keychain_seam(
         patch("sanctum_cli.commands.onboard._run_identity_setup"),
         patch("sanctum_cli.commands.onboard._run_family_setup"),
         patch("sanctum_cli.commands.onboard._run_firewalla_pairing"),
+        patch("sanctum_cli.commands.onboard._run_ai_providers"),
         # Prompt.ask(password=True) routes to getpass, which warns on a non-TTY
         # CliRunner; pyproject filterwarnings=error would crash the prompt. The
         # warning is a test-environment artifact (a real TTY never fires it), and

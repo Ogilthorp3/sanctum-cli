@@ -41,6 +41,7 @@ from sanctum_cli import config, recipes
 from sanctum_cli.backends import b2, gdrive, r2
 from sanctum_cli.commands import backup as backup_cmd
 from sanctum_cli.errors import LocalError, UserError
+from sanctum_cli.providers.base import HealthSnapshot
 
 if TYPE_CHECKING:
     from sanctum_cli.devices.base import DeviceProvider, NetContext
@@ -59,6 +60,7 @@ RECIPE_GATES: dict[str, tuple[str, ...]] = {
     "family": (
         "identity-setup",
         "family-setup",
+        "ai-providers",
         "firewalla-pairing",
         "firewalla-compat",
         "network-gear",
@@ -200,6 +202,9 @@ def onboard_command(
         elif gate == "family-setup":
             console.print(f"\n[bold]Step {step_no}.[/] Family setup")
             _run_family_setup(yes=yes)
+        elif gate == "ai-providers":
+            console.print(f"\n[bold]Step {step_no}.[/] Your AI")
+            _run_ai_providers(yes=yes)
         elif gate == "firewalla-pairing":
             console.print(f"\n[bold]Step {step_no}.[/] Firewalla pairing")
             _run_firewalla_pairing(yes=yes)
@@ -592,6 +597,342 @@ def _run_family_setup(*, yes: bool) -> None:
             yaml.safe_dump(skeleton, sort_keys=False, allow_unicode=True), encoding="utf-8"
         )
         console.print(f"  [green]✓[/] wrote {len(members)} member(s) to new {path}")
+
+
+# ── AI-provider chapter ("Your AI") ──────────────────────────────────
+# The first chapter that connects the user's models. It reuses the P4 cred-capture
+# pattern (prompt → fail-closed Keychain → best-effort trifecta mirror → health-
+# probe → revoke-on-failure), generalized from device admin secrets to AI-provider
+# API keys. Claude is offered two ways, defaulting to the $0 Max/Pro subscription
+# (``via=proxy``, no Keychain write); the Anthropic-API-key path and Gemini both
+# capture a masked key into the Keychain and earn their persisted config ONLY on a
+# green health-probe — a rejected key REVOKES the entry and persists nothing
+# (fail-closed, mirroring _run_network_gear). Interactive by design, so ``--yes``
+# SKIPS the whole chapter (a scripted run against a closed stdin would hang). Every
+# external call — the claude-CLI presence/login probe, the proxy wiring, the
+# provider health() — is a module-level seam the tests monkeypatch, so no live API
+# call, no real ``claude`` shell-out, and no live network occurs in the suite.
+
+#: The Keychain (service, account) the Anthropic-API-key path captures the key
+#: under — the same pair ``cli.providers.claude.keychain`` defaults to, so the
+#: provider re-reads it at use time (registry.make_provider).
+_CLAUDE_KEYCHAIN = ("anthropic-api-key", "sanctum")
+#: The Keychain (service, account) for the Gemini key (matches the gemini default).
+_GEMINI_KEYCHAIN = ("google-ai-api-key", "sanctum")
+#: The local claude-cli-proxy endpoint the subscription path points the provider at.
+_CLAUDE_PROXY_ENDPOINT = "http://127.0.0.1:2001"
+
+
+def _claude_logged_in() -> bool:
+    """Cheap probe: is the local ``claude`` CLI logged in? — a module-level seam.
+
+    Runs a fast, READ-ONLY ``claude`` invocation and treats a clean exit as
+    "logged in". This is the one place a real ``claude`` shell-out would happen, so
+    it is a seam the tests monkeypatch (NO real ``claude`` is run in the suite). A
+    missing binary is handled by :func:`_claude_cli_ready` before this is reached;
+    any subprocess failure here is read as "not logged in" (fail-closed) rather
+    than raising out of onboarding.
+    """
+    import subprocess
+
+    claude_bin = shutil.which("claude")
+    if claude_bin is None:  # pragma: no cover - guarded by _claude_cli_ready upstream
+        return False
+    try:
+        proc = subprocess.run(
+            [claude_bin, "auth", "status"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0
+
+
+def _claude_cli_ready() -> bool:
+    """True iff the ``claude`` CLI is installed AND logged in.
+
+    ``shutil.which`` (cheap, no shell-out) short-circuits the login probe when the
+    binary is absent, so a stock Mac with no ``claude`` never shells out. Fail-
+    closed: anything short of "present and logged in" returns False, which makes
+    the subscription path persist NOTHING and show the install guidance instead of
+    a false ``via=proxy``.
+    """
+    if shutil.which("claude") is None:
+        return False
+    return _claude_logged_in()
+
+
+def _ensure_claude_proxy() -> None:
+    """Best-effort: ensure the ``claude-cli-proxy`` LaunchAgent is wired + running.
+
+    A module-level seam (tests monkeypatch it) so the subscription path can wire
+    the local proxy the ``via=proxy`` provider talks to without the onboarding test
+    touching launchctl. Best-effort by design — the health-probe that follows is
+    the real gate on whether the proxy actually serves — so any failure here is
+    surfaced as a note and never aborts the chapter.
+    """
+    from sanctum_cli.commands import agent
+    from sanctum_cli.commands.proxy import KNOWN_PROXIES
+
+    label, _url = KNOWN_PROXIES["claude-cli-proxy"]
+    with contextlib.suppress(Exception):
+        agent.agent_restart(label)
+
+
+def _provider_health(kind: str, cfg: config.Config) -> HealthSnapshot:
+    """Build provider ``kind`` from ``cfg`` and return its ``health()`` — a seam.
+
+    Mirrors ``doctor._provider``: a provider that cannot even be constructed (a
+    Keychain miss surfaces as ``LocalError`` at build time) OR whose ``health()``
+    raises is reported as a non-ok snapshot rather than crashing onboarding. The
+    tests monkeypatch THIS function so no provider is built and no live API/network
+    call fires; production builds the real provider, which re-reads the just-stored
+    key from the Keychain to authenticate the probe.
+    """
+    from sanctum_cli.providers import make_provider
+
+    try:
+        provider = make_provider(kind, cfg.cli.providers)
+        return provider.health()
+    except Exception as exc:  # build or health failure → fail-closed snapshot
+        return HealthSnapshot(ok=False, latency_ms=None, quota_remaining=None, detail=str(exc)[:160])
+
+
+def set_provider_config(
+    *,
+    claude: dict[str, Any] | None = None,
+    gemini: dict[str, Any] | None = None,
+    default_provider: str | None = None,
+    path: Path | None = None,
+) -> None:
+    """Persist VERIFIED provider config to ``cli.providers.*`` in instance.yaml.
+
+    Mirrors :func:`set_device_reference`'s atomic read-modify-write: every sibling
+    block (top-level AND inside ``cli:``) is preserved, a ``<file>.bak`` is written
+    first, and the parent dir is created for a fresh file. Only the arguments that
+    are given are written — a ``None`` ``claude``/``gemini``/``default_provider``
+    leaves any existing value untouched (so persisting only the provider that
+    passed its health-probe never clobbers the other). The captured SECRET never
+    lands here — it is in the Keychain (via :func:`store_device_secret`); only the
+    routing config (``via``/``endpoint``/``model``) and the default selection are
+    written. Callers must only invoke this AFTER a green health-probe.
+    """
+    target = Path(path) if path else config.instance_path()
+    data: dict[str, Any] = {}
+    if target.exists():
+        loaded = yaml.safe_load(target.read_text(encoding="utf-8"))
+        if isinstance(loaded, dict):
+            data = loaded
+    cli = data.get("cli")
+    if not isinstance(cli, dict):
+        cli = data["cli"] = {}
+    if claude is not None or gemini is not None:
+        providers = cli.get("providers")
+        if not isinstance(providers, dict):
+            providers = cli["providers"] = {}
+        if claude is not None:
+            providers["claude"] = claude
+        if gemini is not None:
+            providers["gemini"] = gemini
+    if default_provider is not None:
+        cli["default_provider"] = default_provider
+    if target.exists():
+        backup = target.parent / (target.name + ".bak")
+        backup.write_text(target.read_text(encoding="utf-8"), encoding="utf-8")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True), encoding="utf-8")
+
+
+_CLAUDE_INSTALL_GUIDANCE = (
+    "[bold]Claude subscription not connected[/]\n\n"
+    "Sanctum routes your prompts to your Claude Max/Pro subscription through a "
+    "local proxy — no API charges. It needs the [cyan]claude[/] CLI installed and "
+    "logged in.\n\n"
+    "[bold]One next step:[/] install the Claude CLI, run [cyan]claude login[/], "
+    "then re-run [cyan]sanctum onboard[/].\n\n"
+    "[dim]Prefer an API key instead? Re-run and choose option 2 at the Claude "
+    "prompt.[/]"
+)
+
+
+def _run_claude_subscription() -> dict[str, Any] | None:
+    """Subscription (``via=proxy``) path — returns the claude config or None.
+
+    Verifies the ``claude`` CLI is ready (installed + logged in); if not, shows the
+    calm install-guidance panel and returns None (persist NOTHING — no false
+    ``via=proxy``). If ready: wires the local proxy, health-probes it, and returns
+    the ``{via: proxy, endpoint}`` config ONLY on a green probe. A failing probe
+    surfaces the reason and returns None (nothing half-working persisted).
+    """
+    if not _claude_cli_ready():
+        console.print(Panel.fit(_CLAUDE_INSTALL_GUIDANCE, border_style="yellow"))
+        return None
+    _ensure_claude_proxy()
+    claude_cfg: dict[str, Any] = {"via": "proxy", "endpoint": _CLAUDE_PROXY_ENDPOINT}
+    cfg = _config_with_provider_overrides(claude=claude_cfg)
+    health = _provider_health("claude", cfg)
+    if not health.ok:
+        console.print(
+            f"  [yellow]Claude proxy not healthy[/] — {health.detail or 'no response'}. "
+            "Claude not configured; re-run after `claude login` or check "
+            "`sanctum proxy status`."
+        )
+        return None
+    console.print("  [green]✓[/] Claude connected (subscription, via proxy)")
+    return claude_cfg
+
+
+def _run_claude_api_key() -> dict[str, Any] | None:
+    """API-key (``via=direct``) path — masked key → store → probe → revoke-or-config.
+
+    Captures the masked Anthropic key into the Keychain FIRST (the provider re-reads
+    it from the Keychain to authenticate the health-probe — same ordering contract
+    as _run_network_gear), then probes. On a green probe returns the
+    ``{via: direct, endpoint}`` config; on a REJECTED key REVOKES the Keychain entry
+    and returns None (persist nothing — fail-closed). An empty key skips Claude.
+    """
+    key = Prompt.ask("  Anthropic API key", password=True).strip()
+    if not key:
+        console.print("  [dim]no key entered — Claude skipped (add later)[/]")
+        return None
+    service, account = _CLAUDE_KEYCHAIN
+    store_device_secret(service=service, account=account, secret=key)
+    claude_cfg: dict[str, Any] = {"via": "direct", "endpoint": "https://api.anthropic.com"}
+    cfg = _config_with_provider_overrides(claude=claude_cfg)
+    health = _provider_health("claude", cfg)
+    if not health.ok:
+        _revoke_device_secret(service=service, account=account)
+        console.print(
+            f"  [red]✗[/] Claude not configured — the API key was rejected "
+            f"({health.detail or 'auth failed'}). Nothing written; re-run to retry."
+        )
+        return None
+    console.print("  [green]✓[/] Claude connected (API key)")
+    return claude_cfg
+
+
+def _run_gemini() -> dict[str, Any] | None:
+    """Gemini API-key path — masked key → store → probe → revoke-or-config.
+
+    Same fail-closed shape as the Claude API-key path: store the masked key FIRST,
+    probe, and persist the ``{model}`` config ONLY on a green probe; a rejected key
+    REVOKES the Keychain entry and returns None. An empty key skips Gemini.
+    """
+    key = Prompt.ask(
+        "  Google AI / Gemini API key (enter to skip)", password=True, default="", show_default=False
+    ).strip()
+    if not key:
+        console.print(
+            "  [dim]Gemini skipped — add later with "
+            "`sanctum onboard` or store the key in your Keychain[/]"
+        )
+        return None
+    service, account = _GEMINI_KEYCHAIN
+    store_device_secret(service=service, account=account, secret=key)
+    gemini_cfg: dict[str, Any] = {"model": "gemini-2.5-pro"}
+    cfg = _config_with_provider_overrides(gemini=gemini_cfg)
+    health = _provider_health("gemini", cfg)
+    if not health.ok:
+        _revoke_device_secret(service=service, account=account)
+        console.print(
+            f"  [red]✗[/] Gemini not configured — the API key was rejected "
+            f"({health.detail or 'auth failed'}). Nothing written; re-run to retry."
+        )
+        return None
+    console.print("  [green]✓[/] Gemini connected (API key)")
+    return gemini_cfg
+
+
+def _config_with_provider_overrides(
+    *, claude: dict[str, Any] | None = None, gemini: dict[str, Any] | None = None
+) -> config.Config:
+    """Build an in-memory Config whose claude/gemini sub-config reflects the choice.
+
+    The health-probe builds the provider from a Config; before persisting we don't
+    yet have the new ``via``/``model`` on disk, so layer the chosen override onto a
+    fresh-loaded Config so ``make_provider`` constructs the RIGHT flavour
+    (``via=direct`` for the API-key probe, ``via=proxy`` for the subscription probe).
+    Reads the existing keychain refs from the schema defaults so the provider points
+    at the just-stored key. Never written — purely the probe's input.
+    """
+    cfg = config.ensure()
+    providers = cfg.cli.providers
+    new_claude = (
+        providers.claude.model_copy(update=claude) if claude is not None else providers.claude
+    )
+    new_gemini = (
+        providers.gemini.model_copy(update=gemini) if gemini is not None else providers.gemini
+    )
+    new_providers = providers.model_copy(update={"claude": new_claude, "gemini": new_gemini})
+    new_cli = cfg.cli.model_copy(update={"providers": new_providers})
+    return cfg.model_copy(update={"cli": new_cli})
+
+
+def _run_ai_providers(*, yes: bool) -> None:
+    """AI-provider chapter — connect Claude (sub/API) + Gemini, fail-closed.
+
+    Interactive by design, so ``--yes`` SKIPS (a scripted run against a closed
+    stdin would hang). Claude is offered two ways, defaulting to the $0 Max/Pro
+    subscription; both the Anthropic-API-key and the Gemini paths capture a masked
+    key into the Keychain and earn their persisted config ONLY on a green health-
+    probe — a rejected key REVOKES the entry and persists nothing. Each provider is
+    independent: a failed/declined one never blocks the other. On success the
+    verified ``cli.providers.{claude,gemini}`` blocks + ``cli.default_provider`` are
+    written atomically (siblings preserved); ``mlx_local`` always remains as the
+    offline floor, so the chapter is fully skippable. Non-blocking: the backup
+    already succeeded, so a provider miss never fails the run.
+    """
+    if yes:
+        console.print(
+            "  [yellow]skipped[/] — interactive step; run `sanctum onboard` "
+            "without --yes to connect your AI providers"
+        )
+        return
+
+    console.print(
+        "  [dim]Sanctum routes your prompts to the best model — let's connect "
+        "yours. (Your local offline model always stays as a fallback.)[/]"
+    )
+
+    # ── Claude ──
+    console.print(
+        "\n  How do you want to connect Claude?\n"
+        "    [bold]1[/] Claude Max/Pro subscription (free — recommended)\n"
+        "    [bold]2[/] Anthropic API key"
+    )
+    choice = Prompt.ask("  choose", choices=["1", "2"], default="1")
+    claude_cfg = _run_claude_subscription() if choice == "1" else _run_claude_api_key()
+
+    # ── Gemini ──
+    gemini_cfg = _run_gemini()
+
+    # ── Persist what was verified (each independent) ──
+    if claude_cfg is None and gemini_cfg is None:
+        console.print(
+            "  [dim]no cloud providers configured — your local offline model "
+            "(mlx_local) remains the default[/]"
+        )
+        return
+
+    # Default to Claude when it configured, else Gemini — the verified provider the
+    # user most likely wants first; mlx_local stays the floor regardless.
+    default_provider = "claude" if claude_cfg is not None else "gemini"
+    set_provider_config(
+        claude=claude_cfg, gemini=gemini_cfg, default_provider=default_provider
+    )
+    summary = " · ".join(
+        bit
+        for bit in (
+            "Claude ✓" if claude_cfg is not None else "",
+            "Gemini ✓" if gemini_cfg is not None else "",
+            "offline fallback ✓",
+        )
+        if bit
+    )
+    console.print(f"  [green]✓[/] AI configured — {summary}")
 
 
 def _prompt_signal_target() -> str | None:
