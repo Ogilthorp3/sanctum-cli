@@ -138,8 +138,14 @@ class DeviceProvider(Protocol):
         """Open an authenticated session (or no-op for credential-less providers)."""
         ...
 
-    def get(self, path: str) -> str:
-        """Read one value addressed by a provider-specific ``path``."""
+    def get(self, path: str) -> str | None:
+        """Read one value addressed by a provider-specific ``path``.
+
+        Returns ``None`` when the path is unknown to this provider — a normal,
+        best-effort outcome (e.g. the read-only generic fallback, or a path the
+        device does not expose), not an error. Transport/auth failures raise
+        :class:`DeviceError`.
+        """
         ...
 
     def set(self, path: str, value: str) -> OpResult:
