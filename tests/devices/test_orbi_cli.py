@@ -296,6 +296,50 @@ def test_net_orbi_guest_wifi_apply_verify_fail_rolls_back(
     assert p.rollback_calls == 1  # the rails tripped rollback
 
 
+def test_net_orbi_guest_wifi_apply_verify_readback_raises_rolls_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A DeviceError from the post-change read-back trips rollback, not an escape.
+
+    The change applies cleanly (the guest network IS flipped on the device), but
+    the post-change verify re-read hits a transport/auth flake and RAISES
+    DeviceError — a plausible state right after a wifi-radio change. Per the
+    Protocol, provider.get() raises on transport/auth failure. guarded_apply runs
+    verify_fn() unguarded, so without the CLI catching the DeviceError the
+    exception would escape the rails AFTER the set — leaving the guest network
+    flipped ON with NO rollback. The CLI's verify must treat a raising read-back
+    as verify-failure so the rails roll back the half-applied change.
+    """
+    from sanctum_cli.devices.base import DeviceError
+
+    class FlakyReadBackOrbi(FakeOrbi):
+        def __init__(self) -> None:
+            super().__init__()
+            self._set_fired = False
+
+        def set(self, path: str, value: str) -> OpResult:
+            # The change DOES apply — the device is genuinely flipped on.
+            self._set_fired = True
+            return super().set(path, value)
+
+        def get(self, path: str) -> str | None:
+            # The post-change verify re-read flakes and RAISES (transport died).
+            if self._set_fired:
+                msg = "Orbi guest-access read failed for 5g"
+                raise DeviceError(msg, fix="check the box is reachable")
+            return super().get(path)
+
+    p = FlakyReadBackOrbi()
+    _point_registry_at(monkeypatch, p)
+    result = runner.invoke(
+        app, ["net", "orbi", "guest-wifi", "on", "--apply", "--force"]
+    )
+    # The set fired (change applied) but the read-back raised → rails rolled back.
+    assert (GUEST_5G, "on") in p.set_calls
+    assert p.rollback_calls == 1  # NOT escaped: rollback restored the device
+    assert result.exit_code == 1, result.stdout  # reported as a clean failure exit
+
+
 def test_net_orbi_guest_wifi_disconnects_provider(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -928,7 +928,19 @@ def orbi_guest_wifi(
                 # Real-world verify: re-read the leaf and confirm it reflects the
                 # requested state (a refused/no-op set leaves the old value, which
                 # trips rollback). This is a read of the SAME leaf we wrote.
-                return provider.get(op.path) == target_value
+                #
+                # provider.get() RAISES DeviceError on a transport/auth flake
+                # (base.py Protocol; orbi._get_guest). guarded_apply calls
+                # verify_fn() UNGUARDED, so a raising read-back here would escape
+                # the rails AFTER the change applied — leaving the guest network
+                # flipped with no rollback (the exact half-applied state the rails
+                # exist to prevent, and plausible right after a wifi-radio change).
+                # Treat a failed read-back as a failed verify so the rails roll
+                # back rather than commit a half-applied device.
+                try:
+                    return provider.get(op.path) == target_value
+                except DeviceError:
+                    return False
 
             result = rails.guarded_apply(
                 provider,
