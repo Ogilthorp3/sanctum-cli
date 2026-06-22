@@ -213,6 +213,44 @@ def test_rollback_resets_only_changed_keys(
     assert (BRIDGE_PATH, "off") in patched.set_calls
 
 
+def test_snapshot_guarantees_bridge_mode_baseline_when_unread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the firmware does not expose the bridge-mode leaf, snapshot still carries
+    a safe restorable baseline for it (so rollback is never a silent no-op)."""
+    # Fake client whose bridge-mode read returns None (leaf not exposed).
+    fake = FakeSahClient({})  # empty: get_value_by_xpath → None for everything
+    monkeypatch.setattr("sanctum_cli.devices.sagemcom._make_client", lambda creds: fake)
+    monkeypatch.setattr("sanctum_cli.keychain.read", lambda account, service: "pw")
+    p = _connected(monkeypatch, fake)
+    snap = p.snapshot()
+    # The leaf the cutover mutates MUST be present even though its read was None.
+    assert snap.data[BRIDGE_PATH] == "off"
+
+
+def test_rollback_empty_snapshot_reports_failure(
+    patched: FakeSahClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An empty-baseline rollback must report ok=False — not a silent success."""
+    from sanctum_cli.devices.base import Snapshot
+
+    p = _connected(monkeypatch, patched)
+    empty = Snapshot(brand="sagemcom", taken_at="t", data={})
+    res = p.rollback(empty)
+    assert res.ok is False  # nothing to restore is a FAILED rollback
+    assert patched.set_calls == []  # and it issued no writes
+
+
+def test_rollback_with_baseline_reports_success(
+    patched: FakeSahClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A rollback that restores at least one leaf reports ok=True."""
+    p = _connected(monkeypatch, patched)
+    snap = p.snapshot()  # carries the guaranteed bridge-mode baseline
+    res = p.rollback(snap)
+    assert res.ok is True
+
+
 def test_capabilities_advertise_hub_surface(
     patched: FakeSahClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

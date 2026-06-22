@@ -62,12 +62,19 @@ KEYCHAIN_ACCOUNT = "admin"
 KEYCHAIN_SERVICE = "bell-hub-admin"
 
 # The Bell-specific network-config subtree we snapshot before a mutating intent.
-# These are the leaf XPaths a single-NAT / DMZ cutover touches; snapshot reads
-# each best-effort (a path the firmware does not expose is simply skipped), and
-# rollback re-issues a setValue for every captured leaf.
+# These are the leaf XPaths a single-NAT / DMZ cutover touches.
 _BRIDGE_MODE_XPATH = "Device/Services/BellNetworkCfg/SetBridgeMode"
 _ADVANCED_DMZ_XPATH = "Device/Services/BellNetworkCfg/AdvancedDMZ"
 _SNAPSHOT_XPATHS = (_BRIDGE_MODE_XPATH, _ADVANCED_DMZ_XPATH)
+
+# The leaves a single-NAT cutover actually MUTATES. The snapshot MUST carry a
+# restorable baseline for each of these even if the read returns None at
+# snapshot time — otherwise a rollback after a failed cutover would have nothing
+# to restore and would silently "succeed" while leaving the household in bridge
+# mode (internet down). A None read of the bridge-mode leaf means the hub is not
+# in bridge mode, so the safe pre-cutover baseline is "off".
+_MUTATED_XPATHS = (_BRIDGE_MODE_XPATH,)
+_SAFE_BASELINE = "off"
 
 # XPath that identifies the device class once authenticated, used to refine the
 # generic ``brand`` into a concrete model string after connect.
@@ -283,14 +290,24 @@ class SagemcomHubProvider:
     def snapshot(self, scope: str | None = None) -> Snapshot:  # noqa: ARG002 - whole-subtree
         """Capture the Bell network-config leaves we may need to restore.
 
-        Reads each tracked XPath best-effort; paths the firmware does not expose
-        are skipped (they cannot be rolled back to a value we never read).
+        A best-effort read of each tracked XPath, with one hard guarantee: every
+        leaf a mutating intent will actually change (``_MUTATED_XPATHS``) is
+        ALWAYS present in the baseline, even if its read returns None. A leaf the
+        firmware does not surface at snapshot time would otherwise be dropped,
+        leaving rollback with nothing to restore — so it would silently "succeed"
+        while the hub stayed in bridge mode (internet down). For the bridge-mode
+        leaf a None read means "not in bridge mode", so the safe pre-cutover
+        baseline is ``"off"``. Non-mutated leaves (e.g. DMZ) stay best-effort:
+        captured only when read, since we never write them.
         """
         data: dict[str, str] = {}
         for xpath in _SNAPSHOT_XPATHS:
             value = self._raw_get(xpath)
             if value is not None:
                 data[xpath] = value
+        # Guarantee a restorable baseline for every leaf the cutover will mutate.
+        for xpath in _MUTATED_XPATHS:
+            data.setdefault(xpath, _SAFE_BASELINE)
         return Snapshot(
             brand=self.brand,
             taken_at=datetime.now(tz=UTC).isoformat(),
@@ -298,7 +315,19 @@ class SagemcomHubProvider:
         )
 
     def rollback(self, snap: Snapshot) -> OpResult:
-        """Restore every captured leaf by re-issuing its setValue."""
+        """Restore every captured leaf by re-issuing its setValue.
+
+        Reports ``ok=False`` when the snapshot carries no restorable baseline
+        (``snap.data`` empty) — an empty rollback is NOT a success: it would
+        leave a half-applied device (e.g. the hub stuck in bridge mode) while
+        falsely reporting it was restored. The rails treat an ``ok=False``
+        rollback as a failed restore and surface a manual-recovery instruction.
+        """
+        if not snap.data:
+            return OpResult(
+                ok=False,
+                detail="rollback failed: snapshot carried no restorable baseline (0 keys)",
+            )
         restored = 0
         for xpath, value in snap.data.items():
             self.set(xpath, value)
