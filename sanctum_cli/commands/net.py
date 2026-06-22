@@ -5,12 +5,14 @@ import socket
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
+from urllib.parse import quote
 
 import typer
 from rich.console import Console
 from rich.markup import escape
 
 from sanctum_cli import config
+from sanctum_cli.devices import firewalla as firewalla_provider
 from sanctum_cli.devices import intents, rails, registry, sagemcom
 from sanctum_cli.devices.base import Capability, Creds, NetContext
 from sanctum_cli.errors import SanctumError
@@ -492,4 +494,215 @@ def hub_single_nat(
         console.print(f"\n[green]✓[/] {escape(result.result.detail)}")
     else:
         console.print(f"\n[yellow]{escape(result.result.detail)}[/]")
+        raise typer.Exit(code=1)
+
+
+# ─── firewalla (network-gear provider surface) ───────────────────────
+#
+# Importing sanctum_cli.devices.firewalla self-registers FirewallaProvider under
+# kind="firewalla" (see the module footer), so registry.resolve("firewalla", net)
+# can find it. Referenced here so the import is never pruned as unused.
+_firewalla_registered = firewalla_provider
+
+firewalla_app = typer.Typer(
+    help="Drive the Firewalla box (firewall) through the device-provider rails."
+)
+net_app.add_typer(firewalla_app, name="firewalla")
+
+# Bridge read paths the firewalla surface surfaces. These mirror the provider's
+# own endpoint vocabulary (sanctum_cli.devices.firewalla); a provider that has no
+# body for one returns None and the command prints a dash.
+_FW_INFO_PATH = "/info"
+_FW_POLICIES_PATH = "/policies"
+_FW_FLOWS_PATH = "/flows"
+
+# The Firewalla bridge admin account. The provider self-resolves its bearer token
+# from the env / on-disk secret at connect time (credentials never flow through
+# the CLI layer), so the secret here stays None.
+_FW_USERNAME = "pi"
+
+
+def _firewalla_netcontext() -> NetContext:
+    """Build the NetContext the registry fingerprints the Firewalla over.
+
+    Parses the default gateway from the real ``route`` probe (read-only) and
+    threads the real runner so a provider's ``detect()`` can probe without owning
+    its own subprocess plumbing. Monkeypatched in tests so no shell-out occurs.
+    """
+    gw = detect.parse_default_gateway(system.real_runner(("route",)))
+    return NetContext(gateway_ip=gw, runner=system.real_runner)
+
+
+def _firewalla_creds(net: NetContext) -> Creds:
+    """Assemble Creds for the resolved Firewalla.
+
+    The host is the detected gateway IP; the username is the box admin account.
+    The secret is left ``None`` on purpose — the provider reads the bearer token
+    from the env / on-disk secret at connect time (credentials never flow through
+    the CLI layer). The durable SSH key is resolved by the provider itself.
+    """
+    return Creds(
+        host=net.gateway_ip or "",
+        username=_FW_USERNAME,
+        secret=None,
+        key_path=None,
+    )
+
+
+def _resolve_firewalla() -> DeviceProvider:
+    """Resolve + connect the Firewalla provider for the local network.
+
+    Detection is read-only; ``connect`` resolves the bridge token + SSH key. Any
+    transport/auth failure raises a ``SanctumError`` (DeviceError) which the
+    command wrappers map to a clean exit code.
+
+    NOTE: the caller MUST release the provider via ``disconnect()`` — use
+    :func:`_connected_firewalla` (a context manager) instead of calling this
+    directly so teardown is guaranteed.
+
+    An optional instance.yaml ``devices.firewalla.brand`` pins the provider
+    explicitly, bypassing ``detect()`` — the escape hatch for a box whose
+    read-only probe is not implemented (without it a stubbed probe degrades the
+    real box to the read-only fallback).
+    """
+    net = _firewalla_netcontext()
+    pinned = config.instance_value("devices.firewalla.brand", None)
+    brand_pin = str(pinned) if pinned is not None else None
+    provider = registry.resolve("firewalla", net, brand_pin=brand_pin)
+    provider.connect(_firewalla_creds(net))
+    return provider
+
+
+@contextmanager
+def _connected_firewalla() -> Iterator[DeviceProvider]:
+    """Yield a connected Firewalla provider, guaranteeing ``disconnect()`` on exit.
+
+    Closes the lifecycle gap behind every ``sanctum net firewalla ...`` command:
+    ``disconnect`` is part of the ``DeviceProvider`` Protocol and is idempotent +
+    safe even if ``connect`` failed, so the ``finally`` can always call it.
+    """
+    provider = _resolve_firewalla()
+    try:
+        yield provider
+    finally:
+        provider.disconnect()
+
+
+def _fw_pause_path(target: str) -> str:
+    """The bridge path that pauses policy ``target`` (target id encoded in path).
+
+    ``target`` crosses into the bridge URL, so it is percent-encoded here at the
+    boundary (``quote`` with ``safe=''``) rather than relying on the HTTP client's
+    incidental behavior — a target carrying a ``/`` or ``%`` must not silently
+    address the wrong policy. The path shape (``/policies/<id>/pause``) mirrors the
+    provider's existing ``/policies`` vocabulary.
+    """
+    return f"/policies/{quote(target, safe='')}/pause"
+
+
+def _firewalla_pause_verify(provider: DeviceProvider, target: str) -> bool:
+    """Real-world verify for a pause: the target policy is reachable post-change.
+
+    Re-reads ``/policies`` through the provider and confirms the target id is
+    present in the returned body — a fail-soft consistency check that the box is
+    still answering and knows the policy after the flip. Returns ``False`` when
+    the bridge has no policy body (unreachable) or the target id is absent, which
+    trips the rails' rollback. Monkeypatched in tests to force the verify-fail
+    path.
+    """
+    body = provider.get(_FW_POLICIES_PATH)
+    if not body:
+        return False
+    return target in body
+
+
+@firewalla_app.command("status", help="Read-only Firewalla summary: brand + box info.")
+def firewalla_status() -> None:
+    try:
+        with _connected_firewalla() as provider:
+            info = provider.get(_FW_INFO_PATH)
+            brand, kind = provider.brand, provider.kind
+    except SanctumError as exc:
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code)) from exc
+    console.print(f"[bold]firewalla:[/] {escape(brand)} ({escape(kind)})")
+    console.print(f"[bold]info:[/] {escape(info or '-')}")
+
+
+@firewalla_app.command("policies", help="Read-only: the box's policy state.")
+def firewalla_policies() -> None:
+    try:
+        with _connected_firewalla() as provider:
+            body = provider.get(_FW_POLICIES_PATH)
+    except SanctumError as exc:
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code)) from exc
+    console.print(escape(body if body is not None else "-"))
+
+
+@firewalla_app.command("flows", help="Read-only: recent network flows seen by the box.")
+def firewalla_flows() -> None:
+    try:
+        with _connected_firewalla() as provider:
+            body = provider.get(_FW_FLOWS_PATH)
+    except SanctumError as exc:
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code)) from exc
+    console.print(escape(body if body is not None else "-"))
+
+
+@firewalla_app.command(
+    "pause",
+    help="Pause a policy/target. Dry-run by default; pass --apply to fire (guarded).",
+)
+def firewalla_pause(
+    target: Annotated[str, typer.Argument(help="Policy id (or target) to pause.")],
+    apply: Annotated[
+        bool,
+        typer.Option("--apply", help="Actually fire the pause (guarded by snapshot→verify→rollback)."),
+    ] = False,
+    force: Annotated[
+        bool, typer.Option("--force", help="Skip the confirmation prompt (with --apply).")
+    ] = False,
+) -> None:
+    pause_path = _fw_pause_path(target)
+    plan = [
+        f"pause plan for target {target!r}:",
+        f"  1. POST {pause_path}  (pause the policy)",
+        "  2. verify: the policy is still reachable after the flip",
+        "  3. on verify failure: roll back to the pre-change policy snapshot",
+    ]
+    if not apply:
+        # Dry-run: describe, mutate nothing. The hard guardrail for the overnight
+        # build — no provider.set / guarded_apply is reached on this branch.
+        for line in plan:
+            console.print(escape(line))
+        console.print("\n[dim]dry-run: no changes made. Re-run with --apply to fire.[/]")
+        return
+
+    try:
+        with _connected_firewalla() as provider:
+            for line in plan:
+                console.print(escape(line))
+
+            def change(pv: DeviceProvider) -> None:
+                # target was percent-encoded into pause_path at the boundary; the
+                # value carries the imperative action the bridge POST applies.
+                pv.set(pause_path, "paused")
+
+            result = rails.guarded_apply(
+                provider,
+                change,
+                verify_fn=lambda: _firewalla_pause_verify(provider, target),
+                confirm=lambda plan_text: typer.confirm(f"{plan_text}\nProceed?"),
+                force=force,
+                rollback=True,
+            )
+    except SanctumError as exc:
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code)) from exc
+    if result.ok:
+        console.print(f"\n[green]✓[/] {escape(result.detail)}")
+    else:
+        console.print(f"\n[yellow]{escape(result.detail)}[/]")
         raise typer.Exit(code=1)

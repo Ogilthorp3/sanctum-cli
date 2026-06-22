@@ -1,0 +1,277 @@
+"""``sanctum net firewalla`` CLI surface — driven against an in-memory FakeProvider.
+
+Task 4 wires the Layer-1 Firewalla provider under a Typer ``firewalla`` sub-app of
+``net`` (mirroring the ``hub`` sub-app). These tests exercise that surface
+end-to-end through Typer's ``CliRunner`` while pointing the registry at a
+:class:`FakeFirewalla` (monkeypatched ``registry.resolve``) and stubbing
+credential/context resolution — so no network, no bridge HTTP, no SSH, no live
+Firewalla (10.0.0.1 / firewalla.local) is ever touched.
+
+SAFETY: the ``pause`` command is MUTATING and must default to a **dry-run** that
+fires ZERO ``set`` calls; the cutover to a paused policy is opt-in (``--apply``)
+and routes through the ``guarded_apply`` rails (snapshot → confirm → verify →
+rollback). The overnight build never mutates live gear.
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+from typer.testing import CliRunner
+
+from sanctum_cli.cli import app
+from sanctum_cli.devices.base import Capability, CapabilityOp, OpResult, Snapshot
+
+if TYPE_CHECKING:
+    import pytest
+
+runner = CliRunner()
+
+
+class FakeFirewalla:
+    """Minimal in-memory Firewalla the CLI drives in place of a real box.
+
+    Tracks ``set``/``rollback``/``connect`` calls so tests can assert the dry-run
+    path mutates nothing and the apply path routes through the rails. ``get``
+    returns canned JSON-string bodies for the read endpoints the CLI surfaces.
+    """
+
+    kind = "firewalla"
+    brand = "firewalla-gold"
+
+    def __init__(self) -> None:
+        self._bodies: dict[str, str] = {
+            "/info": '{"box":{"model":"gold","version":"1.975"}}',
+            "/policies": '{"policies":[{"pid":"7","paused":false}],"count":1}',
+            "/flows": '{"flows":[{"src":"10.0.0.5","dst":"1.1.1.1"}],"count":1}',
+        }
+        self.set_calls: list[tuple[str, str]] = []
+        self.rollback_calls = 0
+        self.connected = False
+        self.disconnected = False
+
+    @staticmethod
+    def detect(net: object) -> float:
+        return 1.0
+
+    def connect(self, creds: object | None) -> None:
+        self.connected = True
+
+    def disconnect(self) -> None:
+        self.disconnected = True
+
+    def get(self, path: str) -> str | None:
+        return self._bodies.get(path)
+
+    def set(self, path: str, value: str) -> OpResult:
+        self.set_calls.append((path, value))
+        return OpResult(ok=True, detail="set", before=None, after=value)
+
+    def capabilities(self) -> set[Capability]:
+        return {
+            Capability.READ,
+            Capability.POLICY,
+            Capability.SCREEN_TIME,
+            Capability.WAN_MODE,
+        }
+
+    def capability_op(self, capability: Capability) -> CapabilityOp | None:
+        return None
+
+    def snapshot(self, scope: str | None = None) -> Snapshot:
+        return Snapshot(
+            brand=self.brand,
+            taken_at="t",
+            data={"/policies": self._bodies["/policies"]},
+        )
+
+    def rollback(self, snap: Snapshot) -> OpResult:
+        self.rollback_calls += 1
+        return OpResult(ok=True, detail="rolled back")
+
+
+def _point_registry_at(monkeypatch: pytest.MonkeyPatch, provider: FakeFirewalla) -> None:
+    """Make ``net firewalla`` resolve to ``provider`` and never touch creds/network."""
+    monkeypatch.setattr(
+        "sanctum_cli.commands.net.registry.resolve",
+        lambda _kind, _net, brand_pin=None: provider,
+    )
+    # Build NetContext without shelling out to `route`, and creds without the bridge.
+    monkeypatch.setattr(
+        "sanctum_cli.commands.net._firewalla_netcontext",
+        lambda: __import__(
+            "sanctum_cli.devices.base", fromlist=["NetContext"]
+        ).NetContext(gateway_ip="10.0.0.1", runner=None),
+    )
+    monkeypatch.setattr(
+        "sanctum_cli.commands.net._firewalla_creds",
+        lambda net: __import__("sanctum_cli.devices.base", fromlist=["Creds"]).Creds(
+            host="firewalla.local", username="pi", secret=None, key_path=None
+        ),
+    )
+
+
+# ── status (read-only) ────────────────────────────────────────────────
+
+
+def test_net_firewalla_status_prints_brand_and_summary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`net firewalla status` is read-only and reports brand + a box summary."""
+    p = FakeFirewalla()
+    _point_registry_at(monkeypatch, p)
+    result = runner.invoke(app, ["net", "firewalla", "status"])
+    assert result.exit_code == 0, result.stdout
+    out = result.stdout.lower()
+    assert "firewalla-gold" in out  # brand
+    assert "firewalla" in out  # kind
+    assert p.connected is True
+    assert p.set_calls == []  # status never mutates
+
+
+def test_net_firewalla_status_disconnects_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every firewalla command must release the provider via disconnect()."""
+    p = FakeFirewalla()
+    _point_registry_at(monkeypatch, p)
+    result = runner.invoke(app, ["net", "firewalla", "status"])
+    assert result.exit_code == 0, result.stdout
+    assert p.disconnected is True  # the lifecycle teardown ran
+
+
+# ── policies (read) ────────────────────────────────────────────────────
+
+
+def test_net_firewalla_policies_prints_policy_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`net firewalla policies` prints the read-only policy state."""
+    p = FakeFirewalla()
+    _point_registry_at(monkeypatch, p)
+    result = runner.invoke(app, ["net", "firewalla", "policies"])
+    assert result.exit_code == 0, result.stdout
+    assert "pid" in result.stdout  # the policy payload was surfaced
+    assert p.set_calls == []  # read never mutates
+
+
+# ── flows (read) ───────────────────────────────────────────────────────
+
+
+def test_net_firewalla_flows_prints_flow_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`net firewalla flows` prints the read-only flow state."""
+    p = FakeFirewalla()
+    _point_registry_at(monkeypatch, p)
+    result = runner.invoke(app, ["net", "firewalla", "flows"])
+    assert result.exit_code == 0, result.stdout
+    assert "1.1.1.1" in result.stdout  # the flow payload was surfaced
+    assert p.set_calls == []  # read never mutates
+
+
+# ── pause (mutating → guarded_apply rails, dry-run default) ────────────
+
+
+def test_net_firewalla_pause_dryrun_mutates_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`net firewalla pause <target>` with no --apply prints the plan, mutates nothing."""
+    p = FakeFirewalla()
+    _point_registry_at(monkeypatch, p)
+    result = runner.invoke(app, ["net", "firewalla", "pause", "7"])
+    assert result.exit_code == 0, result.stdout
+    out = result.stdout
+    assert "7" in out  # the target policy is named in the plan
+    # The hard guardrail: a dry-run fires ZERO mutations.
+    assert p.set_calls == []
+    assert p.rollback_calls == 0
+
+
+def test_net_firewalla_pause_apply_force_mutates_via_rails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`net firewalla pause <target> --apply --force` flips the policy via the rails."""
+    p = FakeFirewalla()
+    _point_registry_at(monkeypatch, p)
+    result = runner.invoke(
+        app, ["net", "firewalla", "pause", "7", "--apply", "--force"]
+    )
+    assert result.exit_code == 0, result.stdout
+    # The mutating op fired through the provider's set (the pause endpoint).
+    assert len(p.set_calls) == 1
+    path, _value = p.set_calls[0]
+    assert "7" in path  # the target policy id is encoded in the bridge path
+
+
+def test_net_firewalla_pause_apply_rolls_back_on_verify_fail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed verify on the apply path must roll the policy state back."""
+    p = FakeFirewalla()
+    _point_registry_at(monkeypatch, p)
+    # Force the post-change verify to fail so the rails trip rollback.
+    monkeypatch.setattr(
+        "sanctum_cli.commands.net._firewalla_pause_verify",
+        lambda provider, target: False,
+    )
+    result = runner.invoke(
+        app, ["net", "firewalla", "pause", "7", "--apply", "--force"]
+    )
+    assert result.exit_code == 1, result.stdout
+    assert p.rollback_calls == 1  # the cutover was undone
+
+
+def test_net_firewalla_disconnects_even_when_command_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """disconnect() must fire in a finally even when the command body raises."""
+    from sanctum_cli.devices.base import DeviceError
+
+    class GetRaisesFirewalla(FakeFirewalla):
+        def get(self, path: str) -> str | None:
+            msg = "bridge died mid-read"
+            raise DeviceError(msg)
+
+    p = GetRaisesFirewalla()
+    _point_registry_at(monkeypatch, p)
+    result = runner.invoke(app, ["net", "firewalla", "status"])
+    # DeviceError → clean exit code, AND the provider was still disconnected.
+    assert result.exit_code == 4
+    assert p.disconnected is True
+
+
+def test_net_firewalla_brand_pin_threaded_from_instance_yaml(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An instance.yaml devices.firewalla.brand pin reaches registry.resolve(brand_pin=)."""
+    p = FakeFirewalla()
+    monkeypatch.setattr(
+        "sanctum_cli.commands.net._firewalla_netcontext",
+        lambda: __import__(
+            "sanctum_cli.devices.base", fromlist=["NetContext"]
+        ).NetContext(gateway_ip="10.0.0.1", runner=None),
+    )
+    monkeypatch.setattr(
+        "sanctum_cli.commands.net._firewalla_creds",
+        lambda net: __import__("sanctum_cli.devices.base", fromlist=["Creds"]).Creds(
+            host="firewalla.local", username="pi", secret=None, key_path=None
+        ),
+    )
+    monkeypatch.setattr(
+        "sanctum_cli.commands.net.config.instance_value",
+        lambda key, default=None: "firewalla" if key == "devices.firewalla.brand" else default,
+    )
+    captured: dict[str, object] = {}
+
+    def spy_resolve(kind: str, net: object, *, brand_pin: object = None) -> object:
+        captured["kind"] = kind
+        captured["brand_pin"] = brand_pin
+        return p
+
+    monkeypatch.setattr("sanctum_cli.commands.net.registry.resolve", spy_resolve)
+
+    result = runner.invoke(app, ["net", "firewalla", "status"])
+    assert result.exit_code == 0, result.stdout
+    assert captured["kind"] == "firewalla"
+    assert captured["brand_pin"] == "firewalla"
