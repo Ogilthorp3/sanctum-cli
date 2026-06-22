@@ -10,8 +10,18 @@ subtree so a Layer-2 intent (e.g. single-NAT) can be undone if verification
 fails.
 
 Every ``sagemcom_api`` client method is a coroutine; the provider owns one
-small ``_run`` helper that drives a coroutine to completion via
-:func:`asyncio.run`, so the rest of the code (and its callers) stay synchronous.
+small ``_run`` helper that drives a coroutine to completion. Crucially it does
+*not* use :func:`asyncio.run` per call: the real ``SagemcomClient`` builds a
+single long-lived ``aiohttp.ClientSession`` (with a ``TCPConnector``) in its
+``__init__`` and reuses it via ``async with self.session.post(...)`` on every
+request. aiohttp binds that session/connector to the event loop it is first
+driven in; a fresh per-call ``asyncio.run`` loop would leave the session bound
+to the (now-closed) login loop and the first op after ``connect()`` would raise
+``RuntimeError: Event loop is closed``. So the provider owns ONE persistent loop
+for its whole connected lifetime — created in :meth:`connect`, reused for every
+get/set/snapshot, and torn down in :meth:`disconnect` (after a best-effort
+``logout``/``close`` on the same loop so the aiohttp session is released cleanly).
+
 The ``sagemcom_api`` import is deliberately lazy (inside :func:`_make_client`)
 so importing this module never requires the optional transport dependency, and
 so tests can mock ``_make_client`` and never touch the network at all.
@@ -25,6 +35,7 @@ attended-only and out of scope here.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, TypeVar
 
@@ -61,17 +72,6 @@ _SNAPSHOT_XPATHS = (_BRIDGE_MODE_XPATH, _ADVANCED_DMZ_XPATH)
 # XPath that identifies the device class once authenticated, used to refine the
 # generic ``brand`` into a concrete model string after connect.
 _PRODUCT_CLASS_XPATH = "Device/DeviceInfo/ProductClass"
-
-
-def _run(coro: Coroutine[Any, Any, T]) -> T:
-    """Drive a single SAH coroutine to completion.
-
-    The transport is async; the provider is sync. This is the one place that
-    bridges the two, via :func:`asyncio.run` (which creates, runs, and tears
-    down its own event loop). Isolated here so the async boundary is a single,
-    testable seam rather than scattered ``await``s.
-    """
-    return asyncio.run(coro)
 
 
 def _make_client(creds: Creds) -> Any:
@@ -121,6 +121,23 @@ class SagemcomHubProvider:
 
     def __init__(self) -> None:
         self._client: Any = None
+        # One persistent event loop drives the whole connected lifetime so the
+        # client's loop-bound aiohttp.ClientSession stays valid across calls.
+        self._loop: asyncio.AbstractEventLoop | None = None
+
+    def _run(self, coro: Coroutine[Any, Any, T]) -> T:
+        """Drive one SAH coroutine to completion on the provider's loop.
+
+        Reuses the single loop opened in :meth:`connect` so the client's
+        loop-bound ``aiohttp.ClientSession`` is driven on the *same* loop it was
+        first used in. Using a fresh ``asyncio.run`` loop per call would close
+        the loop the session bound to and break the next op with
+        ``RuntimeError: Event loop is closed``.
+        """
+        if self._loop is None:
+            msg = "Sagemcom hub not connected; call connect() first"
+            raise DeviceError(msg, fix="call provider.connect(creds) before reading/writing")
+        return self._loop.run_until_complete(coro)
 
     @staticmethod
     def detect(net: NetContext) -> float:
@@ -154,11 +171,17 @@ class SagemcomHubProvider:
             key_path=creds.key_path,
         )
         client = _make_client(authed)
+        # Open the persistent loop BEFORE login so login and every later op run
+        # on the same loop the client's aiohttp session will bind to.
+        loop = asyncio.new_event_loop()
+        self._loop = loop
         try:
-            _run(client.login())
+            loop.run_until_complete(client.login())
         except DeviceError:
+            self._teardown_loop()
             raise
         except Exception as exc:  # normalize any transport error
+            self._teardown_loop()
             msg = f"Sagemcom login failed: {exc}"
             raise DeviceError(msg, fix="check the admin password in the Keychain") from exc
         self._client = client
@@ -179,10 +202,52 @@ class SagemcomHubProvider:
             raise DeviceError(msg, fix="call provider.connect(creds) before reading/writing")
         return self._client
 
+    def _teardown_loop(self) -> None:
+        """Close the persistent loop and drop the reference (idempotent)."""
+        loop = self._loop
+        self._loop = None
+        if loop is not None and not loop.is_closed():
+            loop.close()
+
+    def __del__(self) -> None:
+        """Safety net: reclaim the loop if a caller forgot :meth:`disconnect`.
+
+        A persistent loop left open is reported by ``BaseEventLoop.__del__`` as
+        an unraisable ``ResourceWarning``. Closing it here (no coroutine driven —
+        unsafe at interpreter shutdown) silences that and frees the loop's fd.
+        ``disconnect`` remains the correct, explicit teardown; this only covers
+        the forgotten path.
+        """
+        with contextlib.suppress(Exception):
+            self._teardown_loop()
+
+    def disconnect(self) -> None:
+        """Close the SAH session and the persistent loop (idempotent).
+
+        Best-effort logs out and closes the client's aiohttp session on the
+        *same* loop it was driven on (so the connector unwinds cleanly), then
+        tears the loop down. Safe to call when never connected, and safe to call
+        twice. Errors during teardown are swallowed — there is nothing useful a
+        caller can do, and the loop is closed regardless so no resource leaks.
+        """
+        client = self._client
+        loop = self._loop
+        self._client = None
+        if client is not None and loop is not None and not loop.is_closed():
+            for closer in ("logout", "close"):
+                method = getattr(client, closer, None)
+                if method is None:
+                    continue
+                # Teardown is best-effort: a logout/close failure must not stop
+                # us from reclaiming the loop below.
+                with contextlib.suppress(Exception):
+                    loop.run_until_complete(method())
+        self._teardown_loop()
+
     def _raw_get(self, path: str) -> str | None:
         client = self._require_client()
         try:
-            value = _run(client.get_value_by_xpath(path))
+            value = self._run(client.get_value_by_xpath(path))
         except Exception as exc:  # normalize any transport error
             msg = f"Sagemcom getValue failed for {path!r}: {exc}"
             raise DeviceError(msg) from exc
@@ -197,7 +262,7 @@ class SagemcomHubProvider:
         client = self._require_client()
         before = self._raw_get(path)
         try:
-            _run(client.set_value_by_xpath(path, value))
+            self._run(client.set_value_by_xpath(path, value))
         except Exception as exc:  # normalize any transport error
             msg = f"Sagemcom setValue failed for {path!r}: {exc}"
             raise DeviceError(msg) from exc

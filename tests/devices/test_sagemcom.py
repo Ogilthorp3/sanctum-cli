@@ -3,9 +3,20 @@
 The provider drives a Sagemcom F@st hub through the ``sagemcom_api`` SAH
 transport, whose every method is a coroutine. These tests mock the client
 factory (``_make_client``) so no socket is ever opened, but they deliberately
-do NOT mock the provider's own async-wrapping seam (``_run``/``asyncio.run``):
-the fake client exposes real ``async def`` methods so the coroutine plumbing
-the bug could live in is exercised for real.
+do NOT mock the provider's own async-wrapping seam (``_run``/the persistent
+event loop): the fake client exposes real ``async def`` methods so the
+coroutine plumbing the bug could live in is exercised for real.
+
+The real ``SagemcomClient`` builds ONE ``aiohttp.ClientSession`` in
+``__init__`` and reuses it on every request; aiohttp binds that session to the
+event loop it is first driven in, so a fresh ``asyncio.run`` loop per call would
+break the first op after ``connect()`` with ``RuntimeError: Event loop is
+closed``. A naive fake holds no loop-bound resource and so *cannot* catch that
+class of bug (CLAUDE.md: "a test cannot catch a bug it shares"). To close that
+gap, :class:`FakeSahClient` mimics the loop-binding: it records the loop
+``login`` ran on and every later coroutine asserts it is being driven on that
+SAME, still-open loop — raising ``RuntimeError`` exactly as aiohttp would if the
+provider regressed to per-call ``asyncio.run``.
 
 Keychain is mocked too (``keychain.read`` → ``"pw"``) so no Keychain prompt
 fires. Nothing here touches the live Bell hub; the live read-only smoke is a
@@ -13,6 +24,8 @@ separate, env-gated test (Task 7).
 """
 
 from __future__ import annotations
+
+import asyncio
 
 import pytest
 
@@ -30,32 +43,73 @@ class FakeSahClient:
     paths, mirroring the real client's best-effort leaf read. ``set_calls``
     records every (xpath, value) pair so boundary/encoding tests can assert on
     exactly what the transport received.
+
+    Loop-binding fidelity: the real client's ``aiohttp.ClientSession`` is bound
+    to the loop it is first driven in. We emulate that — ``login`` records the
+    running loop, and every later coroutine calls :meth:`_assert_same_loop`,
+    which raises ``RuntimeError`` if driven on a different or closed loop. That
+    makes the multi-loop bug observable through the fake instead of only against
+    live gear.
     """
 
     def __init__(self, values: dict[str, str | None]) -> None:
         self._v: dict[str, str | None] = dict(values)
         self.logged_in = False
         self.closed = False
+        self.logged_out = False
         self.set_calls: list[tuple[str, str]] = []
+        # The loop the (simulated) aiohttp session bound to at login time.
+        self._bound_loop: asyncio.AbstractEventLoop | None = None
+
+    def _assert_same_loop(self) -> None:
+        """Mirror aiohttp: a session bound to loop A is unusable under loop B."""
+        current = asyncio.get_running_loop()
+        if self._bound_loop is None:
+            self._bound_loop = current
+        elif current is not self._bound_loop or self._bound_loop.is_closed():
+            msg = "Event loop is closed"
+            raise RuntimeError(msg)
 
     async def login(self) -> None:
+        self._assert_same_loop()
         self.logged_in = True
 
-    async def logout(self) -> None:  # pragma: no cover - not exercised everywhere
+    async def logout(self) -> None:
+        self._assert_same_loop()
+        self.logged_out = True
         self.logged_in = False
 
     async def close(self) -> None:
+        self._assert_same_loop()
         self.closed = True
 
     async def get_value_by_xpath(self, xpath: str, options: dict | None = None) -> str | None:
+        self._assert_same_loop()
         return self._v.get(xpath)
 
     async def set_value_by_xpath(
         self, xpath: str, value: str, options: dict | None = None
     ) -> dict:
+        self._assert_same_loop()
         self.set_calls.append((xpath, value))
         self._v[xpath] = value
         return {"reply": {"error": {"description": "XMO_NO_ERR"}}}
+
+
+# Providers created via ``_connected`` are registered here so an autouse
+# fixture can ``disconnect`` them at test teardown — a connected provider owns
+# an open event loop, and leaking it raises an unraisable ResourceWarning when
+# it is later garbage-collected.
+_OPENED: list = []
+
+
+@pytest.fixture(autouse=True)
+def _disconnect_opened():
+    """Disconnect every provider opened during the test (closes its loop)."""
+    _OPENED.clear()
+    yield
+    while _OPENED:
+        _OPENED.pop().disconnect()
 
 
 @pytest.fixture
@@ -72,6 +126,7 @@ def _connected(monkeypatch: pytest.MonkeyPatch, fake: FakeSahClient):
 
     p = SagemcomHubProvider()
     p.connect(Creds(host="192.168.2.1", username="admin", secret=None, key_path=None))
+    _OPENED.append(p)
     return p
 
 
@@ -213,3 +268,70 @@ def test_provider_registered_under_hub() -> None:
 
     assert "hub" in registry._REGISTRY
     assert sagemcom.SagemcomHubProvider in registry._REGISTRY["hub"]
+
+
+def test_ops_after_connect_share_one_loop(
+    patched: FakeSahClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: login + every later op must run on ONE persistent loop.
+
+    The real client holds a loop-bound aiohttp session; with per-call
+    ``asyncio.run`` the loop login bound to is already closed by the first
+    get/set, so the call would raise ``RuntimeError: Event loop is closed``.
+    The fake reproduces that binding, so this exercises the real failure mode —
+    not just structural shape. Several ops in a row prove the loop persists.
+    """
+    p = _connected(monkeypatch, patched)
+    # All of these are distinct provider calls; pre-fix each spun a fresh loop.
+    assert p.get(BRIDGE_PATH) == "off"
+    assert p.set(BRIDGE_PATH, "on").after == "on"
+    assert p.get(BRIDGE_PATH) == "on"
+    snap = p.snapshot()
+    assert snap.data[BRIDGE_PATH] == "on"
+    # The fake bound to login's loop and never saw a different/closed one.
+    assert patched._bound_loop is not None
+    assert patched._bound_loop.is_closed() is False
+
+
+def test_disconnect_closes_session_and_loop(
+    patched: FakeSahClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """disconnect() logs out + closes the client and tears the loop down."""
+    p = _connected(monkeypatch, patched)
+    loop = p._loop
+    assert loop is not None and loop.is_closed() is False
+    p.disconnect()
+    assert patched.logged_out is True
+    assert patched.closed is True
+    assert p._loop is None
+    assert loop.is_closed() is True
+
+
+def test_disconnect_is_idempotent_and_safe_unconnected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """disconnect() is a no-op when never connected and safe to call twice."""
+    from sanctum_cli.devices.sagemcom import SagemcomHubProvider
+
+    p = SagemcomHubProvider()
+    p.disconnect()  # never connected: must not raise
+    assert p._loop is None
+
+
+def test_disconnect_then_reconnect_reads_again(
+    patched: FakeSahClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """After disconnect, a fresh connect opens a NEW loop and reads succeed.
+
+    The post-reconnect read would raise ``Event loop is closed`` if the fake's
+    loop binding were stale, so this proves the second lifetime is clean.
+    """
+    p = _connected(monkeypatch, patched)
+    p.disconnect()
+    # Reset the fake's binding so it can bind to the new lifetime's loop,
+    # mirroring a freshly constructed client on reconnect.
+    fresh = FakeSahClient({BRIDGE_PATH: "off"})
+    monkeypatch.setattr("sanctum_cli.devices.sagemcom._make_client", lambda creds: fresh)
+    p.connect(Creds(host="192.168.2.1", username="admin", secret=None, key_path=None))
+    assert p.get(BRIDGE_PATH) == "off"
+    assert fresh._bound_loop is not None and fresh._bound_loop.is_closed() is False
