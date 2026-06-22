@@ -14,6 +14,7 @@ from sanctum_cli.cli import app
 from sanctum_cli.commands import onboard
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
 runner = CliRunner()
@@ -27,6 +28,41 @@ def _no_live_bridge(monkeypatch: pytest.MonkeyPatch) -> None:
     paired. Gate tests override this with their own fake fetcher.
     """
     monkeypatch.setattr("sanctum_cli.commands.screen_time._fetch_bridge_json", lambda path: None)
+
+
+def test_onboard_data_block_internal_order_is_invariant(
+    full_instance_yaml: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Characterization: the 'Your Data' block keeps estimate → backup → canary order.
+
+    This pins the one load-bearing intra-block dependency that the Apple-arc
+    reorder (Task 2: tools before data — recipe gates ahead of the cloud/backup
+    block) must NOT disturb: the pre-flight estimate precedes the backup runs,
+    which precede the restore canary (the canary round-trips what the backup just
+    wrote). Where the whole block sits in the arc may move; this internal order
+    may not.
+    """
+    monkeypatch.setenv("SANCTUM_INSTANCE_FILE", str(full_instance_yaml))
+    calls: list[str] = []
+
+    def _record(name: str) -> Callable[..., None]:
+        def _fn(*_a: object, **_k: object) -> None:
+            calls.append(name)
+
+        return _fn
+
+    with (
+        patch("sanctum_cli.commands.onboard.backup_cmd.backup_estimate", _record("estimate")),
+        patch("sanctum_cli.commands.onboard.backup_cmd.backup_run", _record("backup")),
+        patch("sanctum_cli.commands.onboard._dispatch_cloud_setup", _record("cloud")),
+        patch("sanctum_cli.commands.onboard._run_canary", _record("canary")),
+        patch("sanctum_cli.commands.screen_time._fetch_bridge_json", lambda path: None),
+    ):
+        result = runner.invoke(app, ["onboard", "--recipe", "family", "--yes"])
+
+    assert result.exit_code == 0, result.stdout + (result.stderr or "")
+    # estimate first, both backup_run calls next, canary last — invariant.
+    assert calls == ["estimate", "backup", "backup", "canary"], calls
 
 
 def test_onboard_with_existing_cloud_skips_setup_and_runs_backup(

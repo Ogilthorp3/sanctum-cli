@@ -87,14 +87,16 @@ def test_gate_is_registered_data_referencing_a_real_recipe() -> None:
 def test_gate_is_wired_into_the_dispatch_loop() -> None:
     """The 'network-gear' branch is actually dispatched — registration is not enough.
 
-    A gate listed in RECIPE_GATES but with no matching branch in the dispatch loop
+    A gate listed in RECIPE_GATES but with no matching branch in the dispatcher
     would be dead data. Assert the source wires the listed name to
     ``_run_network_gear`` (the contract between the data table and the dispatcher),
-    so 'registered' genuinely means 'runs'.
+    so 'registered' genuinely means 'runs'. The Apple-arc framing (Task 2) extracted
+    the per-gate dispatch from ``onboard_command`` into the ``_run_gate`` helper, so
+    inspect THAT — the dispatcher's new home — rather than the orchestrator.
     """
     import inspect
 
-    src = inspect.getsource(onboard.onboard_command)
+    src = inspect.getsource(onboard._run_gate)
     assert 'gate == "network-gear"' in src
     assert "_run_network_gear(yes=yes)" in src
 
