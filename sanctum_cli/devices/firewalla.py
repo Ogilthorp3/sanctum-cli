@@ -120,23 +120,32 @@ def _resolve_ssh_key() -> str | None:
     return str(candidate) if candidate.exists() else None
 
 
-def _fetch_bridge_json(path: str) -> dict[str, Any] | None:
+def _fetch_bridge_json(
+    path: str, *, url: str | None = None, token: str | None = None
+) -> dict[str, Any] | None:
     """GET a bridge endpoint with the bearer token; ``None`` on any failure.
 
     Fail-soft by design (mirrors the screen_time engine): a non-200, non-JSON,
     non-dict body, missing token, or transport error all return ``None`` so a
     caller treats an unreachable bridge as "no data", never a crash. This is the
     seam tests monkeypatch so no socket is opened.
+
+    ``url`` / ``token`` default to this provider's own env/on-disk resolution
+    (``_bridge_url`` / ``_read_bridge_token``). They may be passed explicitly so
+    a consumer that resolves the same transport from its *own* config (e.g. the
+    screen-time engine, which routes its bridge reads through this seam) drives
+    the read without re-resolving here — keeping a single HTTP implementation.
     """
     import httpx
 
-    token = _read_bridge_token()
-    if not token:
+    bearer = token if token is not None else _read_bridge_token()
+    if not bearer:
         return None
+    base = url if url is not None else _bridge_url()
     try:
         resp = httpx.get(
-            f"{_bridge_url()}{path}",
-            headers={"Authorization": f"Bearer {token}"},
+            f"{base}{path}",
+            headers={"Authorization": f"Bearer {bearer}"},
             timeout=_HTTP_TIMEOUT_S,
         )
         if resp.status_code != 200:
