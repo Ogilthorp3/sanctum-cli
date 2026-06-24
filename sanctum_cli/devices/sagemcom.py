@@ -91,6 +91,49 @@ _SAFE_BASELINE = "off"
 # generic ``brand`` into a concrete model string after connect.
 _PRODUCT_CLASS_XPATH = "Device/DeviceInfo/ProductClass"
 
+# SAH reply ``error.description`` tokens that mean "succeeded". The ``sagemcom_api``
+# transport's own ``__post`` treats only ``XMO_REQUEST_NO_ERR``/``"Ok"`` as
+# top-level success; real successful setValue replies (and the test fakes that
+# mirror an observed hub reply) carry ``XMO_NO_ERR``. We accept all three and
+# fail-closed on everything else, because the transport RETURNS (does not raise)
+# on an error description it does not model — so "the call did not raise" is NOT
+# proof the write landed.
+_SAH_OK = frozenset({"XMO_REQUEST_NO_ERR", "XMO_NO_ERR", "Ok"})
+
+
+def _reply_error(reply: Any) -> str | None:
+    """Return the first SAH error description in a setValue reply, else ``None``.
+
+    Fail-closed: a reply is clean only when the top-level ``error.description`` is
+    a known success token AND every action's ``error.description`` is too. A
+    missing/garbled envelope, an unmodeled top-level error, or a failed action
+    each yield a non-None description so the caller treats the write as failed —
+    closing the transport's two swallow surfaces: it RETURNS (does not raise) on
+    an unmodeled top-level error, and it never inspects per-action errors unless
+    the top level is ``XMO_REQUEST_ACTION_ERR``.
+    """
+    if not isinstance(reply, dict):
+        return f"unrecognized reply (not a dict: {type(reply).__name__})"
+    inner = reply.get("reply")
+    if not isinstance(inner, dict):
+        return "reply missing 'reply' envelope"
+    top = inner.get("error")
+    top_desc = top.get("description") if isinstance(top, dict) else None
+    if top_desc is None:
+        return "reply missing top-level error.description"
+    if top_desc not in _SAH_OK:
+        return str(top_desc)
+    actions = inner.get("actions")
+    if isinstance(actions, list):
+        for action in actions:
+            if not isinstance(action, dict):
+                continue
+            err = action.get("error")
+            desc = err.get("description") if isinstance(err, dict) else None
+            if desc is not None and desc not in _SAH_OK:
+                return str(desc)
+    return None
+
 
 def _make_client(creds: Creds) -> Any:
     """Build a logged-out ``SagemcomClient`` for ``creds``.
@@ -300,14 +343,26 @@ class SagemcomHubProvider:
         return self._raw_get(path)
 
     def set(self, path: str, value: str) -> OpResult:
-        """Write one leaf value by XPath, returning before/after for the audit log."""
+        """Write one leaf value by XPath, returning before/after for the audit log.
+
+        Fail-closed on a rejected write: the transport RETURNS (does not raise)
+        on an error description it does not model, so we inspect the reply body
+        ourselves. A swallowed failure would otherwise report a green cutover and
+        the rails' auto-rollback would never fire (Contracts at the Boundary).
+        """
         client = self._require_client()
         before = self._raw_get(path)
         try:
-            self._run(client.set_value_by_xpath(path, value))
+            reply = self._run(client.set_value_by_xpath(path, value))
         except Exception as exc:  # normalize any transport error
             msg = f"Sagemcom setValue failed for {path!r}: {exc}"
             raise DeviceError(msg) from exc
+        err = _reply_error(reply)
+        if err is not None:
+            msg = f"Sagemcom setValue for {path!r} was rejected by the hub: {err}"
+            raise DeviceError(
+                msg, fix="the hub did not accept the write; check the leaf/value and retry"
+            )
         return OpResult(ok=True, detail=f"set {path}", before=before, after=value)
 
     def capabilities(self) -> AbstractSet[Capability]:
@@ -360,10 +415,11 @@ class SagemcomHubProvider:
         """Restore every captured leaf by re-issuing its setValue.
 
         Reports ``ok=False`` when the snapshot carries no restorable baseline
-        (``snap.data`` empty) — an empty rollback is NOT a success: it would
-        leave a half-applied device (e.g. the hub stuck in bridge mode) while
-        falsely reporting it was restored. The rails treat an ``ok=False``
-        rollback as a failed restore and surface a manual-recovery instruction.
+        (``snap.data`` empty) OR when the hub REJECTS any restore write — an
+        empty *or partial* rollback is NOT a success: it would leave a
+        half-applied device (e.g. the hub stuck in bridge mode) while falsely
+        reporting it was restored. The rails treat an ``ok=False`` rollback as a
+        failed restore and surface a manual-recovery instruction.
         """
         if not snap.data:
             return OpResult(
@@ -371,9 +427,23 @@ class SagemcomHubProvider:
                 detail="rollback failed: snapshot carried no restorable baseline (0 keys)",
             )
         restored = 0
+        failures: list[str] = []
         for xpath, value in snap.data.items():
-            self.set(xpath, value)
+            try:
+                self.set(xpath, value)
+            except DeviceError as exc:
+                failures.append(f"{xpath}: {exc}")
+                continue
             restored += 1
+        if failures:
+            total = restored + len(failures)
+            return OpResult(
+                ok=False,
+                detail=(
+                    f"rollback INCOMPLETE: restored {restored}/{total} leaf(s); "
+                    f"failed: {'; '.join(failures)}"
+                ),
+            )
         return OpResult(ok=True, detail=f"rolled back {restored} key(s)")
 
 
