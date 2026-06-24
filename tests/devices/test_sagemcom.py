@@ -438,3 +438,113 @@ def test_disconnect_then_reconnect_reads_again(
     p.connect(Creds(host="192.168.2.1", username="admin", secret=None, key_path=None))
     assert p.get(BRIDGE_PATH) == "off"
     assert fresh._bound_loop is not None and fresh._bound_loop.is_closed() is False
+
+
+# ── reply-contract: set() must not trust "no exception" as success ──────────
+#
+# The real ``sagemcom_api`` __post RAISES only for the error descriptions it
+# models (auth, non-writable, unknown-path, …) and RETURNS for any *unmodeled*
+# top-level error description — and it never inspects per-action errors unless
+# the top-level is REQUEST_ACTION_ERR. So "the SDK call did not raise" is NOT
+# proof the write landed: a hub that 200s with an error body would be reported
+# as a green cutover and the auto-rollback would never fire. These tests pin the
+# fail-closed contract, with the hostile replies built from the library's REAL
+# reply schema ({"reply": {"error": {"description": ...}, "actions": [...]}}) —
+# not from the production code's assumption (Contracts at the Boundary).
+
+
+class _ReplyClient(FakeSahClient):
+    """A fake whose ``set_value_by_xpath`` returns a CONFIGURABLE SAH reply.
+
+    Mirrors the library's behaviour of RETURNING (not raising) a reply the
+    provider must inspect. Deliberately does NOT update the value map: a
+    rejected/swallowed write leaves the leaf unchanged, exactly like real gear.
+    """
+
+    def __init__(self, values: dict[str, str | None], reply: dict) -> None:
+        super().__init__(values)
+        self._reply = reply
+
+    async def set_value_by_xpath(
+        self, xpath: str, value: str, options: dict | None = None
+    ) -> dict:
+        self._assert_same_loop()
+        self.set_calls.append((xpath, value))
+        return self._reply
+
+
+def _connected_with(monkeypatch: pytest.MonkeyPatch, fake: FakeSahClient):
+    from sanctum_cli.devices.sagemcom import SagemcomHubProvider
+
+    monkeypatch.setattr("sanctum_cli.devices.sagemcom._make_client", lambda creds: fake)
+    monkeypatch.setattr("sanctum_cli.keychain.read", lambda account, service: "pw")
+    p = SagemcomHubProvider()
+    p.connect(Creds(host="192.168.2.1", username="admin", secret=None, key_path=None))
+    _OPENED.append(p)
+    return p
+
+
+def test_set_raises_on_unmodeled_top_level_error_reply(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A top-level error the library RETURNS (does not raise) must fail-closed."""
+    fake = _ReplyClient(
+        {BRIDGE_PATH: "off"},
+        {"reply": {"error": {"description": "XMO_UNKNOWN_PATH_ERR"}}},
+    )
+    p = _connected_with(monkeypatch, fake)
+    with pytest.raises(DeviceError):
+        p.set(BRIDGE_PATH, "on")
+
+
+def test_set_raises_on_per_action_error_reply(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Top-level NO_ERR but a failed ACTION — the library never checks this, so
+    the provider must, or a rejected write reports a green cutover."""
+    fake = _ReplyClient(
+        {BRIDGE_PATH: "off"},
+        {
+            "reply": {
+                "error": {"description": "XMO_NO_ERR"},
+                "actions": [{"error": {"description": "XMO_NON_WRITABLE_PARAMETER_ERR"}}],
+            }
+        },
+    )
+    p = _connected_with(monkeypatch, fake)
+    with pytest.raises(DeviceError):
+        p.set(BRIDGE_PATH, "on")
+
+
+def test_set_succeeds_on_clean_reply_either_success_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both XMO_REQUEST_NO_ERR (library token) and XMO_NO_ERR (per-action/observed)
+    count as success, so a genuinely-good write is never falsely rolled back."""
+    fake = _ReplyClient(
+        {BRIDGE_PATH: "off"},
+        {
+            "reply": {
+                "error": {"description": "XMO_REQUEST_NO_ERR"},
+                "actions": [{"error": {"description": "XMO_NO_ERR"}}],
+            }
+        },
+    )
+    p = _connected_with(monkeypatch, fake)
+    res = p.set(BRIDGE_PATH, "on")
+    assert res.ok is True
+    assert res.after == "on"
+
+
+def test_rollback_reports_failure_when_a_restore_write_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the hub REJECTS a restore setValue, rollback must report ok=False — not
+    'rolled back N keys' over a write that never landed (the 2 a.m. worst case)."""
+    from sanctum_cli.devices.base import Snapshot
+
+    fake = _ReplyClient(
+        {BRIDGE_PATH: "off"},
+        {"reply": {"error": {"description": "XMO_NON_WRITABLE_PARAMETER_ERR"}}},
+    )
+    p = _connected_with(monkeypatch, fake)
+    snap = Snapshot(brand="sagemcom", taken_at="t", data={BRIDGE_PATH: "off"})
+    res = p.rollback(snap)
+    assert res.ok is False
+    assert "XMO_NON_WRITABLE_PARAMETER_ERR" in res.detail
