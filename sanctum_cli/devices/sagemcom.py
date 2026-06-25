@@ -162,6 +162,42 @@ def _make_client(creds: Creds) -> Any:
     )
 
 
+# The SAH action that reboots a Sagemcom F@st gateway — the exact dict the
+# installed ``sagemcom_api`` client's own ``reboot()`` builds. Issued through the
+# client's raw request path (see :func:`_reboot_raw`) so the provider receives the
+# full reply envelope and can fail-closed via :func:`_reply_error`.
+_REBOOT_ACTION = {
+    "id": 0,
+    "method": "reboot",
+    "xpath": "Device",
+    "parameters": {"source": "GUI"},
+}
+
+
+async def _reboot_raw(client: Any) -> Any:
+    """Issue the SAH reboot action and return the RAW reply envelope.
+
+    The convenience ``client.reboot()`` returns ``__get_response_value(response)``
+    (the extracted leaf value), discarding the ``{"reply": {"error": ...}}``
+    envelope the fail-closed check needs — and for the reboot action it yields the
+    same ``''`` for a clean and a rejected reply, so success cannot be told from
+    failure. The client's raw request method DOES return the full envelope, so we
+    issue the action through it instead. Its name is mangled
+    (``_SagemcomClient__api_request_async``); we reach it via ``getattr`` and fall
+    back to the public ``reboot()`` coroutine only if a future library version
+    drops/renames the raw method, so the provider still functions (with the
+    library's own error handling) rather than breaking outright.
+    """
+    raw = getattr(client, "_SagemcomClient__api_request_async", None)
+    if raw is not None:
+        return await raw([dict(_REBOOT_ACTION)], False)
+    # Defensive fallback: a client without the raw seam (e.g. a future rename).
+    # The library's own ``reboot()`` raises on the errors it models; the swallowed
+    # unmodeled-top-level surface is then out of our reach but no worse than the
+    # library's baseline.
+    return await client.reboot()
+
+
 def _probe_is_sagemcom(gateway_ip: str) -> bool:  # noqa: ARG001 - probe is mocked in tests
     """Read-only fingerprint: does the gateway look like a Sagemcom hub?
 
@@ -364,6 +400,46 @@ class SagemcomHubProvider:
                 msg, fix="the hub did not accept the write; check the leaf/value and retry"
             )
         return OpResult(ok=True, detail=f"set {path}", before=before, after=value)
+
+    def reboot(self) -> OpResult:
+        """Reboot the hub via the SAH ``reboot`` action, fail-closed on rejection.
+
+        The installed ``sagemcom_api`` client models the reboot as the SAH action
+        ``{"method": "reboot", "xpath": "Device", "parameters": {"source":
+        "GUI"}}``. We drive it on the provider's persistent loop — the same loop
+        login bound to, so the client's loop-bound ``aiohttp`` session stays valid —
+        and then inspect the *raw reply envelope* ourselves.
+
+        We deliberately do NOT call the convenience ``client.reboot()``: that
+        wrapper returns ``__get_response_value(response)`` — the extracted leaf
+        value, NOT the ``{"reply": {"error": ...}}`` envelope — so it strips away
+        exactly the ``error.description`` the fail-closed check needs (and for the
+        reboot action, with no result ``callbacks``, it returns ``''`` for both a
+        clean AND a rejected reply, making success indistinguishable from failure).
+        Instead we issue the same action through the client's raw request path,
+        which returns the full envelope, and pass it through :func:`_reply_error`.
+
+        Fail-closed, exactly as :meth:`set` is: the transport RETURNS (does not
+        raise) on an error description it does not model, so "the call did not
+        raise" is NOT proof the hub accepted the reboot. Any non-success
+        ``error.description`` raises :class:`DeviceError`, so a rejected reboot
+        never reports a green outcome.
+        """
+        client = self._require_client()
+        try:
+            reply = self._run(_reboot_raw(client))
+        except Exception as exc:  # normalize any transport error
+            msg = f"Sagemcom reboot failed: {exc}"
+            raise DeviceError(
+                msg, fix="check the hub is reachable and the session is valid"
+            ) from exc
+        err = _reply_error(reply)
+        if err is not None:
+            msg = f"Sagemcom reboot was rejected by the hub: {err}"
+            raise DeviceError(
+                msg, fix="the hub did not accept the reboot; check admin rights and retry"
+            )
+        return OpResult(ok=True, detail="reboot issued")
 
     def capabilities(self) -> AbstractSet[Capability]:
         """Operations this hub actually supports."""
