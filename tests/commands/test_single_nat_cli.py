@@ -453,3 +453,54 @@ def test_hub_single_nat_emits_deprecation_note(
     # The deprecation note steers the operator to the new Advanced-DMZ command.
     assert "deprecat" in out
     assert "single-nat" in out
+
+
+def test_hub_single_nat_passes_real_runner_cleanly_without_firing_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The deprecation shim passes a REAL/no-op runner cleanly (FIX-6 e).
+
+    The shim builds the REAL Firewalla-bound runner (``_build_runner`` →
+    ``system.make_real_runner``) and hands it to ``single_nat_dmz`` for a DRY-RUN
+    plan. The whole point of the shim is to STEER, never to mutate — so on this
+    apply=False path the runner must NEVER be invoked: the dry-run resolves the DMZ
+    op and returns the plan without firing a single runner tag. This matters because
+    the real ``make_real_runner`` HARD-FAILS (raises) on any mutating/unknown tag
+    when no fw gateway+key is resolved — so if the shim ever fired the runner on the
+    dry-run, this would surface as a crash rather than the clean redirect.
+
+    We wire the genuine ``make_real_runner`` (no gateway/key — the fail-closed
+    apply-path runner) and wrap it to record every tag it sees. The contract: the
+    shim exits 0 with the deprecation note, the real runner is handed in but NEVER
+    called, and ZERO device writes happen (the dry-run guardrail).
+    """
+    from sanctum_cli.net import system
+
+    fired: list[tuple[str, ...]] = []
+    # The genuine fail-closed apply-path runner: raises on a mutating/unknown tag.
+    real_runner = system.make_real_runner(fw_gateway=None, fw_key=None)
+
+    def recording_real_runner(tag: tuple[str, ...]) -> str:
+        fired.append(tag)
+        return real_runner(tag)  # would RAISE on a mutating/unknown tag
+
+    hub, armor = FakeHub(), FakeArmor()
+    _wire(monkeypatch, hub=hub, fw=FakeRunner(), armor=armor)
+    # Override _build_runner with the REAL (recording) runner — NOT a FakeRunner —
+    # so the shim is proven to hand the genuine fail-closed runner through cleanly.
+    monkeypatch.setattr(
+        "sanctum_cli.commands.net._build_runner", lambda: recording_real_runner
+    )
+
+    result = runner.invoke(app, ["net", "hub", "single-nat"])
+    assert result.exit_code == 0, result.stdout
+    out = result.stdout.lower()
+    assert "deprecat" in out
+    assert "single-nat" in out
+    # The real runner was handed in but the dry-run shim NEVER fired it …
+    assert fired == [], f"deprecation shim fired the runner on a dry-run: {fired}"
+    # … and made ZERO device writes (steer, never mutate).
+    assert hub.set_calls == []
+    assert hub.reboot_calls == 0
+    assert hub.rollback_calls == 0
+    assert armor.installed == 0
