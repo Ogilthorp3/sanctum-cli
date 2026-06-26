@@ -292,6 +292,50 @@ def test_reboot_fails_closed_on_rejected_reply_through_real_transport(
         p.disconnect()
 
 
+# ─── version-guard the reboot fail-closed seam (Task b) ──────────────────────
+
+
+def test_installed_client_exposes_raw_api_request_seam() -> None:
+    """The installed ``sagemcom_api`` MUST expose the name-mangled raw seam.
+
+    ``SagemcomHubProvider.reboot`` is fail-closed ONLY because it issues the reboot
+    through the client's raw ``_SagemcomClient__api_request_async`` — which returns
+    the full ``{"reply": {"error": ...}}`` envelope the fail-closed check reads. If a
+    future ``sagemcom_api`` release drops/renames that mangled method, the
+    production code (:func:`sanctum_cli.devices.sagemcom._reboot_raw`) silently falls
+    back to the convenience ``reboot()`` wrapper — which extracts a leaf value
+    (``None`` for the reboot action, with no callbacks) and CANNOT tell a clean
+    reboot from a rejected one, defeating fail-closed.
+
+    This is the version guard: it FAILS LOUDLY the moment an upgrade removes the
+    seam, so the fallback degradation is caught at test time (a known-good build)
+    rather than surfacing as a reboot that reports green on a rejected cutover. It
+    also asserts the public ``reboot`` coroutine still exists (the documented
+    fallback path) and that the raw seam is a coroutine function with the
+    ``(actions, priority)`` arity the production code calls it with.
+    """
+    import inspect
+
+    from sagemcom_api.client import SagemcomClient
+
+    raw = getattr(SagemcomClient, "_SagemcomClient__api_request_async", None)
+    assert raw is not None, (
+        "installed sagemcom_api dropped/renamed _SagemcomClient__api_request_async — "
+        "the reboot fail-closed path falls back to the lossy reboot() wrapper; "
+        "update sanctum_cli.devices.sagemcom._reboot_raw to the new seam."
+    )
+    assert inspect.iscoroutinefunction(raw), "the raw seam must be a coroutine"
+    # The production code calls it as ``raw([action], False)`` — assert that arity
+    # (self + actions + priority) is still available so the call site stays valid.
+    params = list(inspect.signature(raw).parameters)
+    assert params[:2] == ["self", "actions"], (
+        f"raw seam signature changed: {params!r} — _reboot_raw calls it as "
+        "raw([action], priority)"
+    )
+    # The documented defensive fallback still exists too.
+    assert hasattr(SagemcomClient, "reboot")
+
+
 # ─── Live read-only smoke (Step 2) — opt-in, default-skipped ─────────────
 
 LIVE_HUB = os.environ.get("SANCTUM_LIVE_HUB") == "1"
