@@ -551,6 +551,25 @@ _ARMOR_MINI_HOST = "bert@10.0.0.10"
 _OUT_OF_BAND_HOST = "10.0.0.10"
 _OUT_OF_BAND_PORT = 22
 
+# The SSH port the recovery re-lease reaches the Firewalla over (the same port
+# ``net.system._fw_ssh_argv`` uses for the ``dhcp_release`` op). The Firewalla host
+# itself is NOT a constant — it is resolved at gate time as the default gateway
+# (see :func:`_firewalla_recovery_host`), the same box ``_build_runner`` targets.
+_FIREWALLA_SSH_PORT = 22
+
+
+def _firewalla_recovery_host() -> str | None:
+    """Resolve the Firewalla the recovery re-lease will SSH to: the default gateway.
+
+    The unwind on a failed cutover (and an explicit ``--rollback``) fires the
+    ``dhcp_release`` runner tag, which SSHes to the Firewalla — and ``_build_runner``
+    resolves that box as the parsed default gateway. The gate must probe the SAME
+    host so "the recovery re-lease can reach its box" is what it actually verifies.
+    Returns ``None`` when no gateway parses (no recovery host → no recovery path).
+    """
+    gw = detect.parse_default_gateway(system.real_runner(("route",)))
+    return gw or None
+
 
 def _build_armor_installer() -> ArmorInstaller:
     """Build the real single-NAT armor installer from the README coordinates.
@@ -567,21 +586,44 @@ def _build_armor_installer() -> ArmorInstaller:
     )
 
 
-def _out_of_band_reachable() -> bool:
-    """Is the out-of-band recovery path (the Mini jump host) reachable right now?
-
-    The flip's start precondition (:func:`flip.gate_ok`): the cutover briefly drops
-    the WAN, so a recovery path that does NOT ride that same link must exist before
-    we touch anything. We probe a TCP connection to the Mini's SSH port (the armor
-    kit's jump host) — the same read-only presence-probe shape :func:`_firewalla_present`
-    uses. A failure to connect means no out-of-band path, and the gate refuses.
-    ``--force`` waives the human confirm prompt but NEVER this probe.
-    """
+def _tcp_reachable(host: str, port: int) -> bool:
+    """A read-only TCP presence probe (mirrors :func:`_firewalla_present`)."""
     try:
-        socket.create_connection((_OUT_OF_BAND_HOST, _OUT_OF_BAND_PORT), timeout=2).close()
+        socket.create_connection((host, port), timeout=2).close()
         return True
     except OSError:
         return False
+
+
+def _out_of_band_reachable() -> bool:
+    """Is the cutover's recovery path reachable right now? Two-sided, fail-closed.
+
+    The flip's start precondition (:func:`flip.gate_ok`): the cutover briefly drops
+    the WAN, so the recovery path must exist before we touch anything. Recovery is
+    TWO hosts, and BOTH must be reachable:
+
+    * the **Mini jump host** (``_OUT_OF_BAND_HOST``) — the out-of-band link the
+      operator reaches the box over if the cutover strands the hub; and
+    * the **Firewalla** (:func:`_firewalla_recovery_host`, the default gateway) —
+      the host that actually PERFORMS the recovery re-lease: the rollback fires the
+      ``dhcp_release`` op, which SSHes to the Firewalla to release + re-acquire the
+      WAN lease. A gate that probed only the Mini would green-light a cutover whose
+      rollback can never re-lease the WAN (the household stranded dark on an
+      un-runnable recovery) — the exact fail-to-DARK this gate exists to prevent.
+
+    Both are probed on the SSH port the recovery transport uses. A failure to
+    connect to EITHER — or a Firewalla recovery host that does not even resolve —
+    means no usable recovery path, and the gate refuses (fail-closed). ``--force``
+    waives the human confirm prompt but NEVER this probe.
+    """
+    if not _tcp_reachable(_OUT_OF_BAND_HOST, _OUT_OF_BAND_PORT):
+        return False
+    fw_host = _firewalla_recovery_host()
+    if fw_host is None:
+        # No recovery host resolved → no host the re-lease can reach → no recovery
+        # path. Fail-closed rather than guess the Firewalla is reachable.
+        return False
+    return _tcp_reachable(fw_host, _FIREWALLA_SSH_PORT)
 
 
 def _print_dmz_stage_plan(plan: list[str]) -> None:
