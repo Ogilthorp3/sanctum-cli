@@ -34,6 +34,7 @@ the orchestrator only reaches on an ``apply=True`` (never the dry-run) path.
 
 from __future__ import annotations
 
+import json
 import subprocess
 from collections.abc import Callable
 
@@ -43,6 +44,25 @@ from sanctum_cli.devices.base import OpResult
 # Mirrors the net layer's subprocess seam (see sanctum_cli.net.system._run) — the
 # thin boundary tests inject a recording double over.
 DeployRunner = Callable[[list[str]], int]
+
+# A confirm-command runner: maps the README step-3 verify argv to its STDOUT (the
+# verify.sh JSON line). DISTINCT from DeployRunner because the deploy steps only
+# care about an exit code, but the confirm gate must PARSE the script's
+# ``{"state":"HEALTHY",...}`` output — an exit-code-only runner cannot tell a
+# HEALTHY armor from a DEGRADED one. A transport that cannot spawn raises (so the
+# fail-closed path treats "no confirm output" as "not proven healthy").
+ConfirmRunner = Callable[[list[str]], str]
+
+# The kit README's step-3 confirm: run ``singlenat-verify.sh`` on the Mini and read
+# its one-line ``{"state":"HEALTHY",...}`` verdict. The path mirrors the README's
+# "Layout on the Mini" (the verify script lands in ~/.sanctum/bin alongside the
+# other bin scripts the installer scp'd there).
+_MINI_VERIFY_SCRIPT = "~/.sanctum/bin/singlenat-verify.sh"
+
+# The ONLY ``state`` token in the verify.sh JSON that means the armor came up
+# healthy (the script exits 0 for this, 1 for degraded/dark). Authored from the
+# script's own ``rollup_state`` HEALTHY verdict, not assumed.
+_HEALTHY_STATE = "HEALTHY"
 
 # How long any single deploy step (scp/ssh/launchctl) may take before we treat it
 # as a failed step. A 2 a.m. attended cutover must not hang forever on a dead
@@ -88,6 +108,34 @@ def _subprocess_runner(argv: list[str]) -> int:
     return proc.returncode
 
 
+def _subprocess_confirm_runner(argv: list[str]) -> str:
+    """Run the README confirm step, returning its STDOUT; RAISE on transport failure.
+
+    Unlike :func:`_subprocess_runner` (exit-code only), the confirm needs the
+    verify.sh JSON line, so this returns stdout. It deliberately RAISES (rather than
+    swallowing into "") when the subprocess cannot spawn / times out / exits
+    non-zero: a confirm that did not produce a verdict is the ABSENCE of proof the
+    armor is healthy, and :meth:`SinglenatArmorInstaller.install` turns a raised
+    confirm into a fail-closed ``ok=False`` (never a blind green). The verify.sh
+    exit code (0 HEALTHY / 1 degraded) is a non-zero on any non-healthy verdict —
+    but we DON'T trust the exit code alone here: install parses the JSON ``state``,
+    so a non-zero exit (degraded) is surfaced through the parsed state, while a
+    spawn/timeout failure raises.
+    """
+    try:
+        proc = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=_STEP_TIMEOUT,
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError, ValueError) as exc:
+        msg = f"confirm step could not run: {exc}"
+        raise OSError(msg) from exc
+    return proc.stdout
+
+
 class SinglenatArmorInstaller:
     """Installs the ``sanctum-singlenat-armor`` kit per its README — fail-closed.
 
@@ -106,20 +154,25 @@ class SinglenatArmorInstaller:
         mini_host: str,
         firewalla_user: str = "pi",
         runner: DeployRunner | None = None,
+        confirm_runner: ConfirmRunner | None = None,
     ) -> None:
-        """Capture the deploy coordinates; default to a real subprocess runner.
+        """Capture the deploy coordinates; default to real subprocess runners.
 
         ``kit_dir`` is the local ``sanctum-singlenat-armor`` checkout (source of
         the scp'd files); ``firewalla_host``/``firewalla_user`` and ``mini_host``
         (an ``ssh``-shaped ``user@host``) are the deploy targets. ``runner``
         defaults to :func:`_subprocess_runner` so a constructed-without-injection
-        installer really shells out; tests inject a recording double.
+        installer really shells out; ``confirm_runner`` defaults to
+        :func:`_subprocess_confirm_runner` so the README step-3 verify really runs
+        (it returns the verify.sh STDOUT so ``install`` can parse the JSON state).
+        Tests inject recording doubles for both.
         """
         self._kit_dir = kit_dir.rstrip("/")
         self._fw_host = firewalla_host
         self._fw_user = firewalla_user
         self._mini = mini_host
         self._runner: DeployRunner = runner or _subprocess_runner
+        self._confirm_runner: ConfirmRunner = confirm_runner or _subprocess_confirm_runner
 
     def _steps(self) -> list[tuple[str, list[str]]]:
         """The ordered (name, argv) deploy steps, authored from the kit README.
@@ -181,15 +234,74 @@ class SinglenatArmorInstaller:
             ),
         ]
 
+    def _confirm_argv(self) -> list[str]:
+        """The README step-3 confirm: ``ssh <mini> '<verify-script>'``.
+
+        Runs the kit's ``singlenat-verify.sh`` on the Mini and (via the confirm
+        runner) yields its ``{"state":"HEALTHY",...}`` JSON line for parsing.
+        """
+        return ["ssh", self._mini, _MINI_VERIFY_SCRIPT]
+
+    def _confirm_healthy(self) -> OpResult | None:
+        """Run the README confirm gate; return an ``ok=False`` OpResult, or None if HEALTHY.
+
+        Fires the verify SSH, parses the verify.sh JSON ``state``, and returns:
+
+        * ``None`` when ``state == "HEALTHY"`` — the armor genuinely came up; the
+          caller proceeds to report ok=True;
+        * an ``ok=False`` OpResult otherwise — a confirm transport that could not
+          run (raised), output that is not the expected JSON (the absence of a
+          verdict), or a non-HEALTHY ``state`` (the armor came up degraded/dark).
+
+        This is the honest-verify gate (Contracts at the Boundary): a green install
+        derives from the consumer's REAL HEALTHY verdict, never from "the deploy
+        commands all exited zero" — a scp can succeed while the watchdog never
+        comes up healthy.
+        """
+        argv = self._confirm_argv()
+        try:
+            out = self._confirm_runner(argv)
+        except Exception as exc:  # a confirm that cannot run is the ABSENCE of proof
+            return OpResult(
+                ok=False,
+                detail=f"armor install confirm step could not run: {exc}",
+            )
+        try:
+            verdict = json.loads(out)
+            state = verdict["state"] if isinstance(verdict, dict) else None
+        except (ValueError, TypeError, KeyError):
+            state = None
+        if state is None:
+            return OpResult(
+                ok=False,
+                detail=(
+                    "armor install confirm step returned no parseable verify verdict "
+                    f"(expected a JSON line with a 'state'; got: {out.strip()[:120]!r})"
+                ),
+            )
+        if state != _HEALTHY_STATE:
+            return OpResult(
+                ok=False,
+                detail=(
+                    f"armor install confirm reported state {state!r}, not {_HEALTHY_STATE!r} — "
+                    "the cutover did not land a healthy single NAT"
+                ),
+            )
+        return None
+
     def install(self) -> OpResult:
-        """Deploy the armor kit, fail-closed + fail-fast.
+        """Deploy the armor kit, fail-closed + fail-fast, then CONFIRM it is HEALTHY.
 
         Walks :meth:`_steps` in order through the runner. The FIRST step with a
         non-zero exit code short-circuits the rest and returns
         ``OpResult(ok=False, ...)`` naming that step (the half-deployed armor must
-        not fan out further calls). Only an all-steps-zero run returns
-        ``OpResult(ok=True, ...)`` — so a swallowed/partial install can never
-        report the green cutover the rails would commit on.
+        not fan out further calls — and the confirm gate below must NOT run on top
+        of a half-deployed armor). Only when EVERY deploy step exited zero does the
+        install run the README's step-3 confirm: ``ssh <mini> singlenat-verify.sh``
+        → parse the JSON ``state``. A non-HEALTHY verdict, an unparseable output, or
+        a confirm transport that could not run each yields ``ok=False`` — so a green
+        install is only ever reported when the armor genuinely came up HEALTHY, not
+        merely because the scp/launchctl commands exited zero (honest-verify).
         """
         steps = self._steps()
         for name, argv in steps:
@@ -210,7 +322,12 @@ class SinglenatArmorInstaller:
                     ok=False,
                     detail=f"armor install failed at step {name!r} (exit {code})",
                 )
+        # Every deploy step landed. Now the README step-3 confirm is the gate: only
+        # a HEALTHY verify verdict lets the install report ok=True (never blind).
+        confirm_failure = self._confirm_healthy()
+        if confirm_failure is not None:
+            return confirm_failure
         return OpResult(
             ok=True,
-            detail=f"armor kit installed ({len(steps)} deploy steps)",
+            detail=f"armor kit installed + confirmed HEALTHY ({len(steps)} deploy steps)",
         )

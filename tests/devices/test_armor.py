@@ -24,6 +24,22 @@ from __future__ import annotations
 from sanctum_cli.devices.base import OpResult
 from sanctum_cli.devices.intents import ArmorInstaller
 
+# The exact JSON line the kit's ``bin/singlenat-verify.sh`` emits on stdout (one
+# line + exit 0 for HEALTHY, exit 1 for degraded/dark). These expectations are
+# authored from the REAL script's ``printf`` envelope — the consumer the confirm
+# gate parses — NOT from the production module's own assumption. A HEALTHY verdict
+# carries ``"state":"HEALTHY"``; a degraded one carries a different state token.
+HEALTHY_JSON = (
+    '{"state":"HEALTHY","egress":"ok","poison":"no","singlenat":"yes","mtu":"ok",'
+    '"wan_if":"pppoe0","fw_wan_ip":"70.53.241.21","pub_ip":"70.53.241.21",'
+    '"wan_class":"public","wan_mtu":"1492","fw":"ok"}'
+)
+DEGRADED_JSON = (
+    '{"state":"DEGRADED","egress":"ok","poison":"yes","singlenat":"no","mtu":"bad",'
+    '"wan_if":"pppoe0","fw_wan_ip":"192.168.2.10","pub_ip":"","wan_class":"double_nat",'
+    '"wan_mtu":"1500","fw":"ok"}'
+)
+
 
 class RecordingRunner:
     """Records every deploy command argv; returns scripted exit codes.
@@ -57,7 +73,32 @@ class RecordingRunner:
         return 0
 
 
-def _installer(runner: RecordingRunner):
+class RecordingConfirmRunner:
+    """Records the confirm-step argv; returns the kit verify.sh's stdout JSON.
+
+    The README's step 3 ("Confirm") runs ``singlenat-verify.sh`` on the Mini and
+    reads its ``{"state":"HEALTHY",...}`` JSON line — so the confirm seam, unlike
+    the exit-code-only deploy runner, must hand back the script's STDOUT for the
+    installer to parse ``state``. This double records the confirm argv (so the
+    real ``ssh <mini> singlenat-verify.sh`` invocation is asserted) and returns a
+    scripted stdout. ``raise``-mode models a transport that cannot even spawn (the
+    confirm SSH refused) — which must fail-closed exactly like a non-HEALTHY state.
+    """
+
+    def __init__(self, *, stdout: str = HEALTHY_JSON, raises: bool = False) -> None:
+        self.calls: list[list[str]] = []
+        self._stdout = stdout
+        self._raises = raises
+
+    def __call__(self, argv: list[str]) -> str:
+        self.calls.append(list(argv))
+        if self._raises:
+            msg = "ssh: connect to host 10.0.0.10 port 22: Connection refused"
+            raise OSError(msg)
+        return self._stdout
+
+
+def _installer(runner: RecordingRunner, confirm: RecordingConfirmRunner | None = None):
     from sanctum_cli.devices.armor import SinglenatArmorInstaller
 
     return SinglenatArmorInstaller(
@@ -65,6 +106,7 @@ def _installer(runner: RecordingRunner):
         firewalla_host="10.0.0.1",
         mini_host="bert@10.0.0.10",
         runner=runner.__call__,
+        confirm_runner=(confirm or RecordingConfirmRunner()).__call__,
     )
 
 
@@ -165,6 +207,84 @@ def test_install_stops_at_the_first_failed_step() -> None:
     assert len(runner.calls) == 2
 
 
+# ── README confirm gate (Task c): parse JSON state==HEALTHY, never blind ok ───
+
+
+def test_install_runs_the_readme_confirm_step_and_parses_state() -> None:
+    """After the deploy steps, the install runs the README's step-3 confirm.
+
+    README step 3: ``ssh bert@10.0.0.10 '~/.sanctum/bin/singlenat-verify.sh'`` →
+    ``{"state":"HEALTHY",...}``. The installer must actually fire that confirm
+    (an ``ssh`` to the Mini running ``singlenat-verify.sh``) and parse its JSON —
+    a HEALTHY verdict is the ONLY thing that lets ``install`` report ok=True. This
+    is the gate that proves the armor LANDED, not merely that the deploy commands
+    exited zero (a scp can exit 0 while the watchdog never comes up HEALTHY).
+    """
+    confirm = RecordingConfirmRunner(stdout=HEALTHY_JSON)
+    res = _installer(RecordingRunner(), confirm).install()
+    assert res.ok is True
+    # The confirm actually ran: an ssh to the Mini invoking the verify script.
+    assert confirm.calls, "install() must run the README confirm step, not skip it"
+    confirm_argv = confirm.calls[-1]
+    joined = " ".join(confirm_argv)
+    assert "ssh" in confirm_argv
+    assert "bert@10.0.0.10" in joined  # the Mini jump host
+    assert "singlenat-verify.sh" in joined
+
+
+def test_install_reports_not_ok_when_confirm_state_not_healthy() -> None:
+    """A DEGRADED verify verdict fails-closed: ok=False, NEVER a blind green.
+
+    The deploy commands all exit zero, but the armor came up DEGRADED — the
+    cutover did NOT land a healthy single NAT. Reporting ok=True here would commit
+    a broken cutover the rails should have unwound (Contracts at the Boundary: the
+    confirm must read the consumer's real verdict, not trust that the steps ran).
+    """
+    confirm = RecordingConfirmRunner(stdout=DEGRADED_JSON)
+    res = _installer(RecordingRunner(), confirm).install()
+    assert res.ok is False
+    assert "degraded" in res.detail.lower() or "healthy" in res.detail.lower()
+
+
+def test_install_reports_not_ok_when_confirm_transport_fails() -> None:
+    """A confirm SSH that cannot even spawn fails-closed: ok=False, never green.
+
+    "The confirm step did not run" is NOT proof the armor is healthy — it is the
+    absence of proof. A transport that refused the connection must be treated as a
+    failed confirm (ok=False), exactly like a non-HEALTHY verdict, so the rails do
+    not commit on an unverified install.
+    """
+    confirm = RecordingConfirmRunner(raises=True)
+    res = _installer(RecordingRunner(), confirm).install()
+    assert res.ok is False
+    assert res.detail
+
+
+def test_install_reports_not_ok_when_confirm_output_unparseable() -> None:
+    """Confirm stdout that is not the expected JSON fails-closed: ok=False.
+
+    A garbled / empty confirm output (the script crashed, or an SSH banner leaked
+    onto stdout) carries no HEALTHY proof — fail-closed rather than guess healthy.
+    """
+    confirm = RecordingConfirmRunner(stdout="bash: singlenat-verify.sh: not found")
+    res = _installer(RecordingRunner(), confirm).install()
+    assert res.ok is False
+    assert res.detail
+
+
+def test_install_does_not_confirm_when_a_deploy_step_failed() -> None:
+    """Fail-fast: a failed deploy step short-circuits BEFORE the confirm runs.
+
+    If the deploy never finished there is nothing to confirm — the install is
+    already ok=False — so the confirm SSH must not fire on top of a half-deployed
+    armor (it would only widen the blast radius and could mis-read a stale state).
+    """
+    confirm = RecordingConfirmRunner(stdout=HEALTHY_JSON)
+    res = _installer(RecordingRunner(fail_on_index=0), confirm).install()
+    assert res.ok is False
+    assert confirm.calls == []  # the confirm never ran
+
+
 # ── default runner: the real seam shells out (constructed without injection) ──
 
 
@@ -183,3 +303,6 @@ def test_default_installer_uses_a_real_subprocess_runner() -> None:
         mini_host="bert@10.0.0.10",
     )
     assert callable(inst._runner)  # type: ignore[attr-defined]
+    # The confirm seam also defaults to a real subprocess runner (so a real cutover
+    # actually runs the README step-3 verify); we do NOT call it here.
+    assert callable(inst._confirm_runner)  # type: ignore[attr-defined]
