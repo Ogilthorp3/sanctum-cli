@@ -124,6 +124,19 @@ def _policies_by_pid(payload: dict[str, Any] | None) -> dict[str, dict[str, Any]
             indexed[str(pol["pid"])] = pol
     return indexed
 
+
+# The fields that identify WHAT a policy does, independent of the box-assigned
+# pid (which changes on re-create). Used to read-back-verify that a re-created
+# policy actually reappeared, since the /raw create reply carries no success flag.
+_POLICY_IDENTITY_KEYS = ("type", "target", "action", "direction", "scope")
+
+
+def _policy_identity(pol: dict[str, Any]) -> tuple[tuple[str, str], ...]:
+    """A pid-independent identity for a policy (the identifying keys it carries)."""
+    return tuple(
+        (k, str(pol[k])) for k in _POLICY_IDENTITY_KEYS if pol.get(k) is not None
+    )
+
 # HTTP timeout for bridge calls (seconds). Matches the screen_time engine.
 _HTTP_TIMEOUT_S = 15
 
@@ -654,8 +667,36 @@ class FirewallaProvider:
         a ``cmd``-type message carrying the captured policy object as its value. The
         box assigns a fresh pid on creation (the captured ``pid`` is advisory), so the
         captured policy rides verbatim as the create payload.
+
+        HONEST-VERIFY: the ``/raw`` route returns HTTP 200 with no box-side success
+        flag (unlike ``DELETE /policy/:pid``), so ``raw().ok`` alone would lie green
+        on a rejected create. We READ BACK ``/policies`` and confirm a policy with the
+        captured one's pid-independent identity now exists; only that read-back earns
+        ``ok=True``. A create that did not raise but cannot be confirmed returns
+        ``ok=False`` with a manual-recovery instruction (fail-closed).
         """
-        return self.raw("cmd", "policy:create", value=policy)
+        res = self.raw("cmd", "policy:create", value=policy)
+        if not res.ok:
+            return res
+        want = _policy_identity(policy)
+        if not want:
+            return OpResult(
+                ok=False,
+                detail=(
+                    "policy re-create fired but the captured policy has no identifying "
+                    "fields to verify reappearance; confirm in the Firewalla app"
+                ),
+            )
+        for pol in _policies_by_pid(_fetch_bridge_json(_POLICIES_PATH)).values():
+            if _policy_identity(pol) == want:
+                return OpResult(ok=True, detail="policy re-created (verified by read-back)")
+        return OpResult(
+            ok=False,
+            detail=(
+                "policy re-create fired but the policy did not reappear in /policies "
+                "(the /raw create carries no success flag) — restore it in the Firewalla app"
+            ),
+        )
 
     def _delete_op(self, path: str) -> OpResult:
         """Generic route-correct ``DELETE`` for ``/policy/:pid`` + ``/dns/:hostname``.

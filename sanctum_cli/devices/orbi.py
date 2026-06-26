@@ -492,10 +492,23 @@ class OrbiProvider:
         engaged = value == "on"
         setter = getattr(client, f"set_{band}_guest_access_enabled")
         try:
-            setter(engaged)
+            ok = setter(engaged)
         except Exception as exc:  # normalize any transport error
             msg = f"Orbi guest-access set failed for {band}: {exc}"
             raise DeviceError(msg) from exc
+        # pynetgear setters return False (NOT raise) when the router rejects the
+        # write. Fail-closed: a rejected write must surface ok=False so a Layer-2
+        # cutover unwinds rather than reporting a phantom-green change.
+        if not ok:
+            return OpResult(
+                ok=False,
+                detail=(
+                    f"orbi: guest-wifi {band} rejected by the router "
+                    f"(set_{band}_guest_access_enabled returned no-success)"
+                ),
+                before=before,
+                after=value,
+            )
         return OpResult(ok=True, detail=f"set {path}", before=before, after=value)
 
     def set(self, path: str, value: str) -> OpResult:
@@ -750,14 +763,30 @@ class OrbiProvider:
                 detail="rollback failed: snapshot carried no restorable baseline (0 keys)",
             )
         restored = 0
+        failures: list[str] = []
         for path, value in snap.data.items():
             if path in _GUEST_PATHS:
-                self.set(path, value)
-                restored += 1
-        if restored == 0:
+                # Honor each restore's result — a rejected re-apply must fail the
+                # rollback, not be counted as restored (fail-closed, mirrors the
+                # Sagemcom/Firewalla rollbacks).
+                res = self.set(path, value)
+                if res.ok:
+                    restored += 1
+                else:
+                    failures.append(path)
+        if restored == 0 and not failures:
             return OpResult(
                 ok=False,
                 detail="rollback failed: snapshot carried no restorable guest-wifi leaf",
+            )
+        if failures:
+            total = restored + len(failures)
+            return OpResult(
+                ok=False,
+                detail=(
+                    f"rollback INCOMPLETE: restored {restored}/{total} leaf(s); "
+                    f"router rejected: {', '.join(failures)}"
+                ),
             )
         return OpResult(ok=True, detail=f"rolled back {restored} key(s)")
 

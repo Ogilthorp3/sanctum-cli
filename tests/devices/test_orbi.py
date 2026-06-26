@@ -59,12 +59,16 @@ class FakeNetgear:
         model: str = "RBR50",
         login_ok: bool = True,
         raise_on_get: bool = False,
+        set_guest_ok: bool = True,
     ) -> None:
         self._guest = {"2g": guest_2g, "5g": guest_5g}
         self._channel = {"2g": channel_2g, "5g": channel_5g}
         self._model = model
         self._login_ok = login_ok
         self._raise_on_get = raise_on_get
+        # pynetgear setters return False (NOT raise) when the router rejects a
+        # write — model that so the fail-closed contract can be exercised.
+        self._set_guest_ok = set_guest_ok
         self.logged_in = False
         self.set_calls: list[tuple[str, Any]] = []
 
@@ -91,11 +95,15 @@ class FakeNetgear:
 
     def set_2g_guest_access_enabled(self, value: bool = False) -> bool:
         self.set_calls.append((GUEST_2G, value))
+        if not self._set_guest_ok:
+            return False  # router rejected the write (pynetgear returns False, no raise)
         self._guest["2g"] = value
         return True
 
     def set_5g_guest_access_enabled(self, value: bool = False) -> bool:
         self.set_calls.append((GUEST_5G, value))
+        if not self._set_guest_ok:
+            return False
         self._guest["5g"] = value
         return True
 
@@ -281,6 +289,33 @@ def test_set_guest_wifi_records_opresult_before_after(
     assert res.before == "off"
     assert res.after == "on"
     assert (GUEST_5G, True) in patched.set_calls
+
+
+def test_set_guest_wifi_fails_closed_on_rejected_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A router that REJECTS the guest-wifi write (pynetgear returns False, no
+    raise) must yield ok=False — never a phantom-green that bypasses rollback."""
+    fake = FakeNetgear(set_guest_ok=False)
+    p = _connected(monkeypatch, fake)
+    res = p.set(GUEST_5G, "on")
+    assert res.ok is False
+    assert "reject" in res.detail.lower() or "no-success" in res.detail.lower()
+    assert (GUEST_5G, True) in fake.set_calls  # the write WAS attempted
+
+
+def test_rollback_fails_closed_when_a_restore_write_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the router rejects a guest-wifi restore during rollback, rollback must
+    report ok=False (not 'rolled back N keys' over a write that never landed)."""
+    from sanctum_cli.devices.base import Snapshot
+
+    fake = FakeNetgear(set_guest_ok=False)
+    p = _connected(monkeypatch, fake)
+    snap = Snapshot(brand="orbi", taken_at="t", data={GUEST_5G: "off"})
+    res = p.rollback(snap)
+    assert res.ok is False
 
 
 def test_set_then_get_reflects_change(

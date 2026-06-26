@@ -450,16 +450,47 @@ def test_rollback_recreates_removed_policies_via_raw(monkeypatch: pytest.MonkeyP
     """
     cap = _capture(monkeypatch)
     p = _provider(monkeypatch)
-    live = {"policies": [{"pid": "7"}], "count": 1}
-    monkeypatch.setattr(fw, "_fetch_bridge_json", lambda *a, **k: live)
     removed = {"pid": "5", "type": "mac", "action": "block", "target": MAC}
+    # HONEST-VERIFY: the recreate read-backs /policies. Model the box actually
+    # creating the policy — once a policy:create /raw call has fired, the live
+    # state returns a content-matching policy under a NEW pid (the box reassigns).
+    def live_state(*_a: object, **_k: object) -> dict[str, Any]:
+        created = any(
+            c["path"] == "/raw" and (c.get("body") or {}).get("item") == "policy:create"
+            for c in cap
+        )
+        pols = [{"pid": "7"}]
+        if created:
+            pols.append({**removed, "pid": "99"})  # reappeared under a fresh pid
+        return {"policies": pols, "count": len(pols)}
+
+    monkeypatch.setattr(fw, "_fetch_bridge_json", live_state)
     res = p.rollback(_baseline([{"pid": "7"}, removed]))
-    assert res.ok is True
+    assert res.ok is True  # read-back confirmed the policy reappeared
     raws = [c for c in cap if c["path"] == "/raw"]
     assert raws, "rollback must re-create the removed policy via the /raw escape hatch"
     assert raws[-1]["method"] == "POST"
     assert raws[-1]["body"]["item"] == "policy:create"
     assert raws[-1]["body"]["value"] == removed  # the captured policy object, verbatim
+
+
+def test_rollback_recreate_fails_closed_when_box_rejects_under_http200(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The /raw create returns HTTP 200 with no success flag. If the box NO-OPs the
+    create (policy never reappears), the read-back must fail the rollback ok=False —
+    never a phantom-green restore over a policy that was not actually re-created.
+    """
+    _capture(monkeypatch)  # all calls 200, but the live state never gains the policy
+    p = _provider(monkeypatch)
+    removed = {"pid": "5", "type": "mac", "action": "block", "target": MAC}
+    # Live state NEVER includes the removed policy → read-back can't confirm.
+    monkeypatch.setattr(
+        fw, "_fetch_bridge_json", lambda *a, **k: {"policies": [{"pid": "7"}], "count": 1}
+    )
+    res = p.rollback(_baseline([{"pid": "7"}, removed]))
+    assert res.ok is False  # HTTP 200 is NOT proof; read-back found nothing
+    assert "manual" in res.detail.lower() or "firewalla app" in res.detail.lower()
 
 
 def test_rollback_fail_closed_when_delete_primitive_fails(
