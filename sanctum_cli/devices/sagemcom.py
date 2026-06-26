@@ -41,16 +41,19 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, TypeVar
 from urllib.parse import quote
 
-from sanctum_cli import keychain
+from sanctum_cli.devices import creds as creds_resolver
 from sanctum_cli.devices import registry
 from sanctum_cli.devices.base import (
     Capability,
+    CapabilityBinding,
+    CapabilityMap,
     CapabilityOp,
     Creds,
     DeviceError,
     NetContext,
     OpResult,
     Snapshot,
+    build_capability_map,
 )
 
 if TYPE_CHECKING:
@@ -120,6 +123,33 @@ _MUTATED_XPATHS = (
     _CAPABILITY_OPS[Capability.DMZ].path,
 )
 _SAFE_BASELINE = "off"
+
+# The honest capability map: each cap the hub advertises → (transport, concrete op).
+# The feature-cap rows are DERIVED from ``_CAPABILITY_OPS`` so a leaf and its map
+# entry can never drift; the verb rows (READ/SET/FIRMWARE/REBOOT) name the SAH verb
+# that backs them. ``build_capability_map`` raises if ``capabilities()`` ever
+# advertises a cap missing here, so an advertised-but-unbound power fails loudly.
+_CAP_BINDINGS: dict[Capability, tuple[str, str]] = {
+    Capability.READ: ("sah:getValue", "getValue <any leaf> (e.g. Device/DeviceInfo/*)"),
+    Capability.SET: ("sah:setValue", "setValue <any settable leaf> (near-total SAH surface)"),
+    Capability.FIRMWARE: (
+        "sah:getValue",
+        "getValue Device/DeviceInfo/SoftwareVersion (read-only — firmware image is NON_WRITABLE)",
+    ),
+    Capability.REBOOT: ("sah:reboot", "reboot (SAH reboot action, xpath=Device)"),
+    **{
+        cap: ("sah:setValue", f"setValue {op.path}={op.engaged}")
+        for cap, op in _CAPABILITY_OPS.items()
+    },
+}
+
+# The GUI/carrier ceiling: the two writability walls the audit found (firmware
+# NON_WRITABLE + Bell ACCESS_RESTRICTION leaves), named so a caller is TOLD the
+# ceiling rather than discovering it by a rejected setValue.
+_GUI_ONLY_CEILING: tuple[str, ...] = (
+    "firmware image (NON_WRITABLE — vendor/carrier-locked, no setValue)",
+    "Bell carrier-locked network-config leaves (ACCESS_RESTRICTION)",
+)
 
 # XPath that identifies the device class once authenticated, used to refine the
 # generic ``brand`` into a concrete model string after connect.
@@ -487,7 +517,10 @@ class SagemcomHubProvider:
         # the default behavior is unchanged).
         account = creds.username or KEYCHAIN_ACCOUNT
         service = creds.keychain_service or KEYCHAIN_SERVICE
-        password = keychain.read(account=account, service=service)
+        # Headless-safe resolution: macOS Keychain (GUI tier) → SOPS device-creds
+        # (age-key, headless) → fail-closed. NEVER 1Password/op (its TouchID prompt
+        # would block a headless daemon). See :mod:`sanctum_cli.devices.creds`.
+        password = creds_resolver.resolve_secret(account=account, service=service)
         authed = Creds(
             host=creds.host,
             username=creds.username,
@@ -799,6 +832,27 @@ class SagemcomHubProvider:
         same capabilities to its own paths/values via its own ``capability_op``.
         """
         return _CAPABILITY_OPS.get(capability)
+
+    def capability_map(self) -> CapabilityMap:
+        """Honest "what can I change on this hub": real SAH ops + the carrier ceiling.
+
+        Every cap :meth:`capabilities` advertises is bound to the concrete SAH verb
+        + leaf that backs it (the feature rows derived from :data:`_CAPABILITY_OPS`,
+        so a map entry can never outlive its leaf). The ceiling names the firmware
+        NON_WRITABLE image and the Bell ACCESS_RESTRICTION leaves — the surfaces the
+        near-total ``setValue`` cannot reach — so a caller is told the wall instead
+        of hitting it. ``build_capability_map`` enforces bindings ≡ ``capabilities()``.
+        """
+        return build_capability_map(
+            brand=self.brand,
+            capabilities=self.capabilities(),
+            bindings=_CAP_BINDINGS,
+            ceiling=_GUI_ONLY_CEILING,
+        )
+
+    def list_paths(self) -> list[CapabilityBinding]:
+        """The flat list of REAL, writable/readable SAH bindings on this hub."""
+        return list(self.capability_map().bindings)
 
     def snapshot(self, scope: str | None = None) -> Snapshot:  # noqa: ARG002 - whole-subtree
         """Capture the Bell network-config leaves we may need to restore.

@@ -34,16 +34,19 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from sanctum_cli import keychain
+from sanctum_cli.devices import creds as creds_resolver
 from sanctum_cli.devices import registry
 from sanctum_cli.devices.base import (
     Capability,
+    CapabilityBinding,
+    CapabilityMap,
     CapabilityOp,
     Creds,
     DeviceError,
     NetContext,
     OpResult,
     Snapshot,
+    build_capability_map,
 )
 
 if TYPE_CHECKING:
@@ -133,6 +136,52 @@ _ACTIONS: dict[str, OrbiAction] = {
         OrbiAction("speed_test", "set_speed_test_start", Capability.SPEEDTEST),
     )
 }
+
+def _orbi_cap_bindings() -> dict[Capability, tuple[str, str]]:
+    """The honest cap → (transport, concrete pynetgear op) map for an Orbi.
+
+    The write rows are DERIVED from :data:`_ACTIONS` (the single source of truth for
+    the wired SOAP surface), so a cap is bound to exactly the real ``Netgear``
+    method(s) that back it and the two can never drift; a cap backed by several
+    actions (FEATURE_TOGGLE, POLICY) lists each method. READ and GUEST_WIFI are not
+    in ``_ACTIONS`` (they are getters / the guest setter), so they are added
+    explicitly. AP_MODE and CHANNELS are absent BY DESIGN — pynetgear ships no
+    set-AP-mode / set-channel SOAP action and no escape hatch, so binding either
+    would name an op that does not exist (they live in the GUI-only ceiling instead).
+    """
+    bindings: dict[Capability, tuple[str, str]] = {
+        Capability.READ: (
+            "pynetgear-soap",
+            "get_attached_devices / get_satellites / get_*_info (read-only getters)",
+        ),
+        Capability.GUEST_WIFI: (
+            "pynetgear-soap",
+            "set_5g_guest_access_enabled / set_2g_guest_access_enabled",
+        ),
+    }
+    by_cap: dict[Capability, list[str]] = {}
+    for action in _ACTIONS.values():
+        by_cap.setdefault(action.capability, []).append(action.method)
+    for cap, methods in by_cap.items():
+        bindings[cap] = ("pynetgear-soap", " / ".join(sorted(methods)))
+    return bindings
+
+
+_CAP_BINDINGS: dict[Capability, tuple[str, str]] = _orbi_cap_bindings()
+
+# The GUI-only ceiling: the surfaces pynetgear's FIXED SOAP set cannot reach (no
+# write verb + no escape hatch), named so a caller is TOLD the wall. Includes the
+# two honesty-defect caps (AP_MODE, CHANNELS) — channel is read-only via get, AP
+# mode has no SOAP write at all — alongside SSID/port-forward/IPv6/VPN.
+_GUI_ONLY_CEILING: tuple[str, ...] = (
+    "SSID name/password (no pynetgear SOAP write — Orbi app / web UI only)",
+    "radio channel (CHANNELS: read-only; no set-channel SOAP action)",
+    "AP/router operating mode (AP_MODE: no set-mode SOAP action)",
+    "port-forwarding rules (no SOAP write)",
+    "IPv6 configuration (no SOAP write)",
+    "VPN server/client (no SOAP write)",
+)
+
 
 # Read-path vocabulary → the pynetgear getter that backs each. These reads return
 # structured data (a dict, or a list of ``Device`` namedtuples / satellite dicts),
@@ -261,7 +310,10 @@ class OrbiProvider:
         # the default behavior is unchanged).
         account = creds.username or KEYCHAIN_ACCOUNT
         service = creds.keychain_service or KEYCHAIN_SERVICE
-        password = keychain.read(account=account, service=service)
+        # Headless-safe resolution: macOS Keychain (GUI tier) → SOPS device-creds
+        # (age-key, headless) → fail-closed. NEVER 1Password/op (its TouchID prompt
+        # would block a headless daemon). See :mod:`sanctum_cli.devices.creds`.
+        password = creds_resolver.resolve_secret(account=account, service=service)
         authed = Creds(
             host=creds.host,
             username=creds.username,
@@ -615,6 +667,28 @@ class OrbiProvider:
         guest leaf; every other capability returns ``None`` (no blind mutation).
         """
         return _CAPABILITY_OPS.get(capability)
+
+    def capability_map(self) -> CapabilityMap:
+        """Honest "what can I change on this Orbi": real SOAP ops + the GUI-only ceiling.
+
+        Every cap :meth:`capabilities` advertises is bound to the concrete
+        ``pynetgear`` method(s) that back it (derived from :data:`_ACTIONS`, so the
+        map cannot name a SOAP verb the wired surface does not have). The ceiling
+        names SSID/channel/AP-mode/port-forward/IPv6/VPN — the surfaces pynetgear's
+        FIXED action set cannot write (no verb, no escape hatch) — so AP_MODE and
+        CHANNELS are reported as a wall, never as a phantom op. ``build_capability_map``
+        enforces bindings ≡ ``capabilities()``.
+        """
+        return build_capability_map(
+            brand=self.brand,
+            capabilities=self.capabilities(),
+            bindings=_CAP_BINDINGS,
+            ceiling=_GUI_ONLY_CEILING,
+        )
+
+    def list_paths(self) -> list[CapabilityBinding]:
+        """The flat list of REAL pynetgear bindings (the writable/readable surface)."""
+        return list(self.capability_map().bindings)
 
     def snapshot(self, scope: str | None = None) -> Snapshot:  # noqa: ARG002 - whole guest+channel
         """Capture guest-wifi + channel state we may need to restore.

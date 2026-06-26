@@ -45,15 +45,19 @@ from urllib.parse import quote
 import httpx
 
 from sanctum_cli import config
+from sanctum_cli.devices import creds as creds_resolver
 from sanctum_cli.devices import registry
 from sanctum_cli.devices.base import (
     Capability,
+    CapabilityBinding,
+    CapabilityMap,
     CapabilityOp,
     Creds,
     DeviceError,
     NetContext,
     OpResult,
     Snapshot,
+    build_capability_map,
 )
 
 if TYPE_CHECKING:
@@ -65,6 +69,14 @@ _BRIDGE_URL_ENV = "FIREWALLA_BRIDGE_URL"
 _BRIDGE_TOKEN_ENV = "FIREWALLA_BRIDGE_TOKEN"
 _BRIDGE_TOKEN_FILE = Path.home() / ".sanctum/secrets/firewalla-bridge-token"
 _DEFAULT_BRIDGE_URL = "http://127.0.0.1:1984"
+
+# The headless device-credential tier the bridge token falls back to when env +
+# on-disk secret both miss: macOS Keychain (service ``firewalla-app``) → SOPS
+# ``devices.firewalla_app.password`` (age-key), NEVER 1Password/op. The account is
+# resolved discovery-first from instance.yaml (``devices.firewalla.keychain.account``)
+# with an EMPTY default — so an unconfigured box (and every test) misses cleanly to
+# None, exactly as before, while a haus that seeds the entry gets the headless tier.
+_FIREWALLA_KEYCHAIN_SERVICE = "firewalla-app"
 
 # The durable key-auth host:port for the SSH fallback transport. The key path
 # itself is resolved from instance.yaml (``firewalla.ssh_key``) — never
@@ -180,9 +192,20 @@ def _read_bridge_token() -> str | None:
     if token:
         return token
     try:
-        return _BRIDGE_TOKEN_FILE.read_text(encoding="utf-8").strip() or None
+        file_token = _BRIDGE_TOKEN_FILE.read_text(encoding="utf-8").strip()
     except OSError:
-        return None
+        file_token = ""
+    if file_token:
+        return file_token
+    # Last tier: the shared headless resolver (Keychain firewalla-app → SOPS
+    # devices.firewalla_app.password, NEVER op/1P). Best-effort — a miss/locked/
+    # absent-binary yields None so detect() and the fail-soft reads keep treating an
+    # unreachable bridge as "no token", never a crash.
+    account = str(config.instance_value("devices.firewalla.keychain.account", ""))
+    service = str(
+        config.instance_value("devices.firewalla.keychain.service", _FIREWALLA_KEYCHAIN_SERVICE)
+    )
+    return creds_resolver.resolve_secret_optional(account=account, service=service)
 
 
 def _resolve_ssh_key() -> str | None:
@@ -405,6 +428,36 @@ _ENFORCEMENT_CAPS: frozenset[Capability] = frozenset(
         Capability.DEVICE_RULES,
         Capability.FEATURE_TOGGLE,
     }
+)
+
+# The honest cap → (transport, concrete bridge route) map. Each row names the REAL
+# route-correct op the matching named method issues (verified against the named
+# ops below), so a binding cannot outlive its route. ``build_capability_map`` raises
+# if ``capabilities()`` ever advertises a cap with no row here. WAN_MODE is absent
+# BY DESIGN — NAT/DMZ/WAN/VPN are GUI-only on a Firewalla (the bridge proxies no
+# such route), so they live in the ceiling, never as a phantom binding.
+_CAP_BINDINGS: dict[Capability, tuple[str, str]] = {
+    Capability.READ: ("bridge-http", "GET /info, /policies, /host/:mac, /hosts"),
+    Capability.LOCAL_DNS: ("bridge-http", "POST /dns ; DELETE /dns/:hostname"),
+    Capability.ALARM_ACK: ("bridge-http", "POST /alarm/:id/ignore"),
+    Capability.WAKE_ON_LAN: ("bridge-http", "POST /host/:mac/wake"),
+    Capability.SPEEDTEST: ("bridge-http", "POST /speedtest"),
+    Capability.REBOOT: ("bridge-http", "POST /box/reboot"),
+    Capability.POLICY: ("bridge-http", "DELETE /policy/:pid ; POST /raw policy:create"),
+    Capability.SCREEN_TIME: ("bridge-http", "POST /host/:mac/pause|unpause"),
+    Capability.DEVICE_BLOCK: ("bridge-http", "POST /host/:mac/pause|unpause"),
+    Capability.DEVICE_POLICY: ("bridge-http", "POST /host/:mac/policy"),
+    Capability.DEVICE_RULES: ("bridge-http", "POST /host/:mac/rules"),
+    Capability.FEATURE_TOGGLE: ("bridge-http", "POST /feature/:name/enable|disable"),
+}
+
+# The GUI-only ceiling: the WAN/edge surfaces the bridge proxies NO route for, named
+# so a caller is TOLD the wall rather than discovering it by a failed call.
+_GUI_ONLY_CEILING: tuple[str, ...] = (
+    "NAT configuration (bridge proxies no route — Firewalla app only)",
+    "DMZ host (no bridge route — app only)",
+    "WAN mode / WAN settings (WAN_MODE: no bridge route — app only)",
+    "VPN server/client (no bridge route — app only)",
 )
 
 
@@ -779,6 +832,28 @@ class FirewallaProvider:
         ``CapabilityOp``.
         """
         return None
+
+    def capability_map(self) -> CapabilityMap:
+        """Honest "what can I change on this box": real bridge routes + the GUI ceiling.
+
+        Every cap :meth:`capabilities` advertises (which is itself data-driven from
+        ``/info``'s ``enforcement_ready``) is bound to the concrete route-correct
+        bridge op that backs it; so when the box is NOT enforcement-ready and the
+        enforcement caps drop, their bindings drop with them — the map tracks the
+        live surface. The ceiling names NAT/DMZ/WAN/VPN, the GUI-only edge surfaces
+        the bridge proxies no route for, so WAN_MODE is reported as a wall, never as
+        a phantom op. ``build_capability_map`` enforces bindings ≡ ``capabilities()``.
+        """
+        return build_capability_map(
+            brand=self.brand,
+            capabilities=self.capabilities(),
+            bindings=_CAP_BINDINGS,
+            ceiling=_GUI_ONLY_CEILING,
+        )
+
+    def list_paths(self) -> list[CapabilityBinding]:
+        """The flat list of REAL bridge-route bindings live on this box right now."""
+        return list(self.capability_map().bindings)
 
     def snapshot(self, scope: str | None = None) -> Snapshot:  # noqa: ARG002 - whole policy subtree
         """Capture the box's policy state as the restorable rollback baseline.

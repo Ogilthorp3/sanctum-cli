@@ -14,7 +14,7 @@ the Protocol is the seam a contributor implements to add a new brand.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -148,6 +148,77 @@ class CapabilityOp:
     engaged: str
 
 
+@dataclass(frozen=True)
+class CapabilityBinding:
+    """One REAL writable/readable capability on a box: its transport + concrete op.
+
+    The honest unit of "what can I change on THIS box". ``capability`` is the
+    high-level :class:`Capability`; ``transport`` names HOW the op reaches the box
+    (``"sah:setValue"``, ``"pynetgear-soap"``, ``"bridge-http"``); ``op`` is the
+    CONCRETE real op/route/leaf that backs it (``"setValue Device/.../SetBridgeMode"``,
+    ``"reboot"``, ``"POST /host/:mac/policy"``). A binding exists IFF a real op backs
+    the capability — there is no binding for a GUI-only / carrier-locked surface
+    (those live in :attr:`CapabilityMap.ceiling`), so the map never claims a power
+    the transport cannot actually exercise.
+    """
+
+    capability: Capability
+    transport: str
+    op: str
+
+
+@dataclass(frozen=True)
+class CapabilityMap:
+    """The truthful, per-box answer to "what can I change here".
+
+    ``bindings`` are the REAL capabilities (each backed by a concrete op — see
+    :class:`CapabilityBinding`); by construction they are exactly the set the
+    provider advertises in :meth:`DeviceProvider.capabilities`, so the map can
+    neither name a phantom op nor silently drop an advertised one. ``ceiling`` is
+    the explicit list of GUI-only / carrier-locked surfaces this transport CANNOT
+    reach (Orbi SSID/channel/port-forward/IPv6/VPN; Firewalla NAT/DMZ/WAN/VPN;
+    Sagemcom's Bell-locked leaves) — named, not implied, so a caller is told the
+    ceiling instead of discovering it by a failed write.
+    """
+
+    brand: str
+    bindings: tuple[CapabilityBinding, ...]
+    ceiling: tuple[str, ...]
+
+
+def build_capability_map(
+    *,
+    brand: str,
+    capabilities: AbstractSet[Capability],
+    bindings: Mapping[Capability, tuple[str, str]],
+    ceiling: tuple[str, ...],
+) -> CapabilityMap:
+    """Assemble a :class:`CapabilityMap` from a provider's caps + its binding table.
+
+    Honest-verify BY CONSTRUCTION: a :class:`CapabilityBinding` is emitted for
+    exactly the caps the provider advertises in ``capabilities`` (looked up in the
+    ``bindings`` table for their concrete transport+op), sorted by capability value
+    for a stable rendering. If ``capabilities`` advertises a cap with NO entry in
+    ``bindings`` — an advertised power with no named op — this RAISES
+    :class:`ValueError` rather than quietly dropping it, so the drift is caught at
+    the boundary instead of shipping a map that under-reports the surface. The
+    caller passes its OWN ``capabilities()`` (a different source than the static
+    binding table — Contracts at the Boundary §2), so the equality the tests assert
+    (``{b.capability} == capabilities()``) is a real cross-source check.
+    """
+    missing = [cap for cap in capabilities if cap not in bindings]
+    if missing:
+        names = ", ".join(sorted(cap.value for cap in missing))
+        msg = f"capability map for {brand!r} advertises caps with no bound op: {names}"
+        raise ValueError(msg)
+    ordered = sorted(capabilities, key=lambda cap: cap.value)
+    built = tuple(
+        CapabilityBinding(capability=cap, transport=bindings[cap][0], op=bindings[cap][1])
+        for cap in ordered
+    )
+    return CapabilityMap(brand=brand, bindings=built, ceiling=ceiling)
+
+
 class DeviceError(LocalError):
     """A device transport/op failed, or an op is unsupported by this provider.
 
@@ -257,4 +328,27 @@ class AuthProbeProvider(Protocol):
 
     def auth_ok(self) -> bool:
         """True iff the last :meth:`DeviceProvider.connect` genuinely authenticated."""
+        ...
+
+
+@runtime_checkable
+class CapabilityMapProvider(Protocol):
+    """An OPTIONAL provider capability: an honest, transport-aware capability map.
+
+    A provider that knows its own writable surface AND its GUI-only ceiling
+    implements this so a caller can ask "what can I change on this box" and get a
+    truthful answer — every real op named with its transport, every unreachable
+    surface named as a ceiling. Like :class:`AuthProbeProvider`, it is a SEPARATE
+    ``@runtime_checkable`` Protocol (not part of :class:`DeviceProvider`) so the
+    degraded :class:`~sanctum_cli.devices.registry.GenericReadOnlyProvider`
+    fallback — which legitimately has no honest map to offer — is not forced to
+    implement it; a caller structurally ``isinstance``-checks before asking.
+    """
+
+    def capability_map(self) -> CapabilityMap:
+        """The full map: real bindings + the GUI-only ceiling."""
+        ...
+
+    def list_paths(self) -> list[CapabilityBinding]:
+        """The flat list of REAL bindings (the writable/readable surface)."""
         ...
