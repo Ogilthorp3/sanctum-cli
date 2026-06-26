@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from sanctum_cli.devices import flip
+from sanctum_cli.devices.armor import SinglenatArmorInstaller
 from sanctum_cli.devices.base import Capability, CapabilityOp, DeviceError, OpResult, Snapshot
 from sanctum_cli.devices.rails import guarded_apply
 from sanctum_cli.net import verify
@@ -251,6 +252,31 @@ _RUNNER_LEASE_OBSERVE = ("lease_observe",)
 _RUNNER_ARMOR_ARM = ("armor_arm",)
 _RUNNER_DHCP_RELEASE = ("dhcp_release",)
 
+# Default deploy coordinates for the armor-kit installer when a caller does not
+# inject an ``armor=`` seam. They mirror the kit README's deploy section (the
+# checkout dir + the Firewalla and the Mini jump host); a caller that needs other
+# coordinates passes a pre-built ``armor=`` installer (and tests always do, so the
+# overnight build never reaches these against live gear).
+_DEFAULT_ARMOR_KIT_DIR = "/Users/bert/Documents/Claude_Code/sanctum-singlenat-armor"
+_DEFAULT_ARMOR_FIREWALLA_HOST = "10.0.0.1"
+_DEFAULT_ARMOR_MINI_HOST = "bert@10.0.0.10"
+
+
+def _default_armor_installer() -> ArmorInstaller:
+    """Build the real :class:`SinglenatArmorInstaller` from the README coordinates.
+
+    The single seam through which an un-injected :func:`single_nat_dmz` reaches a
+    concrete armor install. Constructed lazily (only on the apply path) so the
+    dry-run makes zero host contact, and so tests that swap
+    ``intents.SinglenatArmorInstaller`` for a recording double exercise the wiring
+    without ever shelling out.
+    """
+    return SinglenatArmorInstaller(
+        kit_dir=_DEFAULT_ARMOR_KIT_DIR,
+        firewalla_host=_DEFAULT_ARMOR_FIREWALLA_HOST,
+        mini_host=_DEFAULT_ARMOR_MINI_HOST,
+    )
+
 
 class _StageError(Exception):
     """A flip stage failed (I/O refused, ``ok=False`` returned, or verify false).
@@ -420,7 +446,7 @@ def _default_stage_verifier() -> bool:
 def single_nat_dmz(
     provider: DeviceProvider,
     runner: Runner,
-    armor: ArmorInstaller,
+    armor: ArmorInstaller | None = None,
     *,
     apply: bool = False,
     out_of_band_reachable: bool = True,
@@ -439,6 +465,13 @@ def single_nat_dmz(
     downstream lease + arm the watchdog), and the ``armor`` installer — and
     composes the whole sequence behind
     :func:`~sanctum_cli.devices.rails.guarded_apply`.
+
+    ``armor`` is the :class:`ArmorInstaller` for the ``apply_armor`` stage. A caller
+    (CLI/test) may inject one; when omitted (``None``) the real
+    :class:`~sanctum_cli.devices.armor.SinglenatArmorInstaller` is constructed
+    lazily on the apply path (never on the dry-run/gate-refused paths, which make
+    zero host contact) so a real cutover deploys the kit without every call site
+    hand-building the seam.
 
     * ``apply=False`` (the default) is a **dry-run**: it resolves the DMZ op (so an
       unsupported hub fails legibly) and returns the staged plan, making **ZERO**
@@ -483,6 +516,13 @@ def single_nat_dmz(
         )
         return IntentResult(plan=plan, applied=False, result=result)
 
+    # Gate passed + apply: resolve the armor installer. A caller (CLI/test) may
+    # inject one; otherwise build the real installer NOW (lazily, never on the
+    # dry-run/gate-refused paths above) so the cutover actually deploys the kit
+    # without every call site hand-building the seam. Constructed via the module-
+    # level name so a test can swap it for a recording double (the wiring test).
+    resolved_armor = armor if armor is not None else _default_armor_installer()
+
     verifiers = stage_verifiers or {}
 
     def change(pv: DeviceProvider) -> None:
@@ -506,7 +546,7 @@ def single_nat_dmz(
                 provider=pv,
                 op=op,
                 runner=runner,
-                armor=armor,
+                armor=resolved_armor,
                 verifier=verifier,
             )
             done.append(nxt)
