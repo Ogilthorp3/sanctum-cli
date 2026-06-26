@@ -3,6 +3,8 @@ from __future__ import annotations
 import subprocess
 from unittest.mock import patch
 
+import pytest
+
 from sanctum_cli.net import system
 
 
@@ -69,6 +71,145 @@ def test_make_real_runner_without_gateway_returns_empty_fw() -> None:
         assert runner(("fw_wan_ip",)) == ""
         assert runner(("fw_wan_mac",)) == ""
     probe.assert_not_called()
+
+
+# ─── mutating Firewalla/firerouter tags (the apply path) ─────────────────────
+#
+# The four mutating tags the single-NAT DMZ orchestrator fires
+# (sanctum_cli.devices.intents._RUNNER_*) MUST resolve to real Firewalla SSH
+# commands over the fw key — NOT a silent "". The argv asserted here is derived
+# from the REAL contract: the existing firewalla_wan_via_ssh SSH-options shape
+# (BatchMode/publickey/ConnectTimeout) + the firerouter commands the armor kit's
+# watchdog actually issues (sanctum-singlenat-armor/bin/singlenat-watchdog.sh:
+# `sudo dhclient -r $WAN; sudo dhclient $WAN`, the WAN-dev derivation from
+# `ip route show default`, `sudo bash post_main.sh`), NOT a convenient fake dict.
+
+
+def _ssh_argv_for(tag: tuple[str, ...], *, gateway: str = "10.0.0.1", key: str = "/tmp/k") -> list:
+    """Drive make_real_runner with a MOCKED ssh transport; return the argv it ran.
+
+    Asserts exactly ONE subprocess.run happened (one SSH round-trip per mutating
+    tag) and returns its argv so each test can assert the real contract.
+    """
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    with patch("sanctum_cli.net.system.subprocess.run", side_effect=fake_run):
+        runner = system.make_real_runner(fw_gateway=gateway, fw_key=key)
+        runner(tag)
+    assert len(calls) == 1, f"expected exactly one SSH round-trip for {tag!r}, got {len(calls)}"
+    return calls[0]
+
+
+def _assert_ssh_shape(argv: list, *, key: str = "/tmp/k", gateway: str = "10.0.0.1") -> str:
+    """Assert the SSH-options envelope (key-only, batch, bounded) and return the
+    remote command string (the last argv element). Mirrors firewalla_wan_via_ssh."""
+    assert argv[0] == "ssh"
+    assert "-i" in argv and argv[argv.index("-i") + 1] == key
+    assert "BatchMode=yes" in argv
+    assert "PreferredAuthentications=publickey" in argv
+    assert f"pi@{gateway}" in argv
+    return argv[-1]
+
+
+def test_make_real_runner_wan_dhcp_switches_wan_to_dhcp_over_ssh() -> None:
+    argv = _ssh_argv_for(("wan_dhcp",))
+    remote = _assert_ssh_shape(argv)
+    # Switch WAN PPPoE->DHCP passthrough: derive the WAN dev from the default
+    # route, then release + re-acquire a DHCP lease on it (the watchdog's
+    # fallback_double_nat pattern, minus the hook removal — engaging, not reverting).
+    assert "ip route show default" in remote
+    assert "dhclient -r" in remote
+    assert "dhclient " in remote
+
+
+def test_make_real_runner_lease_observe_returns_the_downstream_wan_ip() -> None:
+    # lease_observe must READ the downstream WAN lease and RETURN the IP for
+    # classification — not fire-and-forget. The SSH stdout carries the address;
+    # the runner parses it out (mirrors firewalla_wan_via_ssh's IP parse).
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 0, stdout="203.0.113.7\n", stderr="")
+
+    with patch("sanctum_cli.net.system.subprocess.run", side_effect=fake_run):
+        runner = system.make_real_runner(fw_gateway="10.0.0.1", fw_key="/tmp/k")
+        out = runner(("lease_observe",))
+    assert out == "203.0.113.7"
+
+
+def test_make_real_runner_lease_observe_reads_wan_ip_over_ssh() -> None:
+    argv = _ssh_argv_for(("lease_observe",))
+    remote = _assert_ssh_shape(argv)
+    # Reads the WAN interface's primary IPv4 (the verify.sh WANIP capture shape).
+    assert "ip" in remote and "addr show" in remote
+    assert "dhclient" not in remote  # pure read — never mutates the lease
+
+
+def test_make_real_runner_dhcp_release_re_leases_over_ssh() -> None:
+    argv = _ssh_argv_for(("dhcp_release",))
+    remote = _assert_ssh_shape(argv)
+    # Re-lease the Firewalla WAN: release then re-acquire (watchdog fallback).
+    assert "dhclient -r" in remote
+    assert "dhclient " in remote
+
+
+def test_make_real_runner_armor_arm_bootstraps_persistence_over_ssh() -> None:
+    argv = _ssh_argv_for(("armor_arm",))
+    remote = _assert_ssh_shape(argv)
+    # Arm the boot-armor persistence (re-run post_main.sh, which (re)installs the
+    # self-asserting DHCP hook + MTU clamp). The README's "run once" step.
+    assert "post_main.sh" in remote
+
+
+def test_make_real_runner_unknown_tag_on_apply_path_raises() -> None:
+    # CRITICAL: an unknown/empty tag the apply path could fire must be a HARD
+    # failure, never a silent "" no-op (which would report a green cutover while
+    # the WAN was never touched and the rails' rollback never fired).
+    runner = system.make_real_runner(fw_gateway="10.0.0.1", fw_key="/tmp/k")
+    with pytest.raises(RuntimeError):
+        runner(("definitely_not_a_real_tag",))
+    with pytest.raises(RuntimeError):
+        runner(())
+
+
+def test_make_real_runner_mutating_tag_without_transport_raises() -> None:
+    # A mutating tag with no fw gateway/key has no way to perform the WAN change;
+    # silently returning "" would be the silent-no-op the council BLOCKED. Hard-fail.
+    runner = system.make_real_runner(fw_gateway=None, fw_key=None)
+    for tag in (("wan_dhcp",), ("lease_observe",), ("dhcp_release",), ("armor_arm",)):
+        with pytest.raises(RuntimeError):
+            runner(tag)
+
+
+def test_make_real_runner_mutating_tag_raises_when_ssh_fails() -> None:
+    # Fail-closed: a non-zero SSH exit on a mutating tag is a real failure the
+    # orchestrator must see (so the rails roll back), never a swallowed "".
+    def fail_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 255, stdout="", stderr="ssh: connect refused\n")
+
+    with patch("sanctum_cli.net.system.subprocess.run", side_effect=fail_run):
+        runner = system.make_real_runner(fw_gateway="10.0.0.1", fw_key="/tmp/k")
+        with pytest.raises(RuntimeError):
+            runner(("wan_dhcp",))
+
+
+def test_runner_implements_every_mutating_tag_the_orchestrator_fires() -> None:
+    # Manifest guard (Contracts at the Boundary): the EXACT set of mutating tags
+    # the single-NAT orchestrator fires must each resolve to a real command in
+    # make_real_runner — derived from the PRODUCER's own constants, so a future
+    # tag rename on one side without the other re-introduces the council-blocked
+    # silent-no-op and fails here instead of in production.
+    from sanctum_cli.devices import intents
+
+    fired = {
+        intents._RUNNER_WAN_DHCP,
+        intents._RUNNER_LEASE_OBSERVE,
+        intents._RUNNER_ARMOR_ARM,
+        intents._RUNNER_DHCP_RELEASE,
+    }
+    assert fired == set(system._FW_MUTATING_REMOTE)
 
 
 def test_firewalla_wan_via_ssh_parses_mac_and_ip() -> None:

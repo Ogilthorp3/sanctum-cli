@@ -23,6 +23,15 @@ _COMMANDS: dict[tuple[str, ...], list[str]] = {
     ("airport_ports",): ["networksetup", "-listallhardwareports"],
 }
 
+# Every tag :func:`real_runner` actually resolves: the host-side command probes
+# above plus the two special-cased probes. The hard-fail-on-unknown path in
+# :func:`make_real_runner` consults this so a *known* host probe still delegates
+# while an unknown apply-path tag raises instead of silently no-op'ing.
+_REAL_RUNNER_TAGS: frozenset[tuple[str, ...]] = frozenset(_COMMANDS) | {
+    ("public_ip",),
+    ("link_speed",),
+}
+
 
 def real_runner(tag: tuple[str, ...]) -> str:
     if tag == ("public_ip",):
@@ -86,17 +95,16 @@ def _title(html: str) -> str:
     return m.group(1).strip() if m else ""
 
 
-def firewalla_wan_via_ssh(gateway: str, key: str, user: str = "pi") -> tuple[str, str]:
-    """SSH to the Firewalla (key-only, read-only) and return (wan_ip, wan_mac).
+def _fw_ssh_argv(gateway: str, key: str, remote: str, *, user: str = "pi") -> list[str]:
+    """Build the key-only Firewalla SSH argv for ``remote`` (the one SSH envelope).
 
-    Returns ("", "") on any failure. Reads the WAN interface's MAC + IPv4.
+    The single source of the SSH-options shape every Firewalla command shares —
+    key-only (no password prompt hang), publickey-only, host-key accept-new, a
+    bounded connect timeout. Read AND mutating callers compose their remote
+    command string and route it through here so the transport envelope never
+    drifts between probe and cutover.
     """
-    remote = (
-        "D=$(ip -o route get 1.1.1.1 2>/dev/null | grep -oE 'dev [a-z0-9.]+' | cut -d' ' -f2); "
-        "cat /sys/class/net/$D/address 2>/dev/null; "
-        "ip -o -4 addr show $D 2>/dev/null | awk '{print $4}' | cut -d/ -f1"
-    )
-    argv = [
+    return [
         "ssh",
         "-i",
         key,
@@ -111,6 +119,19 @@ def firewalla_wan_via_ssh(gateway: str, key: str, user: str = "pi") -> tuple[str
         f"{user}@{gateway}",
         remote,
     ]
+
+
+def firewalla_wan_via_ssh(gateway: str, key: str, user: str = "pi") -> tuple[str, str]:
+    """SSH to the Firewalla (key-only, read-only) and return (wan_ip, wan_mac).
+
+    Returns ("", "") on any failure. Reads the WAN interface's MAC + IPv4.
+    """
+    remote = (
+        "D=$(ip -o route get 1.1.1.1 2>/dev/null | grep -oE 'dev [a-z0-9.]+' | cut -d' ' -f2); "
+        "cat /sys/class/net/$D/address 2>/dev/null; "
+        "ip -o -4 addr show $D 2>/dev/null | awk '{print $4}' | cut -d/ -f1"
+    )
+    argv = _fw_ssh_argv(gateway, key, remote, user=user)
     try:
         proc = subprocess.run(
             argv, capture_output=True, text=True, errors="replace", timeout=12, check=False
@@ -290,10 +311,103 @@ def live_throughput(
     return multi_gbps, single_gbps, inconclusive
 
 
+# ─── single-NAT (Bell Advanced DMZ) mutating Firewalla/firerouter ops ─────────
+#
+# The four mutating tags the single-NAT DMZ orchestrator fires (mirrors
+# sanctum_cli.devices.intents._RUNNER_WAN_DHCP / _LEASE_OBSERVE / _ARMOR_ARM /
+# _DHCP_RELEASE). Each maps to a real firerouter command run on the Firewalla
+# over the fw key. The command strings are authored from the kit's own watchdog
+# (sanctum-singlenat-armor/bin/singlenat-watchdog.sh + singlenat-verify.sh) so
+# the CLI's runner and the armor's self-heal issue the SAME firerouter ops:
+#
+#   * wan_dhcp     — switch the WAN to DHCP/PPPoE passthrough: derive the WAN dev
+#                    from the default route, release + re-acquire a DHCP lease on
+#                    it (the watchdog's fallback_double_nat dhclient pattern,
+#                    WITHOUT the hook removal — this engages the passthrough, it
+#                    does not revert single-NAT).
+#   * lease_observe— READ the downstream WAN's primary IPv4 and RETURN it (the
+#                    verify.sh WANIP capture) so flip.should_retry_apipa can
+#                    classify the lease. The ONE read among the four.
+#   * dhcp_release — re-lease the WAN (release + re-acquire) so the downstream
+#                    router pulls a fresh lease (the rollback re-lease).
+#   * armor_arm    — arm the boot-armor persistence: re-run post_main.sh, which
+#                    (re)installs the self-asserting /32 DHCP hook + MTU clamp
+#                    (the README "run once" step). The launchd bootstrap of the
+#                    Mini watchdog/sentinel is the armor INSTALLER's job (FIX-6 /
+#                    SinglenatArmorInstaller); this tag arms the box-side hook.
+#
+# The WAN-dev derivation is shared (the default route's dev, with a pppoe0/eth0
+# fallback) so every op targets the same interface the box actually routes over.
+_FW_WAN_DEV = (
+    'WAN=$(ip route show default 2>/dev/null | grep -m1 -oE "dev [a-z0-9.]+" | awk "{print \\$2}"); '
+    '[ -z "$WAN" ] && for c in pppoe0 eth0; do [ -e "/sys/class/net/$c" ] && { WAN="$c"; break; }; done'
+)
+# release + re-acquire a DHCP lease on the derived WAN dev (shared by wan_dhcp +
+# dhcp_release — both want the downstream router to pull a fresh DHCP lease).
+_FW_RELEASE_RENEW = 'sudo dhclient -r "$WAN" 2>/dev/null; sudo dhclient "$WAN" 2>/dev/null'
+
+_FW_MUTATING_REMOTE: dict[tuple[str, ...], str] = {
+    ("wan_dhcp",): f"{_FW_WAN_DEV}; {_FW_RELEASE_RENEW}",
+    # Pure READ of the WAN's primary IPv4 — never mutates the lease.
+    ("lease_observe",): (
+        f"{_FW_WAN_DEV}; "
+        'ip -4 -o addr show dev "$WAN" 2>/dev/null | grep -m1 -oE "inet [0-9.]+" | awk "{print \\$2}"'
+    ),
+    ("dhcp_release",): f"{_FW_WAN_DEV}; {_FW_RELEASE_RENEW}",
+    # Re-run the boot-armor (post_main.sh) to (re)install the persistence hook + MTU.
+    ("armor_arm",): "sudo /home/pi/.firewalla/config/post_main.sh 2>/dev/null",
+}
+
+# The tags that READ + RETURN a value (the rest are fire-and-confirm mutations).
+_FW_READBACK_TAGS = frozenset({("lease_observe",)})
+
+
+def _fw_mutate_via_ssh(gateway: str, key: str, tag: tuple[str, ...]) -> str:
+    """Fire one mutating single-NAT firerouter op over the fw key; fail-closed.
+
+    Runs the tag's real remote command on the Firewalla and RAISES
+    :class:`RuntimeError` on any failure (the subprocess could not spawn, timed
+    out, or the remote command returned non-zero) — NEVER a silent "". A
+    swallowed failure on the apply path would report a green cutover while the
+    WAN was never switched and the rails' rollback never fired. For a read-back
+    tag (``lease_observe``) returns the parsed downstream WAN IP (the first IPv4
+    in stdout) so the flip can classify the lease; for the others returns "" on
+    success (the orchestrator inspects only that they did not raise).
+    """
+    remote = _FW_MUTATING_REMOTE[tag]
+    argv = _fw_ssh_argv(gateway, key, remote)
+    try:
+        proc = subprocess.run(
+            argv, capture_output=True, text=True, errors="replace", timeout=30, check=False
+        )
+    except (subprocess.TimeoutExpired, OSError, ValueError) as exc:
+        msg = f"Firewalla single-NAT op {tag[0]!r} failed: SSH transport error ({exc})"
+        raise RuntimeError(msg) from exc
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()
+        msg = f"Firewalla single-NAT op {tag[0]!r} failed (ssh exit {proc.returncode}): {detail}"
+        raise RuntimeError(msg)
+    if tag in _FW_READBACK_TAGS:
+        for line in proc.stdout.splitlines():
+            s = line.strip()
+            if re.fullmatch(r"\d{1,3}(\.\d{1,3}){3}", s):
+                return s
+        return ""  # readback op succeeded but the box reported no lease yet
+    return ""
+
+
 def make_real_runner(*, fw_gateway: str | None, fw_key: str | None) -> Runner:
     """A Runner that serves fw_wan_ip/fw_wan_mac from one cached Firewalla SSH
-    probe (only if a gateway + key are available) and delegates all other tags
-    to real_runner."""
+    probe, fires the four single-NAT mutating ops as real firerouter SSH commands,
+    and delegates all remaining (host-side probe) tags to real_runner.
+
+    Fail-closed on the apply path (the council BLOCK that earned this fix): a
+    mutating single-NAT tag (``wan_dhcp`` / ``lease_observe`` / ``dhcp_release`` /
+    ``armor_arm``) with no fw gateway+key RAISES, and any unknown/empty tag RAISES
+    — never a silent "" that would report a green cutover the box never received.
+    The read tags (``fw_wan_ip`` / ``fw_wan_mac``) and the host-side probe tags
+    keep returning "" on absence (the read/classify path handles empty).
+    """
     cache: dict[str, tuple[str, str]] = {}
 
     def runner(tag: tuple[str, ...]) -> str:
@@ -304,6 +418,25 @@ def make_real_runner(*, fw_gateway: str | None, fw_key: str | None) -> Runner:
                 )
             ip, mac = cache["fw"]
             return ip if tag == ("fw_wan_ip",) else mac
+        if tag in _FW_MUTATING_REMOTE:
+            if not (fw_gateway and fw_key):
+                msg = (
+                    f"single-NAT op {tag[0]!r} needs a Firewalla gateway + SSH key to fire; "
+                    "none resolved — refusing a silent no-op on the apply path"
+                )
+                raise RuntimeError(msg)
+            return _fw_mutate_via_ssh(fw_gateway, fw_key, tag)
+        # Host-side probe tags (traceroute/route/ifconfig/...) are real_runner's.
+        # A tag real_runner ALSO does not know is an unknown apply-path tag — a
+        # hard failure, never a silent "" (the council-blocked no-op).
+        if tag not in _REAL_RUNNER_TAGS:
+            msg = (
+                f"unknown runner tag {tag!r} — refusing a silent no-op. "
+                "Known tags: fw_wan_ip/fw_wan_mac, the single-NAT mutating ops "
+                f"{sorted(t[0] for t in _FW_MUTATING_REMOTE)}, "
+                f"and host probes {sorted(t[0] for t in _REAL_RUNNER_TAGS)}."
+            )
+            raise RuntimeError(msg)
         return real_runner(tag)
 
     return runner
