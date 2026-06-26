@@ -419,7 +419,11 @@ def test_dmz_rollback_drives_dmz_off_even_when_firmware_omits_it(tmp_path: Path)
 
 def test_dmz_reboot_failure_rolls_back(tmp_path: Path) -> None:
     """A stage whose I/O RAISES (the hub rejects the reboot) trips rollback too —
-    a raised change is the worst case the rails exist to catch."""
+    a raised change is the worst case the rails exist to catch.
+
+    With ``reboot_fails`` permanent, the rollback's OWN latch-reboot (FIX-5 b)
+    also fails, so the recovery is honestly reported INCOMPLETE — but the inner
+    DMZ-disable still ran first, so the dangerous leaf is off."""
     from sanctum_cli.devices.intents import single_nat_dmz
 
     hub, runner, armor = FakeHub(), FakeRunner(), FakeArmor()
@@ -437,8 +441,12 @@ def test_dmz_reboot_failure_rolls_back(tmp_path: Path) -> None:
     assert res.applied is True
     assert res.result is not None
     assert res.result.ok is False
-    assert hub.reboot_calls == 1  # it tried
+    # Two reboots attempted: the cutover's hub_reboot stage, then the rollback's
+    # own latch-reboot — both rejected by this hub, so recovery is incomplete.
+    assert hub.reboot_calls == 2
     assert hub.rollback_calls == 1  # and unwound
+    # The inner DMZ-disable ran before the latch-reboot was attempted, so the
+    # dangerous leaf is off even though the latch-reboot then failed.
     assert hub.get(DMZ_PATH) == "off"
     # Armor must NOT have been installed if the reboot (earlier stage) failed.
     assert armor.installed == 0
@@ -641,3 +649,154 @@ def test_dmz_unsupported_provider_raises_legibly() -> None:
         single_nat_dmz(hub, runner, armor, apply=False)
     assert "dmz" in str(ei.value).lower()
     assert hub.set_calls == []
+
+
+# ── _DmzRollbackProvider.rollback: HONEST, reboot-aware, verified recovery ────
+#
+# The rails own the rollback contract, but the Advanced-DMZ unwind is more than a
+# disable + a blind re-lease. Engaging DMZ needs a hub reboot to LATCH, so the
+# DISABLE needs one too; and a swallowed re-lease that left the WAN still-APIPA
+# (or never came back) must NOT be reported green — it has stranded the household
+# dark and the operator needs the manual-recovery signal. These tests pin three
+# contracts the council blocked the build on (FIX-5 a + b):
+#
+#   (a) rollback with a still-APIPA re-lease  -> ok=False (manual recovery)
+#   (b) rollback reboots the hub BEFORE the re-lease, then verifies recovery
+#   ()  rollback that recovers a working double-NAT lease -> ok=True
+#
+# The recovery verification is the REAL ``sanctum_cli.net.verify.verify`` over the
+# rollback runner (a recovered network is double-NAT -> Verdict.NOT_YET; APIPA is
+# Verdict.APIPA_ROLLBACK), so the green/red verdict is derived from the consumer's
+# real contract — never a lambda:True (honest-verify).
+
+
+class EventHub(FakeHub):
+    """A FakeHub that appends every reboot/rollback to a SHARED ordered event log.
+
+    The rollback recovery contract is an ORDERING claim — disable DMZ, reboot the
+    hub so the disable latches, THEN re-lease downstream — so a test must be able
+    to assert reboot happened strictly before the re-lease. The hub and the runner
+    write into the same ``events`` list so the relative order of ``hub:reboot`` and
+    ``runner:dhcp_release`` is observable (mirrors the real sequencing: the hub
+    reboot and the Firewalla re-lease are two different transports).
+    """
+
+    def __init__(self, events: list[str]) -> None:
+        super().__init__()
+        self._events = events
+
+    def reboot(self) -> OpResult:
+        self._events.append("hub:reboot")
+        return super().reboot()
+
+    def rollback(self, snap: Snapshot) -> OpResult:
+        self._events.append("hub:rollback")
+        return super().rollback(snap)
+
+
+class RecoveryRunner:
+    """Records every tag (into a shared event log) and serves a SCRIPTED lease.
+
+    Models the REAL recovery transport: the same runner serves ``lease_observe``
+    AND ``fw_wan_ip`` (what ``verify.verify`` reads) plus ``traceroute`` (hop-2).
+    The lease queue is consumed one per ``lease_observe``/``fw_wan_ip`` so a test
+    can script "APIPA persists" vs "recovered to a double-NAT private lease". The
+    traceroute is empty (no hop-2) so ``classify_nat`` decides purely on the WAN
+    IP — a private WAN -> Nat.DOUBLE -> Verdict.NOT_YET (the recovered state), an
+    APIPA WAN -> Verdict.APIPA_ROLLBACK (recovery failed).
+    """
+
+    def __init__(self, leases: list[str], events: list[str]) -> None:
+        self.calls: list[tuple[str, ...]] = []
+        self._leases = list(leases)
+        self._events = events
+
+    def __call__(self, tag: tuple[str, ...]) -> str:
+        self.calls.append(tag)
+        if tag and tag[0] in ("fw_wan_ip", "lease_observe"):
+            self._events.append(f"runner:{tag[0]}")
+            if len(self._leases) > 1:
+                return self._leases.pop(0)
+            return self._leases[0] if self._leases else ""
+        if tag and tag[0] == "dhcp_release":
+            self._events.append("runner:dhcp_release")
+        return ""
+
+
+def test_rollback_with_persistent_apipa_release_reports_not_ok() -> None:
+    """(a) A re-lease that leaves the downstream WAN STILL APIPA must report
+    ok=False — a swallowed re-lease that did not bring the WAN back to a working
+    non-APIPA lease has stranded the household, and reporting green would hide a
+    dark network from the operator (no manual-recovery surfaced)."""
+    from sanctum_cli.devices.intents import _DmzRollbackProvider
+
+    events: list[str] = []
+    hub = EventHub(events)
+    # DMZ is currently engaged (a prior cutover). The re-lease NEVER clears APIPA.
+    hub._v[DMZ_PATH] = "on"
+    runner = RecoveryRunner(["169.254.10.5"], events)
+    wrapped = _DmzRollbackProvider(hub, runner)
+
+    snap = Snapshot(brand=hub.brand, taken_at="t", data={DMZ_PATH: "off"})
+    result = wrapped.rollback(snap)
+
+    # The inner rollback DID disable DMZ (the dangerous bit is off) ...
+    assert hub.get(DMZ_PATH) == "off"
+    # ... but the WAN never recovered, so the OVERALL rollback is NOT ok.
+    assert result.ok is False
+    assert "apipa" in result.detail.lower() or "did not" in result.detail.lower()
+
+
+def test_rollback_reboots_before_release_then_verifies_double_nat() -> None:
+    """(b) Engaging DMZ latched via a reboot, so disabling it must reboot too:
+    the rollback disables DMZ, REBOOTS the hub, THEN re-leases DHCP, and only then
+    verifies the WAN recovered to a working double-NAT lease before reporting ok."""
+    from sanctum_cli.devices.intents import _DmzRollbackProvider
+
+    events: list[str] = []
+    hub = EventHub(events)
+    hub._v[DMZ_PATH] = "on"
+    # The downstream recovers to a private (double-NAT) lease — the expected post-
+    # rollback state once DMZ is off and the WAN re-leases behind the hub's NAT.
+    runner = RecoveryRunner(["192.168.2.20"], events)
+    wrapped = _DmzRollbackProvider(hub, runner)
+
+    snap = Snapshot(brand=hub.brand, taken_at="t", data={DMZ_PATH: "off"})
+    result = wrapped.rollback(snap)
+
+    # Recovered to a working double-NAT lease → ok=True.
+    assert result.ok is True
+    assert hub.get(DMZ_PATH) == "off"
+    assert hub.reboot_calls == 1
+    # Ordering: the hub reboot fired strictly BEFORE the downstream re-lease so the
+    # DMZ-disable had latched before the router tried to pull its recovered lease.
+    assert "hub:reboot" in events
+    assert "runner:dhcp_release" in events
+    assert events.index("hub:reboot") < events.index("runner:dhcp_release")
+
+
+def test_rollback_when_inner_disable_fails_does_not_reboot_or_release() -> None:
+    """If the inner DMZ-disable itself fails, the rollback surfaces that failure
+    and must NOT reboot or re-lease on top of an un-disabled DMZ — there is nothing
+    safe to recover to while the hub is still in Advanced DMZ."""
+    from sanctum_cli.devices.intents import _DmzRollbackProvider
+
+    events: list[str] = []
+
+    class FailingRollbackHub(EventHub):
+        def rollback(self, snap: Snapshot) -> OpResult:
+            self._events.append("hub:rollback")
+            return OpResult(ok=False, detail="hub rejected the DMZ-disable write")
+
+    hub = FailingRollbackHub(events)
+    hub._v[DMZ_PATH] = "on"
+    runner = RecoveryRunner(["192.168.2.20"], events)
+    wrapped = _DmzRollbackProvider(hub, runner)
+
+    snap = Snapshot(brand=hub.brand, taken_at="t", data={DMZ_PATH: "off"})
+    result = wrapped.rollback(snap)
+
+    assert result.ok is False
+    # No reboot, no re-lease on top of a still-engaged DMZ.
+    assert hub.reboot_calls == 0
+    assert not any(t and t[0] == "dhcp_release" for t in runner.calls)

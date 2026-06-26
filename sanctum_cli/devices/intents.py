@@ -316,8 +316,74 @@ def _resolve_dmz_op(provider: DeviceProvider) -> CapabilityOp:
     return op
 
 
+# Surfaced verbatim when a rollback could not bring the WAN back — the operator
+# must know the household is dark and how to recover by hand (mirrors the rails'
+# own MANUAL_RECOVERY_FIX wording).
+_MANUAL_RECOVERY = (
+    "recover by hand: open the hub admin UI, confirm Advanced DMZ is OFF, reboot "
+    "the hub, and re-lease the downstream router's WAN until it pulls a lease."
+)
+
+# The capabilities a single-NAT cutover can engage — the SAME two leaves the real
+# Sagemcom provider lists in ``_MUTATED_XPATHS``: the old ``single_nat`` flipped
+# bridge mode, the ``single_nat_dmz`` orchestrator engages Advanced DMZ. A rollback
+# that restores the captured pre-cutover baseline must disengage BOTH, not just the
+# one the CLI happened to resolve — otherwise a prior bridge-mode flip is left
+# silently engaged and the household stays behind a single NAT.
+_SINGLE_NAT_CAPABILITIES = (Capability.BRIDGE_MODE, Capability.DMZ)
+
+
+def disengaged_baseline_snapshot(provider: DeviceProvider) -> Snapshot:
+    """Build the captured pre-cutover baseline: every single-NAT leaf disengaged.
+
+    The honest substitute (FIX-5 c) for the CLI ``--rollback`` path's old
+    fabricated single-key ``{dmz_path: disengaged}`` dict. A standalone
+    ``--rollback`` has no in-process snapshot from the apply run to restore, so it
+    must reconstruct the *pre-cutover* baseline — the state every single-NAT-
+    mutating leaf was in before any cutover engaged it: **off**.
+
+    Built through the provider's brand-agnostic :meth:`capability_op` seam for each
+    of :data:`_SINGLE_NAT_CAPABILITIES` (bridge mode + Advanced DMZ — the two the
+    real provider lists in ``_MUTATED_XPATHS``), so a brand whose engaged value is
+    not literally ``"on"`` still gets the correct disengaged value and so adding a
+    brand needs no change here. The resulting snapshot disengages BOTH leaves — the
+    same coverage the rails' pre-cutover ``provider.snapshot()`` guarantees — rather
+    than leaving a prior bridge-mode flip silently engaged.
+    """
+    data: dict[str, str] = {}
+    for capability in _SINGLE_NAT_CAPABILITIES:
+        op = provider.capability_op(capability)
+        if op is None:
+            continue
+        # The disengaged value is the opposite of the brand's engaged sentinel.
+        data[op.path] = "off" if op.engaged == "on" else "on"
+    return Snapshot(brand=provider.brand, taken_at="pre-cutover-baseline", data=data)
+
+
+def _verify_recovered_double_nat(runner: Runner) -> tuple[bool, str]:
+    """Did the WAN come back to a working (non-APIPA) double-NAT lease post-rollback?
+
+    The rollback's HONEST recovery check (FIX-5 a). After disabling DMZ + rebooting
+    + re-leasing, a recovered household is back behind the hub's NAT — double-NAT —
+    so the REAL :func:`sanctum_cli.net.verify.verify` over the runner returns
+    :attr:`Verdict.NOT_YET` ("still double-NAT"), which here is the *success* state.
+    Anything else is a failed recovery:
+
+    * :attr:`Verdict.APIPA_ROLLBACK` — the WAN is self-assigned APIPA: the re-lease
+      did not bring it back at all (the household is dark).
+    * :attr:`Verdict.VERIFIED` — still a single-NAT public WAN: the DMZ-disable did
+      not actually take (the hub is still passing the public lease through).
+    * :attr:`Verdict.INCONCLUSIVE` — no lease / could not confirm.
+
+    Returns ``(recovered, reason)``; the verdict is derived from the consumer's
+    real ``verify`` contract, never a ``lambda: True`` (honest-verify).
+    """
+    verdict, reason = verify.verify(runner=runner)
+    return verdict is Verdict.NOT_YET, reason
+
+
 class _DmzRollbackProvider:
-    """Wraps the hub so ``guarded_apply``'s rollback ALSO re-leases DHCP.
+    """Wraps the hub so ``guarded_apply``'s rollback re-leases + verifies recovery.
 
     The rails own the rollback contract (snapshot → on-failure ``rollback(snap)``),
     but the Advanced-DMZ unwind is two steps, not one: *disable DMZ* (the hub
@@ -341,19 +407,68 @@ class _DmzRollbackProvider:
         return getattr(self._inner, name)
 
     def rollback(self, snap: Snapshot) -> OpResult:
-        """Disable DMZ (inner rollback) then re-lease DHCP downstream.
+        """Disable DMZ → reboot the hub → re-lease DHCP → verify the WAN recovered.
 
-        Reports the inner rollback's ``ok`` so a failed DMZ-disable still surfaces
-        as a failed restore (the rails then emit the manual-recovery instruction).
-        The DHCP re-lease is best-effort on top of a *successful* DMZ-disable: it
-        is the recovery action that brings the downstream WAN back, but a re-lease
-        hiccup must not mask the fact that DMZ WAS disabled (the dangerous bit).
+        The Advanced-DMZ unwind is NOT a disable + a blind re-lease. Two things the
+        old path got wrong (FIX-5 a + b) and that left the household dark while
+        reporting green:
+
+        * **Engaging Advanced DMZ needs a hub reboot to latch — so does disabling
+          it.** After the inner rollback restores the DMZ leaf to ``"off"`` we
+          ``reboot()`` the hub BEFORE the downstream re-lease, so the disable has
+          actually taken effect when the router tries to pull its recovered lease.
+          A re-lease against a hub that is still latched in DMZ would just re-pull
+          the single-NAT (or APIPA) address.
+        * **A swallowed re-lease that did not bring the WAN back is NOT a
+          successful rollback.** After the re-lease we re-read + classify the
+          downstream WAN via the REAL :func:`sanctum_cli.net.verify.verify` over the
+          runner: a recovered network is double-NAT (the hub is NATing again →
+          :attr:`Verdict.NOT_YET`); an APIPA / no-lease WAN
+          (:attr:`Verdict.APIPA_ROLLBACK` / inconclusive) means recovery FAILED and
+          we report ``ok=False`` so the rails surface manual recovery. Reporting a
+          swallowed re-lease as green hid a dark network from the operator.
+
+        The inner DMZ-disable's ``ok`` is the hard gate: a failed disable surfaces
+        immediately (and we do NOT reboot or re-lease on top of a still-engaged
+        DMZ — there is nothing safe to recover *to* while the hub is in Advanced
+        DMZ). Only on a successful disable do we reboot → re-lease → verify.
         """
         result = self._inner.rollback(snap)
-        if result.ok:
-            # DMZ is back off — now re-pull a downstream lease so the WAN recovers.
-            self._runner(_RUNNER_DHCP_RELEASE)
-        return result
+        if not result.ok:
+            # The dangerous leaf is still engaged — surface the failed disable as-is
+            # and do NOT reboot/re-lease on top of an un-disabled DMZ.
+            return result
+        # DMZ is back off. Reboot so the disable LATCHES before the downstream
+        # re-lease (engaging DMZ needed a reboot; disabling it needs one too).
+        reboot = getattr(self._inner, "reboot", None)
+        if callable(reboot):
+            rb = reboot()
+            if isinstance(rb, OpResult) and not rb.ok:
+                return OpResult(
+                    ok=False,
+                    detail=(
+                        f"rollback INCOMPLETE: DMZ disabled but the hub rejected the "
+                        f"reboot needed to latch it ({rb.detail}). {_MANUAL_RECOVERY}"
+                    ),
+                )
+        # Now re-pull a downstream lease so the WAN recovers behind the hub's NAT.
+        self._runner(_RUNNER_DHCP_RELEASE)
+        # HONEST recovery check: re-read + classify the downstream WAN. A swallowed
+        # re-lease that left the WAN APIPA/none did NOT recover the household.
+        recovered, why = _verify_recovered_double_nat(self._runner)
+        if not recovered:
+            return OpResult(
+                ok=False,
+                detail=(
+                    f"rollback INCOMPLETE: DMZ disabled + hub rebooted, but the WAN "
+                    f"did not return to a working (non-APIPA) lease — {why}. "
+                    f"{_MANUAL_RECOVERY}"
+                ),
+            )
+        return OpResult(
+            ok=True,
+            detail=f"rolled back: DMZ disabled, hub rebooted, WAN recovered ({why})",
+        )
 
 
 def _observe_lease(runner: Runner) -> None:

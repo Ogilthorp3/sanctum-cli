@@ -36,7 +36,11 @@ if TYPE_CHECKING:
 
 runner = CliRunner()
 
-# The Bell Advanced-DMZ leaf the cutover engages (the brand's DMZ capability op).
+# The Bell single-NAT leaves: the bridge-mode leaf the old ``single_nat`` flipped
+# AND the Advanced-DMZ leaf the cutover engages. BOTH are single-NAT-mutating
+# leaves the real provider lists in ``_MUTATED_XPATHS`` — a rollback that restores
+# the CAPTURED pre-cutover baseline disengages BOTH, not just the one DMZ leaf.
+BRIDGE_PATH = "Device/Services/BellNetworkCfg/SetBridgeMode"
 DMZ_PATH = "Device/Services/BellNetworkCfg/AdvancedDMZ"
 
 
@@ -44,7 +48,14 @@ class FakeHub:
     """In-memory Sagemcom-shaped hub the CLI drives in place of a real Bell hub.
 
     Records set/reboot/rollback so the dry-run can be proven to make ZERO writes
-    and the apply/rollback paths can be proven to route through the rails.
+    and the apply/rollback paths can be proven to route through the rails. It
+    advertises BOTH the bridge-mode and the Advanced-DMZ capability ops (the real
+    Sagemcom provider does) so a rollback that restores the captured pre-cutover
+    snapshot can be proven to disengage both single-NAT leaves, not just DMZ.
+
+    ``rollback`` re-issues a ``set`` per captured leaf (driving the recorded write
+    path), so "rollback drove DMZ off" is proven from a real restore — not a dict
+    swap that would silently lose an omitted key.
     """
 
     kind = "hub"
@@ -55,6 +66,7 @@ class FakeHub:
         self.set_calls: list[tuple[str, str]] = []
         self.reboot_calls = 0
         self.rollback_calls = 0
+        self.snapshots: list[Snapshot] = []
         self.connected = False
         self.disconnected = False
 
@@ -82,31 +94,45 @@ class FakeHub:
         return OpResult(ok=True, detail="reboot issued")
 
     def capabilities(self) -> set[Capability]:
-        return {Capability.READ, Capability.SET, Capability.DMZ, Capability.REBOOT}
+        return {
+            Capability.READ,
+            Capability.SET,
+            Capability.BRIDGE_MODE,
+            Capability.DMZ,
+            Capability.REBOOT,
+        }
 
     def capability_op(self, capability: Capability) -> CapabilityOp | None:
         if capability is Capability.DMZ:
             return CapabilityOp(path=DMZ_PATH, engaged="on")
+        if capability is Capability.BRIDGE_MODE:
+            return CapabilityOp(path=BRIDGE_PATH, engaged="on")
         return None
 
     def snapshot(self, scope: str | None = None) -> Snapshot:
-        return Snapshot(brand=self.brand, taken_at="t", data=dict(self._v))
+        snap = Snapshot(brand=self.brand, taken_at="t", data=dict(self._v))
+        self.snapshots.append(snap)
+        return snap
 
     def rollback(self, snap: Snapshot) -> OpResult:
         self.rollback_calls += 1
-        self._v = dict(snap.data)
-        return OpResult(ok=True, detail="rolled back DMZ")
+        if not snap.data:
+            return OpResult(ok=False, detail="rollback failed: no restorable baseline")
+        for path, value in snap.data.items():
+            self.set(path, value)
+        return OpResult(ok=True, detail=f"rolled back {len(snap.data)} key(s)")
 
 
 class FakeRunner:
-    """Records every Firewalla runner op; serves a scripted public lease.
+    """Records every Firewalla runner op; serves a scripted lease.
 
     The default ``wan_ip`` is a genuinely-GLOBAL Bell address (the same one the
     net-layer ``fixtures.SINGLE_NAT`` scenario uses), NOT a documentation/test-net
     address. RFC-5737 ranges like 203.0.113.x are classified ``is_private`` by
     Python's ``ipaddress`` — so the REAL ``verify.verify`` / ``classify_nat``
-    probes the CLI now wires would (correctly) treat them as double-NAT and roll
-    back. The fixture must therefore model an actual public single-NAT WAN.
+    probes the CLI wires would (correctly) treat them as double-NAT. The apply
+    path wants a public single-NAT WAN; the rollback path wants the RECOVERED
+    double-NAT (private) WAN — a test scripts the right one.
     """
 
     def __init__(self, wan_ip: str = "70.53.241.21") -> None:
@@ -301,8 +327,14 @@ def test_net_single_nat_apply_apipa_lease_rolls_back_nonzero(
 def test_net_single_nat_rollback_calls_rollback_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`--rollback` undoes the cutover: disables DMZ and re-leases DHCP."""
-    hub, fw, armor = FakeHub(), FakeRunner(), FakeArmor()
+    """`--rollback` undoes the cutover: disables DMZ, reboots to latch, re-leases
+    DHCP, and verifies the WAN recovered to a working double-NAT lease.
+
+    The runner serves a RECOVERED double-NAT (private) lease — the real post-
+    rollback state once DMZ is off and the WAN re-leases behind the hub's NAT — so
+    the honest recovery probe (``verify.verify`` → ``Verdict.NOT_YET``) passes."""
+    # Recovered double-NAT WAN (private) — what the runner reads AFTER rollback.
+    hub, fw, armor = FakeHub(), FakeRunner(wan_ip="192.168.30.2"), FakeArmor()
     # Pretend the hub is currently in DMZ (a prior cutover); rollback returns it.
     hub._v[DMZ_PATH] = "on"
     _wire(monkeypatch, hub=hub, fw=fw, armor=armor)
@@ -311,11 +343,89 @@ def test_net_single_nat_rollback_calls_rollback_path(
     # The provider's rollback ran (DMZ disabled) ...
     assert hub.rollback_calls == 1
     assert hub.get(DMZ_PATH) == "off"
+    # ... it rebooted the hub so the disable latched (FIX-5 b) ...
+    assert hub.reboot_calls == 1
     # ... and the downstream DHCP re-lease fired so the WAN recovers.
     assert any(tag and "release" in tag[0] for tag in fw.calls)
     # A rollback fires no DMZ-engage / armor install.
     assert (DMZ_PATH, "on") not in hub.set_calls
     assert armor.installed == 0
+
+
+def test_net_single_nat_rollback_reboots_before_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`--rollback` must reboot the hub BEFORE re-leasing DHCP (FIX-5 b): the
+    DMZ-disable latches via a reboot, so a re-lease fired before the reboot would
+    just re-pull the still-engaged single-NAT address. We assert ordering by having
+    the hub's reboot record into the SAME event log the runner writes its tags to."""
+    events: list[str] = []
+
+    class EventHub(FakeHub):
+        def reboot(self) -> OpResult:
+            events.append("hub:reboot")
+            return super().reboot()
+
+    class EventRunner(FakeRunner):
+        def __call__(self, tag: tuple[str, ...]) -> str:
+            if tag and tag[0] == "dhcp_release":
+                events.append("runner:dhcp_release")
+            return super().__call__(tag)
+
+    hub = EventHub()
+    hub._v[DMZ_PATH] = "on"
+    fw, armor = EventRunner(wan_ip="192.168.30.2"), FakeArmor()
+    _wire(monkeypatch, hub=hub, fw=fw, armor=armor)
+    result = runner.invoke(app, ["net", "single-nat", "--rollback", "--force"])
+    assert result.exit_code == 0, result.stdout
+    assert "hub:reboot" in events
+    assert "runner:dhcp_release" in events
+    # The reboot fired strictly before the downstream re-lease.
+    assert events.index("hub:reboot") < events.index("runner:dhcp_release")
+
+
+def test_net_single_nat_rollback_with_persistent_apipa_exits_nonzero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`--rollback` whose re-lease leaves the WAN STILL APIPA must exit non-zero
+    (FIX-5 a): the household is dark and the operator needs the manual-recovery
+    signal, not a green ``rolled back`` on a WAN that never came back."""
+    hub, fw, armor = FakeHub(), FakeRunner(wan_ip="169.254.5.5"), FakeArmor()
+    hub._v[DMZ_PATH] = "on"
+    _wire(monkeypatch, hub=hub, fw=fw, armor=armor)
+    result = runner.invoke(app, ["net", "single-nat", "--rollback", "--force"])
+    assert result.exit_code != 0, result.stdout
+    out = result.stdout.lower()
+    assert "incomplete" in out or "recover" in out
+    # The DMZ-disable still ran first (the dangerous leaf is off) ...
+    assert hub.get(DMZ_PATH) == "off"
+    # ... but the WAN never recovered, so it is NOT reported as a clean rollback.
+
+
+def test_net_single_nat_rollback_restores_captured_snapshot_not_fabricated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`--rollback` must restore the CAPTURED pre-cutover snapshot (every single-NAT
+    leaf disengaged), NOT a fabricated ``{dmz_path: disengaged}`` (FIX-5 c).
+
+    A prior cutover could have engaged BOTH the bridge-mode leaf (old ``single_nat``)
+    AND the Advanced-DMZ leaf. A fabricated single-key dict only disables DMZ and
+    silently leaves bridge mode ON — the household still behind a single NAT. The
+    captured baseline restores BOTH leaves to off, so a rollback drives BOTH writes.
+    """
+    hub, fw, armor = FakeHub(), FakeRunner(wan_ip="192.168.30.2"), FakeArmor()
+    # Both single-NAT leaves currently engaged (a prior cutover left them on).
+    hub._v[DMZ_PATH] = "on"
+    hub._v[BRIDGE_PATH] = "on"
+    _wire(monkeypatch, hub=hub, fw=fw, armor=armor)
+    result = runner.invoke(app, ["net", "single-nat", "--rollback", "--force"])
+    assert result.exit_code == 0, result.stdout
+    # The captured baseline disengaged BOTH leaves — proof it is not the fabricated
+    # single-key {dmz: off} dict (which would leave bridge mode stuck on).
+    assert (DMZ_PATH, "off") in hub.set_calls
+    assert (BRIDGE_PATH, "off") in hub.set_calls
+    assert hub.get(DMZ_PATH) == "off"
+    assert hub.get(BRIDGE_PATH) == "off"
 
 
 # ── deprecation: old SetBridgeMode hub single-nat redirects ───────────────────

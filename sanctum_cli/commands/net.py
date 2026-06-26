@@ -21,7 +21,6 @@ from sanctum_cli.devices.base import (
     DeviceError,
     NetContext,
     OpResult,
-    Snapshot,
 )
 from sanctum_cli.errors import SanctumError
 from sanctum_cli.net import detect, playbooks, render, safety, speedtest, system, verify
@@ -744,12 +743,16 @@ def net_single_nat(
 def _net_single_nat_rollback(*, force: bool) -> None:
     """Undo a prior single-NAT cutover: disable Advanced DMZ + re-lease DHCP.
 
-    The mirror image of the apply path — it drives the SAME audited rollback the
-    rails use on a failed stage (:class:`intents._DmzRollbackProvider.rollback`:
-    inner provider rollback to disable DMZ, then a downstream DHCP re-lease so the
-    WAN recovers to double-NAT). It does NOT re-run the staged flip; it restores
-    the DMZ leaf to its disengaged value and re-leases. ``--force`` waives the
-    confirm prompt; without it the operator is asked first.
+    The mirror image of the apply path — it drives the SAME audited, reboot-aware,
+    verified rollback the rails use on a failed stage
+    (:class:`intents._DmzRollbackProvider.rollback`: restore the disengaged
+    baseline → reboot to latch the disable → re-lease DHCP → verify the WAN
+    recovered to a working double-NAT lease). It does NOT re-run the staged flip; it
+    restores the CAPTURED pre-cutover baseline (every single-NAT leaf disengaged via
+    :func:`intents.disengaged_baseline_snapshot` — bridge mode AND Advanced DMZ, not
+    a fabricated single-key dict that would leave a prior bridge-mode flip silently
+    engaged) and re-leases. ``--force`` waives the confirm prompt; without it the
+    operator is asked first.
     """
     runner = _build_runner()
     try:
@@ -762,10 +765,6 @@ def _net_single_nat_rollback(*, force: bool) -> None:
                 )
                 _report(exc)
                 raise typer.Exit(code=int(exc.exit_code))
-            # The value that DISENGAGES the DMZ capability (the brand's engaged
-            # sentinel is op.engaged; the off state is the other one). Derive it so
-            # a brand whose engaged value is not literally "on" still disengages.
-            disengaged = "off" if op.engaged == "on" else "on"
 
             if not force and not typer.confirm(
                 f"Disable Advanced DMZ on {provider.brand} and re-lease DHCP "
@@ -774,11 +773,13 @@ def _net_single_nat_rollback(*, force: bool) -> None:
                 console.print("No changes made.")
                 return
 
-            # Restore the DMZ leaf to its disengaged baseline, then re-lease DHCP —
-            # through the same _DmzRollbackProvider used by the rails so the unwind
-            # is one audited path (disable DMZ → re-lease), not two ad-hoc calls.
+            # Restore the CAPTURED pre-cutover baseline (every single-NAT leaf
+            # disengaged), then reboot → re-lease → verify recovery — through the
+            # same _DmzRollbackProvider the rails use so the unwind is ONE audited,
+            # reboot-aware, verified path (FIX-5 a/b/c), not a fabricated single-key
+            # dict + a blind re-lease that reports green on a still-dark WAN.
             wrapped = intents._DmzRollbackProvider(provider, runner)
-            snap = Snapshot(brand=provider.brand, taken_at="rollback", data={op.path: disengaged})
+            snap = intents.disengaged_baseline_snapshot(provider)
             result: OpResult = wrapped.rollback(snap)
     except SanctumError as exc:
         _report(exc)
