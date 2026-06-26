@@ -310,6 +310,38 @@ def _post_bridge_json(path: str, body: dict[str, Any]) -> dict[str, Any] | None:
         return None
 
 
+def _delete_bridge_json(path: str) -> dict[str, Any] | None:
+    """DELETE a bridge endpoint; ``None`` on any failure.
+
+    The DELETE counterpart to :func:`_post_bridge_json`, used by the
+    ``DELETE /policy/:pid`` and ``DELETE /dns/:hostname`` ops. Same fail-soft
+    contract: a non-2xx (the bridge answers ``500 {success:false}`` when a delete
+    fails), a missing token, or a transport error returns ``None`` so the caller
+    reports ``ok=False`` rather than raising mid-mutation. The bridge DELETE routes
+    carry NO request body (see ``firewalla-bridge.js`` + the production
+    ``screen_time._bridge_request``, which sends no ``json`` on DELETE), so none is
+    sent. Tests monkeypatch the transport so no write ever reaches live gear.
+    """
+    token = _read_bridge_token()
+    if not token:
+        return None
+    # Own the encoding at the boundary (exactly once) — a '%'-bearing id in the
+    # mutate path must address the right record, not a server-side mis-decode.
+    safe_path = _encode_path(path)
+    try:
+        with httpx.Client(transport=_bridge_transport(), timeout=_HTTP_TIMEOUT_S) as client:
+            resp = client.delete(
+                f"{_bridge_url()}{safe_path}",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        if resp.status_code // 100 != 2:
+            return None
+        data = resp.json()
+        return data if isinstance(data, dict) else None
+    except (httpx.HTTPError, ValueError):
+        return None
+
+
 def _ssh_port_open() -> bool:
     """Read-only fingerprint: is ``firewalla.local:22`` reachable?
 
@@ -419,14 +451,49 @@ class FirewallaProvider:
         return json.dumps(data, separators=(",", ":"), ensure_ascii=False)
 
     def set(self, path: str, value: str) -> OpResult:
-        """Write one value to a bridge endpoint, returning before/after.
+        """Write to a bridge route, the body parsed from ``value`` (route-correct JSON).
 
-        The before is a best-effort read of the same path (so the audit log
-        carries the prior state); the write is a bridge ``POST`` with a
-        ``{"value": ...}`` body. A bridge that refuses (``None`` from the POST)
-        yields ``ok=False`` rather than raising — the rails treat that as a
-        failed apply and trip rollback. This op is composed behind
-        ``guarded_apply`` at the intent layer; it is never auto-fired.
+        The Firewalla bridge exposes NO generic single-value route — EVERY mutate is
+        a *structured* POST (per-device policy/rules, feature toggle, box op) keyed on
+        named body fields. The prior code wrapped the value in ``{"value": ...}``, a
+        shape that matches almost no bridge route, so the write silently addressed
+        nothing. So the Protocol's ``set(path, value)`` now interprets ``value`` as the
+        JSON request body the target route expects (e.g.
+        ``set("/host/<mac>/policy", '{"family": 1}')``) and rides the SAME route-correct
+        POST as :meth:`op`. A ``value`` that is not a JSON object yields ``ok=False``
+        with a legible detail (no phantom ``{"value": ...}`` write), never a green
+        result on a route that ignored the body. Prefer the named ops
+        (:meth:`device_policy` / :meth:`device_block` / …) — they own the route + body
+        so a caller never hand-builds either.
+        """
+        self._require_connected()
+        try:
+            body = json.loads(value)
+        except (json.JSONDecodeError, TypeError):
+            return OpResult(
+                ok=False,
+                detail=(
+                    f"set {path}: value must be a JSON body for the bridge route "
+                    "(the bridge has no generic {\"value\": …} route)"
+                ),
+            )
+        if not isinstance(body, dict):
+            return OpResult(ok=False, detail=f"set {path}: body must be a JSON object")
+        return self.op(path, body)
+
+    def op(self, path: str, body: dict[str, Any] | None = None) -> OpResult:
+        """Generic route-correct ``POST`` escape hatch onto ANY bridge POST route.
+
+        The Firewalla counterpart to Sagemcom's ``action`` escape hatch: it POSTs an
+        arbitrary, caller-shaped JSON ``body`` to ``path`` so every bridge POST route
+        — ``/host/:mac/policy|rules|pause|unpause|wake``, ``/feature/:name/enable``,
+        ``/dns``, ``/alarm/:id/ignore``, ``/box/*``, ``/speedtest`` — is reachable
+        with the body that route actually reads (NOT the prior ``{"value": …}`` wrapper
+        that matched none). ``body=None`` posts ``{}`` (the bodyless routes, matching the
+        production caller's ``json=(data or {})``). A bridge that refuses (``None`` from
+        the POST seam — non-2xx / missing token / transport error) yields ``ok=False``
+        rather than raising, so the rails trip rollback. Composed behind
+        ``guarded_apply`` at the intent layer; never auto-fired.
         """
         self._require_connected()
         before_data = _fetch_bridge_json(path)
@@ -435,29 +502,169 @@ class FirewallaProvider:
             if before_data is not None
             else None
         )
-        result = _post_bridge_json(path, {"value": value})
+        result = _post_bridge_json(path, body or {})
         if result is None:
+            return OpResult(ok=False, detail=f"bridge refused POST {path}", before=before)
+        after = json.dumps(result, separators=(",", ":"), ensure_ascii=False)
+        return OpResult(ok=True, detail=f"POST {path}", before=before, after=after)
+
+    def _delete_op(self, path: str) -> OpResult:
+        """Generic route-correct ``DELETE`` for ``/policy/:pid`` + ``/dns/:hostname``.
+
+        The DELETE sibling of :meth:`op`; the bridge DELETE routes carry no body. A
+        refusal (the bridge answers ``500 {success:false}`` on a failed delete →
+        ``None`` from the seam) yields ``ok=False`` so the rails surface the failure.
+        """
+        self._require_connected()
+        result = _delete_bridge_json(path)
+        if result is None:
+            return OpResult(ok=False, detail=f"bridge refused DELETE {path}")
+        after = json.dumps(result, separators=(",", ":"), ensure_ascii=False)
+        return OpResult(ok=True, detail=f"DELETE {path}", after=after)
+
+    # ── named ops: each owns its route + route-correct body ───────────────
+
+    def device_block(self, mac: str, *, blocked: bool) -> OpResult:
+        """Pause (``blocked=True``) or unpause a device — ``POST /host/:mac/{un}pause``.
+
+        The bridge installs/removes a MAC-level block rule (it reads no request body;
+        the production ``screen_time`` caller posts none, so ``op`` sends ``{}``).
+        """
+        verb = "pause" if blocked else "unpause"
+        return self.op(f"/host/{mac}/{verb}")
+
+    def device_policy(
+        self,
+        mac: str,
+        *,
+        family: bool | None = None,
+        adblock: bool | None = None,
+        safe_search: bool | dict[str, Any] | None = None,
+        ip_allocation: dict[str, Any] | None = None,
+    ) -> OpResult:
+        """Set per-device policy — ``POST /host/:mac/policy`` (family/adblock/safeSearch/dhcp).
+
+        Only the fields the caller supplies are sent (the bridge keys on ``"k" in body``),
+        under the bridge's own camelCase keys: ``family``, ``adblock``, ``safeSearch``,
+        and ``ipAllocation`` (the dhcp-reservation object). Calling with NO field set is a
+        no-op — it fires no phantom POST and reports ``ok=False`` legibly.
+        """
+        body: dict[str, Any] = {}
+        if family is not None:
+            body["family"] = family
+        if adblock is not None:
+            body["adblock"] = adblock
+        if safe_search is not None:
+            body["safeSearch"] = safe_search
+        if ip_allocation is not None:
+            body["ipAllocation"] = ip_allocation
+        if not body:
             return OpResult(
                 ok=False,
-                detail=f"bridge refused set {path}",
-                before=before,
-                after=None,
+                detail=f"device_policy {mac}: no policy field set (nothing to write)",
             )
-        return OpResult(ok=True, detail=f"set {path}", before=before, after=value)
+        return self.op(f"/host/{mac}/policy", body)
+
+    def device_rules(
+        self,
+        mac: str,
+        services: list[str],
+        *,
+        action: str = "block",
+        expire: int | None = None,
+    ) -> OpResult:
+        """Block/allow services on a device — ``POST /host/:mac/rules``.
+
+        ``services`` is a list of service names (the bridge expands them to domains);
+        ``action`` is ``"block"`` / ``"allow"``; ``expire`` is a unix timestamp at which
+        the rule auto-deletes on the box (omitted from the body when ``None`` — but always
+        pass it: an unbounded rule was the 2026-04-18 stale-rule root cause). Body shape
+        is verified against the production ``screen_time._block_services`` caller.
+        """
+        body: dict[str, Any] = {"services": services, "action": action}
+        if expire is not None:
+            body["expire"] = expire
+        return self.op(f"/host/{mac}/rules", body)
+
+    def feature_toggle(self, name: str, *, enabled: bool) -> OpResult:
+        """Enable/disable a global box feature — ``POST /feature/:name/{enable,disable}``."""
+        verb = "enable" if enabled else "disable"
+        return self.op(f"/feature/{name}/{verb}")
+
+    def local_dns_set(self, hostname: str, ip: str) -> OpResult:
+        """Add/update a local DNS record — ``POST /dns`` ``{hostname, ip}``."""
+        return self.op("/dns", {"hostname": hostname, "ip": ip})
+
+    def local_dns_delete(self, hostname: str) -> OpResult:
+        """Remove a local DNS record — ``DELETE /dns/:hostname``."""
+        return self._delete_op(f"/dns/{hostname}")
+
+    def delete_policy(self, pid: int) -> OpResult:
+        """Delete a policy by id — ``DELETE /policy/:pid``."""
+        return self._delete_op(f"/policy/{pid}")
+
+    def alarm_ack(self, alarm_id: str) -> OpResult:
+        """Acknowledge / dismiss an alarm — ``POST /alarm/:id/ignore``."""
+        return self.op(f"/alarm/{alarm_id}/ignore")
+
+    def wake_on_lan(self, mac: str) -> OpResult:
+        """Send a Wake-on-LAN magic packet to a device — ``POST /host/:mac/wake``."""
+        return self.op(f"/host/{mac}/wake")
+
+    def speedtest(self) -> OpResult:
+        """Run a new speedtest on the box — ``POST /speedtest``."""
+        return self.op("/speedtest")
+
+    # ── box ops ───────────────────────────────────────────────────────────
+
+    def box_reboot(self) -> OpResult:
+        """Reboot the box — ``POST /box/reboot`` (network down ~2-3 min)."""
+        return self.op("/box/reboot")
+
+    def box_shutdown(self) -> OpResult:
+        """Shut the box down — ``POST /box/shutdown`` (security down until restarted)."""
+        return self.op("/box/shutdown")
+
+    def box_shutdown_cancel(self) -> OpResult:
+        """Cancel a pending shutdown — ``POST /box/shutdown/cancel``."""
+        return self.op("/box/shutdown/cancel")
+
+    def box_upgrade(self) -> OpResult:
+        """Trigger a firmware upgrade — ``POST /box/upgrade``."""
+        return self.op("/box/upgrade")
+
+    def reboot(self) -> OpResult:
+        """Protocol-aligned reboot — delegates to :meth:`box_reboot`.
+
+        The :mod:`sanctum_cli.devices.intents` reboot seam duck-types a callable
+        ``reboot()`` returning an :class:`OpResult`; this aliases the box reboot so a
+        Firewalla can stand in wherever the intent layer drives a hardware reboot.
+        """
+        return self.box_reboot()
 
     def capabilities(self) -> AbstractSet[Capability]:
         """Operations this box actually supports through the bridge.
 
-        Honest-verify: WAN_MODE is NOT advertised. NAT/DMZ/WAN-mode are GUI-only on
-        a Firewalla — the bridge proxies no WAN-mode route — so a WAN_MODE cap would
-        name an op that does not exist. Only the surfaces the bridge truly drives
-        are advertised: READ (the GET seam), POLICY (per-device policy/rules/pause),
-        and SCREEN_TIME (the screen-time engine's bridge reads/writes).
+        Honest-verify: every advertised cap is backed by a REAL, route-correct op on
+        this provider (the method that POSTs/DELETEs the matching bridge route). The
+        device/feature/dns/box/alarm/wol/speedtest caps go in because the named ops
+        back them; REBOOT goes in because :meth:`box_reboot`/:meth:`reboot` back it.
+        WAN_MODE stays OUT — NAT/DMZ/WAN-mode are GUI-only on a Firewalla (the bridge
+        proxies no such route), so a WAN_MODE cap would name an op that does not exist.
         """
         return {
             Capability.READ,
             Capability.POLICY,
             Capability.SCREEN_TIME,
+            Capability.DEVICE_BLOCK,
+            Capability.DEVICE_POLICY,
+            Capability.DEVICE_RULES,
+            Capability.FEATURE_TOGGLE,
+            Capability.LOCAL_DNS,
+            Capability.ALARM_ACK,
+            Capability.WAKE_ON_LAN,
+            Capability.SPEEDTEST,
+            Capability.REBOOT,
         }
 
     def capability_op(self, capability: Capability) -> CapabilityOp | None:  # noqa: ARG002

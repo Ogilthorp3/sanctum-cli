@@ -235,7 +235,16 @@ def test_get_200_empty_body_returns_none(monkeypatch: pytest.MonkeyPatch) -> Non
 # ── set: mutating bridge op behind an OpResult ────────────────────────
 
 
-def test_set_pauses_policy_via_bridge(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_set_posts_route_correct_body_not_value_wrapper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """set() now parses ``value`` as the route's JSON body — NO ``{"value": …}`` wrapper.
+
+    The bridge has no generic single-value route; every mutate keys on named body
+    fields. So ``set("/host/<mac>/policy", '{"family": 1}')`` must POST exactly
+    ``{"family": 1}`` to that route, not the old ``{"value": '{"family": 1}'}`` shape
+    that matched nothing.
+    """
     from sanctum_cli.devices import firewalla as fw
 
     p, _ = _connected(monkeypatch)
@@ -243,30 +252,48 @@ def test_set_pauses_policy_via_bridge(monkeypatch: pytest.MonkeyPatch) -> None:
 
     def fake_post(path: str, body: dict[str, Any]) -> dict[str, Any] | None:
         posts.append((path, body))
-        return {"ok": True}
+        return {"success": True}
 
     monkeypatch.setattr(fw, "_post_bridge_json", fake_post)
-    res = p.set("/policy/abc/pause", "true")
+    monkeypatch.setattr(fw, "_fetch_bridge_json", lambda path: None)
+    res = p.set("/host/AA:BB:CC:DD:EE:FF/policy", '{"family": 1}')
     assert res.ok is True
-    assert posts == [("/policy/abc/pause", {"value": "true"})]
+    assert posts == [("/host/AA:BB:CC:DD:EE:FF/policy", {"family": 1})]
+
+
+def test_set_non_json_value_reports_not_ok(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A ``value`` that is not a JSON object yields ok=False — no phantom write."""
+    from sanctum_cli.devices import firewalla as fw
+
+    p, _ = _connected(monkeypatch)
+    posts: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(
+        fw, "_post_bridge_json", lambda path, body: posts.append((path, body)) or {"ok": True}
+    )
+    res = p.set("/host/AA:BB:CC:DD:EE:FF/policy", "on")  # not JSON
+    assert res.ok is False
+    assert posts == []  # nothing hit the bridge
 
 
 def test_set_records_before_after(monkeypatch: pytest.MonkeyPatch) -> None:
     from sanctum_cli.devices import firewalla as fw
 
     p, _ = _connected(monkeypatch)
-    monkeypatch.setattr(fw, "_fetch_bridge_json", lambda path: {"value": "off"})
-    monkeypatch.setattr(fw, "_post_bridge_json", lambda path, body: {"ok": True})
-    res = p.set("/policy/abc/pause", "on")
-    assert res.after == "on"
+    monkeypatch.setattr(fw, "_fetch_bridge_json", lambda path: {"family": 0})
+    monkeypatch.setattr(fw, "_post_bridge_json", lambda path, body: {"success": True})
+    res = p.set("/host/AA:BB:CC:DD:EE:FF/policy", '{"family": 1}')
+    # before is the prior read; after is the bridge's serialized reply.
+    assert res.before == '{"family":0}'
+    assert res.after == '{"success":true}'
 
 
 def test_set_failed_post_reports_not_ok(monkeypatch: pytest.MonkeyPatch) -> None:
     from sanctum_cli.devices import firewalla as fw
 
     p, _ = _connected(monkeypatch)
+    monkeypatch.setattr(fw, "_fetch_bridge_json", lambda path: None)
     monkeypatch.setattr(fw, "_post_bridge_json", lambda path, body: None)  # bridge refused
-    res = p.set("/policy/abc/pause", "on")
+    res = p.set("/host/AA:BB:CC:DD:EE:FF/policy", '{"family": 1}')
     assert res.ok is False
 
 
@@ -286,13 +313,23 @@ def test_capabilities_advertise_firewalla_surface(
 ) -> None:
     p, _ = _connected(monkeypatch)
     caps = p.capabilities()
-    # Honest-verify: WAN_MODE is NOT advertised — the bridge proxies no WAN-mode
-    # route (NAT/DMZ/WAN are GUI-only on a Firewalla), so a cap with no op behind
-    # it is dishonest. Only the surfaces the bridge truly drives are named.
+    # Honest-verify: every advertised cap is backed by a real route-correct op on the
+    # provider (see test_firewalla_ops). WAN_MODE is NOT advertised — the bridge proxies
+    # no WAN-mode route (NAT/DMZ/WAN are GUI-only on a Firewalla), so a cap with no op
+    # behind it is dishonest.
     assert caps == {
         Capability.READ,
         Capability.POLICY,
         Capability.SCREEN_TIME,
+        Capability.DEVICE_BLOCK,
+        Capability.DEVICE_POLICY,
+        Capability.DEVICE_RULES,
+        Capability.FEATURE_TOGGLE,
+        Capability.LOCAL_DNS,
+        Capability.ALARM_ACK,
+        Capability.WAKE_ON_LAN,
+        Capability.SPEEDTEST,
+        Capability.REBOOT,
     }
     assert Capability.WAN_MODE not in caps
 

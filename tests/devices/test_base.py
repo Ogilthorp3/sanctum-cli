@@ -87,6 +87,15 @@ def test_capability_is_str_enum() -> None:
         "AP_MODE",
         "CHANNELS",
         "GUEST_WIFI",
+        # Firewalla bridge-backed named ops (each backed by a real route-correct op).
+        "DEVICE_BLOCK",
+        "DEVICE_POLICY",
+        "DEVICE_RULES",
+        "FEATURE_TOGGLE",
+        "LOCAL_DNS",
+        "ALARM_ACK",
+        "WAKE_ON_LAN",
+        "SPEEDTEST",
     }
     assert {c.name for c in Capability} == expected
 

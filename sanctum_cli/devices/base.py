@@ -49,6 +49,17 @@ class Capability(StrEnum):
     AP_MODE = "ap_mode"
     CHANNELS = "channels"
     GUEST_WIFI = "guest_wifi"
+    # Firewalla bridge-backed named ops — each is a real, route-correct POST/DELETE
+    # against the firewalla-bridge contract (NOT a GUI-only surface), so advertising
+    # them keeps capabilities honest (a cap iff a writable op backs it).
+    DEVICE_BLOCK = "device_block"
+    DEVICE_POLICY = "device_policy"
+    DEVICE_RULES = "device_rules"
+    FEATURE_TOGGLE = "feature_toggle"
+    LOCAL_DNS = "local_dns"
+    ALARM_ACK = "alarm_ack"
+    WAKE_ON_LAN = "wake_on_lan"
+    SPEEDTEST = "speedtest"
 
 
 @dataclass(frozen=True)
