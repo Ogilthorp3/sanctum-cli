@@ -142,6 +142,55 @@ def test_should_retry_apipa_false_on_higher_attempts() -> None:
         assert flip.should_retry_apipa(observed, attempt=3) is False
 
 
+# ── classify_wan_ip: the armor's 4-way WAN vocabulary, ported pure ────────────
+#
+# These expectations are authored from the armor kit's OWN ``classify_wan_ip``
+# (sanctum-singlenat-armor/lib/singlenat-eval.sh) case arms — the consumer of
+# this vocabulary — NOT from the Python producer's body. The Python classifier
+# MUST agree token-for-token with the shell so the CLI cutover and the on-box
+# self-heal speak the same WAN classes (Contracts at the Boundary). The shell:
+#   ""|0.0.0.0                                   -> none
+#   169.254.*                                    -> apipa
+#   192.168.*|10.*|172.16-31.*                   -> double_nat
+#   *                                            -> public
+
+
+@pytest.mark.parametrize("wan_ip", ["", "0.0.0.0"])
+def test_classify_wan_ip_none_for_empty_or_unspecified(wan_ip: str) -> None:
+    """An empty/no lease or 0.0.0.0 is ``none`` — the router pulled nothing."""
+    assert flip.classify_wan_ip(wan_ip) == "none"
+
+
+def test_classify_wan_ip_none_for_actual_none() -> None:
+    """A Python ``None`` (the runner read returned nothing) is also ``none`` —
+    the orchestrator passes the raw read straight through without pre-empting."""
+    assert flip.classify_wan_ip(None) == "none"
+
+
+@pytest.mark.parametrize("wan_ip", ["169.254.0.1", "169.254.213.108", "169.254.255.255"])
+def test_classify_wan_ip_apipa_for_link_local(wan_ip: str) -> None:
+    """A 169.254.x self-assigned address is ``apipa`` — DHCP failed (retryable)."""
+    assert flip.classify_wan_ip(wan_ip) == "apipa"
+
+
+@pytest.mark.parametrize(
+    "wan_ip",
+    ["192.168.2.10", "10.0.0.5", "172.16.0.1", "172.20.1.2", "172.31.255.254"],
+)
+def test_classify_wan_ip_double_nat_for_rfc1918(wan_ip: str) -> None:
+    """An RFC1918 private lease (192.168.x / 10.x / 172.16-31.x) is ``double_nat``
+    — the hub handed out its own LAN address, the cutover did NOT pass through."""
+    assert flip.classify_wan_ip(wan_ip) == "double_nat"
+
+
+@pytest.mark.parametrize("wan_ip", ["203.0.113.7", "74.14.213.108", "172.15.0.1", "172.32.0.1"])
+def test_classify_wan_ip_public_for_routable(wan_ip: str) -> None:
+    """A routable public IP is ``public`` — the single-NAT win. Note 172.15 and
+    172.32 are NOT in the 172.16-31 private block, so they are public (the exact
+    boundary the shell case arms draw)."""
+    assert flip.classify_wan_ip(wan_ip) == "public"
+
+
 # ── gate_ok: the precondition guard ──────────────────────────────────────────
 
 

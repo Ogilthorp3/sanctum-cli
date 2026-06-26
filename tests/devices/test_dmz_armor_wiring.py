@@ -82,11 +82,23 @@ class FakeHub:
 
 
 class FakeRunner:
+    """Records tags; serves a PUBLIC downstream lease for the observe-lease read.
+
+    The ``observe_lease`` stage now classifies the lease it reads (the FIX-4
+    wiring): an empty/APIPA lease fails-closed before the later ``apply_armor``
+    stage is reached. These wiring tests exercise the armor seam on the HAPPY
+    path, so the runner must serve a public single-NAT lease (``203.0.113.7``)
+    for ``lease_observe`` — otherwise the flip would (correctly) roll back at
+    observe_lease and never reach the armor stage under test.
+    """
+
     def __init__(self) -> None:
         self.calls: list[tuple[str, ...]] = []
 
     def __call__(self, tag: tuple[str, ...]) -> str:
         self.calls.append(tag)
+        if tag and tag[0] in ("fw_wan_ip", "lease_observe"):
+            return "203.0.113.7"
         return ""
 
 

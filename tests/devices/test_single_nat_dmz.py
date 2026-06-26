@@ -157,6 +157,45 @@ class FakeRunner:
         return ""
 
 
+class ScriptedLeaseRunner:
+    """Records every tag and serves a SCRIPTED SEQUENCE of downstream leases.
+
+    Unlike :class:`FakeRunner` (one fixed lease), this serves a queue of WAN-IP
+    strings — one per ``lease_observe`` read — so a test can model the real
+    transient the retry exists for: the router grabs a ``169.254.x`` APIPA on the
+    first DHCP after the hub reboot, then a single re-lease (``dhcp_release``)
+    clears it and the second read returns a public lease.
+
+    The queue is consumed in order on each ``lease_observe``; once exhausted the
+    last value sticks (a persistent-bad lease that never clears). Every tag is
+    recorded so a test can assert EXACTLY how many re-leases fired between the
+    reads — the "exactly ONE re-lease" contract.
+    """
+
+    def __init__(self, leases: list[str]) -> None:
+        self.calls: list[tuple[str, ...]] = []
+        self._leases = list(leases)
+
+    def __call__(self, tag: tuple[str, ...]) -> str:
+        self.calls.append(tag)
+        if tag and tag[0] in ("fw_wan_ip", "lease_observe"):
+            if len(self._leases) > 1:
+                return self._leases.pop(0)
+            return self._leases[0] if self._leases else ""
+        return ""
+
+    def lease_reads(self) -> int:
+        return sum(1 for t in self.calls if t and t[0] == "lease_observe")
+
+    def releases_between_first_two_reads(self) -> int:
+        """How many ``dhcp_release`` ops fired strictly between read #1 and read #2."""
+        read_idxs = [i for i, t in enumerate(self.calls) if t and t[0] == "lease_observe"]
+        if len(read_idxs) < 2:
+            return 0
+        window = self.calls[read_idxs[0] + 1 : read_idxs[1]]
+        return sum(1 for t in window if t and t[0] == "dhcp_release")
+
+
 class FakeArmor:
     """Mock single-NAT armor installer: records the install, never touches disk."""
 
@@ -425,6 +464,167 @@ def test_dmz_armor_install_failure_rolls_back(tmp_path: Path) -> None:
     assert res.result.ok is False
     assert armor.installed == 1  # it tried
     assert hub.rollback_calls == 1  # and unwound
+    assert hub.get(DMZ_PATH) == "off"
+
+
+# ── observe_lease: classify the REAL lease, retry APIPA exactly once ─────────
+#
+# These prove the FIX-4 wiring: the observe_lease stage captures the runner's
+# lease, classifies it with flip.classify_wan_ip, and on a retryable
+# (apipa/none) lease fires EXACTLY ONE re-lease + re-observe (flip.should_retry_apipa);
+# a persistent retryable lease raises and the rails roll back. Every verifier
+# PASSES here, so the retry/rollback behavior can ONLY come from the stage's own
+# lease classification — not from a verifier returning False (which is a separate
+# seam the older tests already cover).
+
+
+def test_observe_lease_apipa_then_public_fires_exactly_one_release_and_proceeds(
+    tmp_path: Path,
+) -> None:
+    """The real transient: read #1 is a 169.254.x APIPA, ONE re-lease clears it,
+    read #2 is public → the flip proceeds to commit. Exactly one re-lease fires
+    between the two reads, the cutover does NOT roll back, and DMZ stays engaged."""
+    from sanctum_cli.devices.intents import single_nat_dmz
+
+    hub, armor = FakeHub(), FakeArmor()
+    # APIPA first, public after the single re-lease.
+    runner = ScriptedLeaseRunner(["169.254.10.5", "203.0.113.7"])
+    res = single_nat_dmz(
+        hub,
+        runner,
+        armor,
+        apply=True,
+        out_of_band_reachable=True,
+        force=True,
+        stage_verifiers=_all_pass_verifiers(),  # every verifier passes
+        log_path=tmp_path / "audit.jsonl",
+    )
+    assert res.applied is True
+    assert res.result is not None
+    assert res.result.ok is True
+    # EXACTLY one re-lease fired between the first and second lease reads.
+    assert runner.releases_between_first_two_reads() == 1
+    # The stage re-observed (two reads total: APIPA, then public).
+    assert runner.lease_reads() == 2
+    # The transient cleared → committed, NOT rolled back; DMZ stayed engaged.
+    assert hub.rollback_calls == 0
+    assert hub.get(DMZ_PATH) == "on"
+    assert armor.installed == 1
+
+
+def test_observe_lease_persistent_apipa_rolls_back_after_one_retry(tmp_path: Path) -> None:
+    """A 169.254.x APIPA that SURVIVES the single re-lease is a real failure: the
+    stage raises so the rails unwind — DMZ rolled back to off, ok=False — and only
+    ONE re-lease was attempted (no infinite re-lease loop)."""
+    from sanctum_cli.devices.intents import single_nat_dmz
+
+    hub, armor = FakeHub(), FakeArmor()
+    # APIPA on every read — the re-lease never clears it.
+    runner = ScriptedLeaseRunner(["169.254.10.5"])
+    res = single_nat_dmz(
+        hub,
+        runner,
+        armor,
+        apply=True,
+        out_of_band_reachable=True,
+        force=True,
+        stage_verifiers=_all_pass_verifiers(),  # verifiers pass; the STAGE fails
+        log_path=tmp_path / "audit.jsonl",
+    )
+    assert res.applied is True
+    assert res.result is not None
+    assert res.result.ok is False
+    # Exactly ONE re-lease was attempted (one retry only — never loop forever).
+    assert runner.releases_between_first_two_reads() == 1
+    assert runner.lease_reads() == 2  # observe, retry-observe — then give up
+    # Persistent APIPA → the flip unwound: DMZ disabled, household not left dark.
+    assert hub.rollback_calls == 1
+    assert hub.get(DMZ_PATH) == "off"
+    # Armor is a LATER stage than observe_lease — it must never have run.
+    assert armor.installed == 0
+
+
+def test_observe_lease_empty_lease_retries_then_rolls_back(tmp_path: Path) -> None:
+    """An empty/no lease (classify ``none``) is retryable exactly like APIPA: one
+    re-lease, and if it is still empty the flip rolls back (fail-closed, not a
+    silent commit on a dead WAN)."""
+    from sanctum_cli.devices.intents import single_nat_dmz
+
+    hub, armor = FakeHub(), FakeArmor()
+    runner = ScriptedLeaseRunner([""])  # never pulls a lease
+    res = single_nat_dmz(
+        hub,
+        runner,
+        armor,
+        apply=True,
+        out_of_band_reachable=True,
+        force=True,
+        stage_verifiers=_all_pass_verifiers(),
+        log_path=tmp_path / "audit.jsonl",
+    )
+    assert res.result is not None
+    assert res.result.ok is False
+    assert runner.releases_between_first_two_reads() == 1
+    assert hub.rollback_calls == 1
+    assert hub.get(DMZ_PATH) == "off"
+
+
+def test_observe_lease_public_first_read_fires_no_release(tmp_path: Path) -> None:
+    """A public lease on the FIRST read is the single-NAT win: the stage proceeds
+    with NO re-lease at all (a re-lease would needlessly bounce a healthy WAN)."""
+    from sanctum_cli.devices.intents import single_nat_dmz
+
+    hub, armor = FakeHub(), FakeArmor()
+    runner = ScriptedLeaseRunner(["203.0.113.7"])
+    res = single_nat_dmz(
+        hub,
+        runner,
+        armor,
+        apply=True,
+        out_of_band_reachable=True,
+        force=True,
+        stage_verifiers=_all_pass_verifiers(),
+        log_path=tmp_path / "audit.jsonl",
+    )
+    assert res.result is not None
+    assert res.result.ok is True
+    # Only ONE lease read (no re-observe) and ZERO re-leases.
+    assert runner.lease_reads() == 1
+    assert not any(t and t[0] == "dhcp_release" for t in runner.calls)
+    assert hub.rollback_calls == 0
+    assert hub.get(DMZ_PATH) == "on"
+
+
+def test_observe_lease_double_nat_first_read_fires_no_release_but_fails_stage_verify(
+    tmp_path: Path,
+) -> None:
+    """A double_nat (RFC1918) lease is NOT retryable — re-leasing a hub-handed
+    private address would not help. The observe_lease stage proceeds WITHOUT a
+    re-lease (double_nat is not in the retry set); the CLI's real observe-lease
+    verifier is what then rejects double_nat. Here we model that with a failing
+    observe_lease verifier and assert: zero re-leases, then rollback."""
+    from sanctum_cli.devices.intents import single_nat_dmz
+
+    hub, armor = FakeHub(), FakeArmor()
+    runner = ScriptedLeaseRunner(["192.168.2.10"])  # hub's own LAN → double_nat
+    verifiers = _all_pass_verifiers()
+    # The real CLI verifier rejects a non-SINGLE lease; model that rejection here.
+    verifiers["observe_lease"] = lambda: False
+    res = single_nat_dmz(
+        hub,
+        runner,
+        armor,
+        apply=True,
+        out_of_band_reachable=True,
+        force=True,
+        stage_verifiers=verifiers,
+        log_path=tmp_path / "audit.jsonl",
+    )
+    assert res.result is not None
+    assert res.result.ok is False
+    # double_nat is NOT retryable → the stage fired no re-lease of its own.
+    assert not any(t and t[0] == "dhcp_release" for t in runner.calls[: runner.lease_reads() + 1])
+    assert hub.rollback_calls == 1
     assert hub.get(DMZ_PATH) == "off"
 
 

@@ -109,6 +109,57 @@ def should_retry_apipa(observed_class: str, attempt: int) -> bool:
     return attempt == 1 and observed_class in _RETRYABLE_LEASE_CLASSES
 
 
+def classify_wan_ip(wan_ip: str | None) -> str:
+    """Classify a downstream WAN IPv4 into the armor's 4-way vocabulary.
+
+    A faithful Python port of the armor kit's ``classify_wan_ip``
+    (``sanctum-singlenat-armor/lib/singlenat-eval.sh``) so the CLI cutover and the
+    on-box self-heal classify a lease IDENTICALLY (Contracts at the Boundary — the
+    two must never drift). Returns exactly one of:
+
+    * ``"none"``       — empty/no lease or ``0.0.0.0`` (the router pulled nothing);
+                         also ``None`` (the runner read returned nothing).
+    * ``"apipa"``      — a ``169.254.x`` self-assigned link-local (DHCP failed).
+    * ``"double_nat"`` — an RFC1918 private lease (``192.168.x`` / ``10.x`` /
+                         ``172.16-31.x``): the hub handed out its own LAN address,
+                         the single-NAT passthrough did NOT take.
+    * ``"public"``     — anything else: a routable public IP (the single-NAT win).
+
+    The ``"apipa"`` and ``"none"`` classes are the retryable ones
+    (:data:`_RETRYABLE_LEASE_CLASSES`); :func:`should_retry_apipa` consumes this
+    same vocabulary to decide the single re-lease retry. The shell's case-arm
+    boundaries are reproduced exactly: ``172.15`` and ``172.32`` are public (only
+    ``172.16``-``172.31`` are private).
+    """
+    if not wan_ip or wan_ip == "0.0.0.0":
+        return "none"
+    if wan_ip.startswith("169.254."):
+        return "apipa"
+    if _is_rfc1918(wan_ip):
+        return "double_nat"
+    return "public"
+
+
+def _is_rfc1918(wan_ip: str) -> bool:
+    """True iff ``wan_ip`` is in an RFC1918 private block, matching the shell case.
+
+    Mirrors the armor shell's glob arm ``192.168.*|10.*|172.1[6-9].*|172.2[0-9].*|
+    172.3[0-1].*`` — i.e. ``192.168.0.0/16``, ``10.0.0.0/8`` and the ``172.16.0.0``
+    through ``172.31.255.255`` block — string-prefix style so a malformed octet is
+    treated by the same textual rule the shell uses (no ``ipaddress`` parse that
+    could disagree on an edge the shell would still glob-match).
+    """
+    if wan_ip.startswith(("192.168.", "10.")):
+        return True
+    if wan_ip.startswith("172."):
+        try:
+            second = int(wan_ip.split(".")[1])
+        except (IndexError, ValueError):
+            return False
+        return 16 <= second <= 31
+    return False
+
+
 def gate_ok(out_of_band_reachable: bool) -> bool:
     """The flip's start precondition: an out-of-band recovery path must exist.
 

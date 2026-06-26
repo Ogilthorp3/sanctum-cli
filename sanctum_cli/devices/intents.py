@@ -356,6 +356,54 @@ class _DmzRollbackProvider:
         return result
 
 
+def _observe_lease(runner: Runner) -> None:
+    """Read the downstream WAN lease, classify it, and re-lease APIPA/none ONCE.
+
+    The ``observe_lease`` stage's real I/O. It captures the lease the downstream
+    router pulled (``runner(_RUNNER_LEASE_OBSERVE)`` — the ONE read among the
+    runner's single-NAT tags), classifies it with :func:`flip.classify_wan_ip`
+    (the armor's ``public | double_nat | apipa | none`` vocabulary), and acts on
+    the pure :func:`flip.should_retry_apipa` verdict:
+
+    * The router frequently grabs a self-assigned ``169.254.x`` APIPA — or no
+      lease at all (``none``) — on the FIRST DHCP right after the hub reboot. That
+      is a transient worth exactly one re-lease, so on attempt 1 we fire one
+      ``dhcp_release`` (release + re-acquire on the WAN dev) and re-observe.
+    * A retryable lease that SURVIVES that single re-lease is a real failure (the
+      WAN never came up public). We raise :class:`_StageError` so the enclosing
+      ``guarded_apply`` change closure trips the rollback rails — disable DMZ +
+      re-lease DHCP — rather than leave the hub engaged in Advanced DMZ on a dead
+      WAN (fail-closed; never fail-to-DARK).
+    * A ``public`` (single-NAT win) or ``double_nat`` lease is NOT re-leased here:
+      public is the success we want, and re-leasing a hub-handed private address
+      would not help — double_nat is a definite verdict the per-stage verifier
+      (the CLI's real ``observe_lease`` probe rejects a non-SINGLE lease) handles.
+
+    Only the lease read + the single conditional re-lease are I/O; the retry
+    decision is the pure flip machine, so this stays a thin boundary driver.
+    """
+    attempt = 1
+    observed = flip.classify_wan_ip(runner(_RUNNER_LEASE_OBSERVE))
+    if flip.should_retry_apipa(observed, attempt):
+        # Exactly one re-lease, then re-observe — never loop (should_retry_apipa
+        # is False for every attempt > 1, but we only call it once by construction).
+        runner(_RUNNER_DHCP_RELEASE)
+        attempt += 1
+        observed = flip.classify_wan_ip(runner(_RUNNER_LEASE_OBSERVE))
+    # ``should_retry_apipa(observed, attempt=1)`` is exactly the predicate "observed
+    # is a retryable bad class (apipa/none)" — consuming the flip machine's
+    # _RETRYABLE_LEASE_CLASSES vocabulary through its public seam rather than
+    # reaching into the private set. A retryable lease that PERSISTED past the
+    # single re-lease above is a real failure: unwind the flip instead of
+    # committing a dead-WAN cutover (fail-closed; never fail-to-DARK).
+    if flip.should_retry_apipa(observed, attempt=1):
+        msg = (
+            f"observe_lease: downstream WAN lease is {observed!r} after "
+            f"{attempt} attempt(s) — re-lease did not clear it"
+        )
+        raise _StageError(msg)
+
+
 def _run_stage(
     stage: str,
     *,
@@ -383,7 +431,7 @@ def _run_stage(
     elif stage == "hub_reboot":
         _require_ok(_reboot(provider), stage)
     elif stage == "observe_lease":
-        runner(_RUNNER_LEASE_OBSERVE)
+        _observe_lease(runner)
     elif stage == "apply_armor":
         _require_ok(armor.install(), stage)
     elif stage == "arm":
