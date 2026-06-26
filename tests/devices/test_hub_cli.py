@@ -139,15 +139,18 @@ def test_net_hub_set_force_mutates(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_net_hub_single_nat_dryrun_mutates_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`net hub single-nat` with no --apply prints the plan and changes nothing."""
+    """`net hub single-nat` is now a DEPRECATION shim: it steers to the staged
+    `net single-nat` command and fires ZERO mutations — never the old SetBridgeMode
+    leaf (the proven-dead/hub-capped path).
+    """
     p = FakeProvider()
     _point_registry_at(monkeypatch, p)
     result = runner.invoke(app, ["net", "hub", "single-nat"])
     assert result.exit_code == 0, result.stdout
-    out = result.stdout
-    assert BRIDGE_MODE_PATH in out  # the planned change is described
-    assert "1492" in out  # MTU caveat surfaced
-    # The hard guardrail: a dry-run fires ZERO mutations.
+    out = result.stdout.lower()
+    assert "deprecated" in out  # steers the operator to the new command
+    assert "net single-nat" in out
+    # The hard guardrail (unchanged): a deprecated dry-run fires ZERO mutations.
     assert p.set_calls == []
     assert p.rollback_calls == 0
     assert p.get(BRIDGE_MODE_PATH) == "off"
@@ -223,54 +226,40 @@ def test_net_hub_disconnects_even_when_command_errors(
     assert p.disconnected is True
 
 
-def test_net_hub_single_nat_apply_threads_fw_bound_runner(
+def test_net_hub_single_nat_apply_is_inert_and_redirects(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`single-nat --apply` must verify over the Firewalla-key-bound runner.
+    """SAFETY: the DEPRECATED `net hub single-nat --apply --force` must fire ZERO
+    mutations and NEVER call the old `intents.single_nat` (SetBridgeMode) path.
 
-    Regression: the apply path used to pass the bare ``system.real_runner``,
-    which returns "" for the ("fw_wan_ip",)/("fw_wan_mac",) tags — so
-    ``verify.verify`` always saw a None WAN IP and could never fire the
-    APIPA/DHCP-fail auto-rollback. We assert the runner actually handed to
-    ``intents.single_nat`` resolves ("fw_wan_ip",) to the fw-bound value, i.e.
-    it is ``_build_runner()`` and not the bare runner.
+    The single-leaf SetBridgeMode cutover was proven dead/hub-capped, so the shim
+    must steer to `net single-nat` (the staged Advanced-DMZ + /32 orchestrator)
+    rather than silently firing the old path on a deprecated --apply. The real,
+    fw-bound-runner apply path is exercised by tests/commands/test_single_nat_cli.py
+    against the new command.
     """
     p = FakeProvider()
     _point_registry_at(monkeypatch, p)
 
-    # _build_runner() shells out to `route`/SSH in production; replace it with a
-    # runner that resolves the fw tags (what make_real_runner does on real gear).
-    def fake_build_runner() -> object:
-        def runner_fn(tag: tuple[str, ...]) -> str:
-            if tag == ("fw_wan_ip",):
-                return "169.254.1.5"  # APIPA → the rollback trigger MUST see it
-            return ""
+    # Tripwire: the deprecated command must NOT reach the old single_nat intent.
+    called = {"old_intent": False}
 
-        return runner_fn
+    def boom_single_nat(*_a: object, **_k: object) -> object:
+        called["old_intent"] = True
+        msg = "deprecated shim must NOT call the old SetBridgeMode intent"
+        raise AssertionError(msg)
 
-    monkeypatch.setattr("sanctum_cli.commands.net._build_runner", fake_build_runner)
-
-    captured: dict[str, object] = {}
-    real_single_nat = __import__(
-        "sanctum_cli.devices.intents", fromlist=["single_nat"]
-    ).single_nat
-
-    def spy_single_nat(provider: object, **kwargs: object) -> object:
-        captured["runner"] = kwargs.get("runner")
-        return real_single_nat(provider, **kwargs)
-
-    monkeypatch.setattr("sanctum_cli.commands.net.intents.single_nat", spy_single_nat)
+    monkeypatch.setattr("sanctum_cli.commands.net.intents.single_nat", boom_single_nat)
 
     result = runner.invoke(app, ["net", "hub", "single-nat", "--apply", "--force"])
-    # The runner threaded into single_nat must resolve the fw WAN IP tag — proof
-    # it is the fw-key-bound runner, not the bare system.real_runner (which
-    # would return "" and silently disable the APIPA rollback signal).
-    threaded = captured["runner"]
-    assert callable(threaded)
-    assert threaded(("fw_wan_ip",)) == "169.254.1.5"
-    # With an APIPA WAN, verify must trip the rollback (the cutover is undone).
-    assert result.exit_code == 1, result.stdout
-    assert p.rollback_calls == 1
+    assert result.exit_code == 0, result.stdout
+    out = result.stdout.lower()
+    assert "deprecated" in out
+    assert "net single-nat" in out
+    # Inert: zero mutations even with --apply --force, and the old intent untouched.
+    assert called["old_intent"] is False
+    assert p.set_calls == []
+    assert p.rollback_calls == 0
 
 
 def test_net_hub_set_unsupported_is_legible(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -14,15 +14,25 @@ from sanctum_cli import config
 from sanctum_cli.devices import firewalla as firewalla_provider
 from sanctum_cli.devices import intents, rails, registry, sagemcom
 from sanctum_cli.devices import orbi as orbi_provider
-from sanctum_cli.devices.base import Capability, Creds, DeviceError, NetContext, OpResult
+from sanctum_cli.devices.armor import SinglenatArmorInstaller
+from sanctum_cli.devices.base import (
+    Capability,
+    Creds,
+    DeviceError,
+    NetContext,
+    OpResult,
+    Snapshot,
+)
 from sanctum_cli.errors import SanctumError
 from sanctum_cli.net import detect, playbooks, render, safety, speedtest, system, verify
 from sanctum_cli.net.types import SpeedReport, Verdict
+from sanctum_cli.onboard_experience import chapter_banner, green_check
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
     from sanctum_cli.devices.base import DeviceProvider
+    from sanctum_cli.devices.intents import ArmorInstaller
     from sanctum_cli.net.detect import HttpProbe, Runner
 
 console = Console()
@@ -516,41 +526,151 @@ def hub_set(
         raise typer.Exit(code=1)
 
 
-@hub_app.command(
+# ─── single-NAT (the net-level Advanced-DMZ cutover command) ─────────────────
+#
+# ``sanctum net single-nat`` is the FULL Bell Advanced-DMZ + /32 cutover surface,
+# driving the staged :func:`intents.single_nat_dmz` orchestrator (the brain is the
+# pure :mod:`sanctum_cli.devices.flip` machine). It supersedes the old single-leaf
+# ``net hub single-nat`` (SetBridgeMode), which is now a deprecation shim that
+# redirects here (see :func:`hub_single_nat`). Dry-run by default — bare invocation
+# makes ZERO device writes; ``--apply`` fires the cutover ONLY when the out-of-band
+# recovery probe says reachable; ``--rollback`` undoes a prior cutover (disable DMZ
+# + re-lease DHCP).
+
+# The default deploy coordinates for the armor kit, mirroring the kit README's
+# deploy section + intents._DEFAULT_ARMOR_* . Held here so the CLI builds the
+# installer through one seam tests can swap for a recording double; the dry-run
+# never reaches it (zero host contact).
+_ARMOR_KIT_DIR = "/Users/bert/Documents/Claude_Code/sanctum-singlenat-armor"
+_ARMOR_FIREWALLA_HOST = "10.0.0.1"
+_ARMOR_MINI_HOST = "bert@10.0.0.10"
+
+# The out-of-band recovery host the cutover gate probes: the Mini jump host, which
+# the armor kit reaches on a SEPARATE link from the WAN the flip is changing (the
+# README deploys via ``bert@10.0.0.10``). A reachable Mini means there is a way to
+# recover the hub if the cutover strands it; its absence makes the flip refuse.
+_OUT_OF_BAND_HOST = "10.0.0.10"
+_OUT_OF_BAND_PORT = 22
+
+
+def _build_armor_installer() -> ArmorInstaller:
+    """Build the real single-NAT armor installer from the README coordinates.
+
+    The one seam through which the ``net single-nat`` command reaches a concrete
+    armor install (stage ``apply_armor``). Built only on the apply path (never the
+    dry-run / gate-refused paths, which make zero host contact); tests swap this
+    for a recording double so the wiring is exercised without shelling out.
+    """
+    return SinglenatArmorInstaller(
+        kit_dir=_ARMOR_KIT_DIR,
+        firewalla_host=_ARMOR_FIREWALLA_HOST,
+        mini_host=_ARMOR_MINI_HOST,
+    )
+
+
+def _out_of_band_reachable() -> bool:
+    """Is the out-of-band recovery path (the Mini jump host) reachable right now?
+
+    The flip's start precondition (:func:`flip.gate_ok`): the cutover briefly drops
+    the WAN, so a recovery path that does NOT ride that same link must exist before
+    we touch anything. We probe a TCP connection to the Mini's SSH port (the armor
+    kit's jump host) — the same read-only presence-probe shape :func:`_firewalla_present`
+    uses. A failure to connect means no out-of-band path, and the gate refuses.
+    ``--force`` waives the human confirm prompt but NEVER this probe.
+    """
+    try:
+        socket.create_connection((_OUT_OF_BAND_HOST, _OUT_OF_BAND_PORT), timeout=2).close()
+        return True
+    except OSError:
+        return False
+
+
+def _print_dmz_stage_plan(plan: list[str]) -> None:
+    """Render the staged cutover plan through the onboarding experience helpers.
+
+    A "Step N of M" chapter banner frames the cutover, then each flip stage is
+    listed as a green-checked line (the same calm, confident framing the onboarding
+    arc uses). Pure presentation; the orchestrator decided the stages.
+    """
+    console.print(
+        chapter_banner(
+            1,
+            1,
+            "Single-NAT cutover (Bell Advanced DMZ + /32)",
+            "Put your network behind ONE NAT — guarded, reversible, attended-only.",
+        )
+    )
+    # The first plan line is the title; the rest are the ordered stages/notes.
+    for line in plan[1:]:
+        stripped = line.strip()
+        if stripped.lower().startswith(("note:", "on ")):
+            console.print(f"  [dim]{escape(stripped)}[/]")
+        else:
+            console.print(green_check(stripped))
+
+
+@net_app.command(
     "single-nat",
-    help="Put the hub in bridge mode (single NAT). Dry-run by default; pass --apply to fire.",
+    help=(
+        "Put your network behind a single NAT (Bell Advanced DMZ + /32). "
+        "Dry-run by default; --apply fires (attended-only), --rollback undoes."
+    ),
 )
-def hub_single_nat(
+def net_single_nat(
     apply: Annotated[
         bool,
-        typer.Option("--apply", help="Actually fire the cutover (attended-only; drops internet)."),
+        typer.Option("--apply", help="Fire the cutover (attended-only; briefly drops internet)."),
+    ] = False,
+    rollback: Annotated[
+        bool,
+        typer.Option("--rollback", help="Undo a prior cutover: disable DMZ + re-lease DHCP."),
     ] = False,
     force: Annotated[
-        bool, typer.Option("--force", help="Skip the confirmation prompt (with --apply).")
+        bool,
+        typer.Option("--force", help="Skip the confirm prompt (still honors the recovery gate)."),
     ] = False,
 ) -> None:
+    if apply and rollback:
+        exc = DeviceError(
+            "--apply and --rollback are mutually exclusive",
+            fix="run one at a time: --apply to fire the cutover, --rollback to undo it.",
+        )
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code))
+
+    if rollback:
+        _net_single_nat_rollback(force=force)
+        return
+
+    # The Firewalla-key-bound runner (the same one net_optimize/net_check use) is
+    # what resolves the ("fw_wan_ip",)/("lease_observe",)/("dhcp_release",) tags
+    # over the SSH seam; the orchestrator drives the Firewalla through it.
+    runner = _build_runner()
+    # The out-of-band recovery gate is checked here (CLI layer) so the orchestrator
+    # gets a concrete bool; --force NEVER waives it (it only waives the confirm).
+    oob = _out_of_band_reachable() if apply else True
+
     try:
         with _connected_hub() as provider:
-            # Verify must run over the Firewalla-key-bound runner (the same one
-            # net_optimize/net_check use), NOT the bare system.real_runner. Only
-            # _build_runner() → make_real_runner() resolves the ("fw_wan_ip",) /
-            # ("fw_wan_mac",) tags over the SSH seam; the bare real_runner returns
-            # "" for them (system.py:18), which would make verify.verify see a
-            # None WAN IP — disabling the APIPA/DHCP-fail auto-rollback trigger and
-            # biasing classify_nat toward NOT-VERIFIED on a successful cutover.
-            result = intents.single_nat(
+            result = intents.single_nat_dmz(
                 provider,
-                force=force,
+                runner,
+                _build_armor_installer() if apply else None,
                 apply=apply,
-                runner=_build_runner() if apply else None,
-                confirm=lambda plan: typer.confirm(f"{plan}\nProceed?"),
+                out_of_band_reachable=oob,
+                force=force,
+                confirm=lambda plan: typer.confirm(f"{plan}\nAre you at the box (not remote)?"),
             )
     except SanctumError as exc:
         _report(exc)
         raise typer.Exit(code=int(exc.exit_code)) from exc
-    for line in result.plan:
-        console.print(escape(line))
+
+    _print_dmz_stage_plan(result.plan)
     if not result.applied:
+        # Either a dry-run OR the out-of-band gate refused (result carries ok=False).
+        if result.result is not None and not result.result.ok:
+            console.print(f"\n[red]✗[/] {escape(result.result.detail)}")
+            raise typer.Exit(code=1)
         console.print("\n[dim]dry-run: no changes made. Re-run with --apply to fire.[/]")
         return
     assert result.result is not None  # apply path always carries an OpResult
@@ -559,6 +679,113 @@ def hub_single_nat(
     else:
         console.print(f"\n[yellow]{escape(result.result.detail)}[/]")
         raise typer.Exit(code=1)
+
+
+def _net_single_nat_rollback(*, force: bool) -> None:
+    """Undo a prior single-NAT cutover: disable Advanced DMZ + re-lease DHCP.
+
+    The mirror image of the apply path — it drives the SAME audited rollback the
+    rails use on a failed stage (:class:`intents._DmzRollbackProvider.rollback`:
+    inner provider rollback to disable DMZ, then a downstream DHCP re-lease so the
+    WAN recovers to double-NAT). It does NOT re-run the staged flip; it restores
+    the DMZ leaf to its disengaged value and re-leases. ``--force`` waives the
+    confirm prompt; without it the operator is asked first.
+    """
+    runner = _build_runner()
+    try:
+        with _connected_hub() as provider:
+            op = provider.capability_op(Capability.DMZ)
+            if op is None:
+                exc = DeviceError(
+                    f"{provider.brand} ({provider.kind}) does not support Advanced DMZ (single-NAT)",
+                    fix="use a hub provider that advertises Capability.DMZ, or pin the right brand.",
+                )
+                _report(exc)
+                raise typer.Exit(code=int(exc.exit_code))
+            # The value that DISENGAGES the DMZ capability (the brand's engaged
+            # sentinel is op.engaged; the off state is the other one). Derive it so
+            # a brand whose engaged value is not literally "on" still disengages.
+            disengaged = "off" if op.engaged == "on" else "on"
+
+            if not force and not typer.confirm(
+                f"Disable Advanced DMZ on {provider.brand} and re-lease DHCP "
+                "(returns the network to double-NAT)?"
+            ):
+                console.print("No changes made.")
+                return
+
+            # Restore the DMZ leaf to its disengaged baseline, then re-lease DHCP —
+            # through the same _DmzRollbackProvider used by the rails so the unwind
+            # is one audited path (disable DMZ → re-lease), not two ad-hoc calls.
+            wrapped = intents._DmzRollbackProvider(provider, runner)
+            snap = Snapshot(brand=provider.brand, taken_at="rollback", data={op.path: disengaged})
+            result: OpResult = wrapped.rollback(snap)
+    except SanctumError as exc:
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code)) from exc
+
+    if result.ok:
+        console.print(f"[green]✓[/] single-NAT rolled back: {escape(result.detail)}")
+    else:
+        console.print(f"[yellow]{escape(result.detail)}[/]")
+        raise typer.Exit(code=1)
+
+
+@hub_app.command(
+    "single-nat",
+    help="DEPRECATED — use `sanctum net single-nat`. Prints the new command's plan.",
+)
+def hub_single_nat(
+    apply: Annotated[  # noqa: ARG001 - retained for CLI stability; redirects to net single-nat
+        bool,
+        typer.Option("--apply", help="(deprecated — use `sanctum net single-nat --apply`)"),
+    ] = False,
+    force: Annotated[  # noqa: ARG001 - retained for CLI stability; redirects to net single-nat
+        bool, typer.Option("--force", help="(deprecated — use `sanctum net single-nat --force`)")
+    ] = False,
+) -> None:
+    """DEPRECATED single-leaf SetBridgeMode flip — redirected to ``net single-nat``.
+
+    The single-leaf ``SetBridgeMode`` flip was superseded by the staged Advanced-DMZ
+    + /32 cutover (:func:`net_single_nat`), which reboots the hub, observes the
+    downstream lease, installs the self-healing armor kit, and gates on an
+    out-of-band recovery path. To avoid silently firing the OLD path (and to never
+    mutate on a deprecated command), this shim prints the NEW command's dry-run plan
+    and a deprecation note steering the operator there; it makes ZERO device writes
+    regardless of ``--apply``/``--force``.
+    """
+    console.print(
+        "[yellow]deprecated:[/] `net hub single-nat` (single-leaf SetBridgeMode) is "
+        "superseded by `sanctum net single-nat` (staged Advanced DMZ + /32 cutover)."
+    )
+    try:
+        with _connected_hub() as provider:
+            # Resolve the DMZ op for a dry-run plan via the new orchestrator; an
+            # unsupported hub (no DMZ op) still gets the deprecation note + redirect
+            # below (never a SetBridgeMode write). apply=False → ZERO mutations.
+            result = intents.single_nat_dmz(
+                provider,
+                _build_runner(),
+                None,
+                apply=False,
+            )
+            _print_dmz_stage_plan(result.plan)
+    except DeviceError:
+        # A hub that does not advertise the new DMZ op (e.g. an older read-only
+        # fallback) cannot render the staged plan — but the deprecation command's
+        # job is to STEER, not to mutate, so swallow the unsupported-op refusal and
+        # still print the redirect. We never reached any write (apply=False).
+        console.print(
+            "[dim]this hub does not advertise the new Advanced-DMZ op; "
+            "run `sanctum net single-nat` for the staged plan once supported.[/]"
+        )
+    except SanctumError as exc:
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code)) from exc
+    console.print(
+        "\n[dim]dry-run: no changes made. Run `sanctum net single-nat --apply` "
+        "to fire the staged cutover.[/]"
+    )
 
 
 # ─── firewalla (network-gear provider surface) ───────────────────────
