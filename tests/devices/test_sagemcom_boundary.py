@@ -70,9 +70,18 @@ class _RealEncodingClient:
     than in ``__init__`` (which the provider calls outside any running loop).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, reboot_reply: dict | None = None) -> None:
         self._client: object | None = None
         self.sent_actions: list[dict] = []
+        # The SAH reply the (real) transport returns for the reboot action. The
+        # DEFAULT is the shape the production code documents a clean reboot as
+        # ('XMO_REQUEST_NO_ERR') — a test of the fail-closed path passes a rejected
+        # envelope instead. None means "use the clean default".
+        self._reboot_reply: dict = (
+            reboot_reply
+            if reboot_reply is not None
+            else {"reply": {"error": {"description": "XMO_REQUEST_NO_ERR"}}}
+        )
 
     def _build_inner(self) -> object:
         from sagemcom_api.client import SagemcomClient
@@ -91,6 +100,16 @@ class _RealEncodingClient:
             if action["method"] == "setValue":
                 # Mirror the real reply shape for a successful setValue.
                 return {"reply": {"error": {"description": "XMO_NO_ERR"}}}
+            if action["method"] == "reboot":
+                # The reboot action's reply rides back through the REAL
+                # ``__api_request_async`` VERBATIM (the transport returns the
+                # ``__post`` result unchanged) — so the provider's ``reboot()``
+                # inspects exactly this envelope via ``_reply_error``. The reboot
+                # action carries NO result callbacks, so the library's lossy
+                # ``__get_response_value`` would extract ``None`` here regardless of
+                # success/failure — which is precisely why the provider must take
+                # the raw path and read this ``error.description`` itself.
+                return self._reboot_reply
             # getValue: return a value-shaped reply the client can unwrap.
             return {
                 "reply": {
@@ -129,6 +148,18 @@ class _RealEncodingClient:
     ) -> dict:
         assert self._client is not None
         return await self._client.set_value_by_xpath(xpath, value, options)  # type: ignore[attr-defined]
+
+    # The raw seam the provider's ``reboot()`` reaches via ``getattr`` (its
+    # name-mangled form). Delegating to the INNER real client means the reboot
+    # action is built + serialized by the genuine ``__api_request_async`` and the
+    # reply rides back through ``_reply_error`` — so reboot is proven through the
+    # real transport, not a synthetic reply shape the production code never sees.
+    async def _SagemcomClient__api_request_async(  # noqa: N802 - must mirror the lib's name-mangled raw seam
+        self, actions: list, priority: bool = False
+    ) -> dict:
+        assert self._client is not None
+        raw = self._client._SagemcomClient__api_request_async  # type: ignore[attr-defined]
+        return await raw(actions, priority)
 
 
 @pytest.fixture
@@ -194,6 +225,71 @@ def test_hostile_path_passed_verbatim_to_library_get(
     assert action["method"] == "getValue"
     assert action["xpath"] == "Device/Services/BellNetworkCfg/Leaf%2541%20caf%C3%A9"
     assert "%2525" not in action["xpath"]
+
+
+# ─── reboot through the REAL transport (Task a) ──────────────────────────────
+
+
+def test_reboot_issues_real_sah_action_through_api_request_async(
+    real_encoding: _RealEncodingClient,
+) -> None:
+    """reboot() drives the SAH reboot action through the REAL ``__api_request_async``.
+
+    The earlier ``test_reboot.py`` proves the provider routes via the raw seam, but
+    against a FAKE that returns a synthetic reply shape it authored. This drives the
+    *genuine* ``sagemcom_api`` transport (only ``__post`` mocked): the reboot action
+    is built + JSON-serialized by the real ``__api_request_async``, so the bytes that
+    would hit the wire — captured in ``sent_actions`` — are exactly the library's,
+    not the production code's hope. The action MUST be the SAH reboot shape
+    (``method == "reboot"``, ``xpath == "Device"``, ``parameters.source == "GUI"``),
+    and a clean reply yields a successful OpResult.
+    """
+    from sanctum_cli.devices.sagemcom import SagemcomHubProvider
+
+    p = SagemcomHubProvider()
+    try:
+        p.connect(Creds(host="192.168.2.1", username="admin", secret=None, key_path=None))
+        result = p.reboot()
+    finally:
+        p.disconnect()
+
+    action = real_encoding.sent_actions[0]
+    assert action["method"] == "reboot"
+    assert action["xpath"] == "Device"
+    assert action["parameters"]["source"] == "GUI"
+    assert result.ok is True
+    assert result.detail == "reboot issued"
+
+
+def test_reboot_fails_closed_on_rejected_reply_through_real_transport(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rejected reboot reply the REAL transport RETURNS (not raises) fails closed.
+
+    The transport returns the ``__post`` result verbatim, including an
+    ``error.description`` it does not model — so "the call did not raise" is NOT
+    proof the reboot landed. With the real transport returning a rejected envelope,
+    ``reboot()`` MUST raise :class:`DeviceError` rather than report a green reboot.
+    """
+    from sanctum_cli.devices.base import DeviceError
+    from sanctum_cli.devices.sagemcom import SagemcomHubProvider
+
+    fake = _RealEncodingClient(
+        reboot_reply={"reply": {"error": {"description": "XMO_ACCESS_RESTRICTION_ERR"}}}
+    )
+    monkeypatch.setattr("sanctum_cli.devices.sagemcom._make_client", lambda creds: fake)
+    monkeypatch.setattr("sanctum_cli.keychain.read", lambda account, service: "pw")
+
+    p = SagemcomHubProvider()
+    try:
+        p.connect(Creds(host="192.168.2.1", username="admin", secret=None, key_path=None))
+        with pytest.raises(DeviceError):
+            p.reboot()
+        # Proof it really issued the reboot action through the real transport.
+        action = fake.sent_actions[0]
+        assert action["method"] == "reboot"
+    finally:
+        p.disconnect()
 
 
 # ─── Live read-only smoke (Step 2) — opt-in, default-skipped ─────────────
