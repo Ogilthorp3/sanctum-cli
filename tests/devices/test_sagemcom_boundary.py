@@ -110,6 +110,11 @@ class _RealEncodingClient:
                 # success/failure — which is precisely why the provider must take
                 # the raw path and read this ``error.description`` itself.
                 return self._reboot_reply
+            if action["method"] in ("addChild", "deleteChild", "applyChanges"):
+                # The table/transaction verbs ride the SAME raw seam as reboot and
+                # carry the SAME clean-write envelope a successful setValue does, so
+                # the provider's ``_reply_error`` inspects exactly this shape.
+                return {"reply": {"error": {"description": "XMO_NO_ERR"}}}
             # getValue: return a value-shaped reply the client can unwrap.
             return {
                 "reply": {
@@ -290,6 +295,68 @@ def test_reboot_fails_closed_on_rejected_reply_through_real_transport(
         assert action["method"] == "reboot"
     finally:
         p.disconnect()
+
+
+# ─── table-row ops through the REAL transport (hostile xpath) ────────────────
+
+
+def test_add_row_hostile_xpath_quoted_once_at_sah_boundary(
+    real_encoding: _RealEncodingClient,
+) -> None:
+    """add_row() must own the xpath encoding: a hostile table xpath is URL-quoted
+    exactly once for the SAH wire, and the params ride verbatim in the JSON body.
+
+    Unlike ``set``/``get`` (which pass the path verbatim to the library setter and
+    let ``sagemcom_api`` quote it), the table verbs issue through the RAW seam,
+    which does NOT quote — so the provider owns the single layer of encoding
+    itself (CLAUDE.md: own the escaping at the boundary). This drives the genuine
+    transport (only ``__post`` mocked) and asserts the bytes that would hit the
+    wire: the literal '%' → '%25' (never preserved, never double-quoted to
+    '%2525'), space → '%20', 'é' → '%C3%A9', '/' kept literal; the params dict
+    rides verbatim (no URL-quoting of values — they are JSON-serialized).
+    """
+    from sanctum_cli.devices.sagemcom import SagemcomHubProvider
+
+    params = {"ExternalPort": "8443", "Comment": "café 50%"}
+    p = SagemcomHubProvider()
+    try:
+        p.connect(Creds(host="192.168.2.1", username="admin", secret=None, key_path=None))
+        p.add_row(HOSTILE_PATH, params)
+    finally:
+        p.disconnect()
+
+    action = real_encoding.sent_actions[0]
+    assert action["method"] == "addChild"
+    assert action["xpath"] == "Device/Services/BellNetworkCfg/Leaf%2541%20caf%C3%A9"
+    assert "%2525" not in action["xpath"]  # would mean double-encoding
+    # Params (incl. a value carrying a literal '%') ride verbatim in the JSON body.
+    assert action["parameters"] == params
+
+
+def test_delete_row_index_preserved_through_real_transport(
+    real_encoding: _RealEncodingClient,
+) -> None:
+    """delete_row() issues a real ``deleteChild`` carrying the instance index.
+
+    Driven through the genuine ``__api_request_async`` serialization so the
+    ``deleteChild`` action — verb, table xpath, and ``{"index": n}`` parameters —
+    is exactly what would hit the wire, not a field a convenient fake recorded.
+    """
+    from sanctum_cli.devices.sagemcom import SagemcomHubProvider
+
+    table = "Device/NAT/PortMapping"
+    p = SagemcomHubProvider()
+    try:
+        p.connect(Creds(host="192.168.2.1", username="admin", secret=None, key_path=None))
+        result = p.delete_row(table, 4)
+    finally:
+        p.disconnect()
+
+    action = real_encoding.sent_actions[0]
+    assert action["method"] == "deleteChild"
+    assert action["xpath"] == table
+    assert action["parameters"] == {"index": 4}
+    assert result.ok is True
 
 
 # ─── version-guard the reboot fail-closed seam (Task b) ──────────────────────

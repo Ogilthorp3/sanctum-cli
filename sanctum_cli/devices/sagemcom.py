@@ -38,6 +38,7 @@ import asyncio
 import contextlib
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, TypeVar
+from urllib.parse import quote
 
 from sanctum_cli import keychain
 from sanctum_cli.devices import registry
@@ -206,6 +207,45 @@ async def _reboot_raw(client: Any) -> Any:
     # unmodeled-top-level surface is then out of our reach but no worse than the
     # library's baseline.
     return await client.reboot()
+
+
+# The SAH datamodel verbs that mutate a multi-instance *table* (port-forwards,
+# DHCP static leases, firewall rules) — the one config class a single-leaf
+# ``setValue`` cannot reach — plus the generic escape hatch onto the full verb
+# set the raw transport exposes. The installed ``sagemcom_api`` 1.4.3 ships NO
+# convenience wrapper for any of these (only get/set/reboot), so they are issued
+# through the SAME name-mangled raw request seam ``reboot()`` uses — which returns
+# the full ``{"reply": {"error": ...}}`` envelope the fail-closed inspector reads.
+# The xpath in get/set rides through the library's own ``urllib.parse.quote``;
+# the raw seam does NOT quote, so the conventional getValue safe set is reused
+# here (preserves the datamodel ``/=[]'`` syntax — incl. ``Table[index]`` — while
+# encoding genuinely hostile chars exactly once).
+_SAH_XPATH_SAFE = "/=[]'"
+
+
+async def _action_raw(client: Any, action: dict[str, Any]) -> Any:
+    """Issue ONE arbitrary SAH action through the raw request seam.
+
+    Mirrors :func:`_reboot_raw` for the generic verb surface (action/add_row/
+    delete_row/apply_changes). Crucially, unlike ``reboot`` — which the library
+    models with a convenience ``client.reboot()`` — addChild/deleteChild/
+    applyChanges have NO library wrapper, so the raw seam is the ONLY path that
+    returns the fail-closed envelope. If a future ``sagemcom_api`` drops/renames
+    the mangled method, there is no safe fallback that yields the envelope, so we
+    raise :class:`DeviceError` rather than silently degrade to a green-looking
+    no-op (the version guard in the boundary suite fails loudly on the same rename).
+    """
+    raw = getattr(client, "_SagemcomClient__api_request_async", None)
+    if raw is None:
+        msg = "sagemcom_api raw request seam (_SagemcomClient__api_request_async) is missing"
+        raise DeviceError(
+            msg,
+            fix=(
+                "the installed sagemcom_api dropped/renamed the raw seam; pin a "
+                "version that exposes it (table/transaction verbs have no fallback)"
+            ),
+        )
+    return await raw([action], False)
 
 
 def _probe_is_sagemcom(gateway_ip: str) -> bool:  # noqa: ARG001 - probe is mocked in tests
@@ -450,6 +490,88 @@ class SagemcomHubProvider:
                 msg, fix="the hub did not accept the reboot; check admin rights and retry"
             )
         return OpResult(ok=True, detail="reboot issued")
+
+    def action(
+        self, method: str, xpath: str, parameters: dict[str, Any] | None = None
+    ) -> OpResult:
+        """Issue an arbitrary SAH verb by name, fail-closed on a rejected reply.
+
+        The generic escape hatch onto the full SAH verb set the raw transport seam
+        exposes (getValue/setValue/addChild/deleteChild/applyChanges/…). :meth:`set`
+        only reaches a single *leaf*; this reaches the table and transaction verbs
+        ``set`` cannot. Exactly like :meth:`set` / :meth:`reboot` (Contracts at the
+        Boundary), it inspects the RAW reply envelope itself and fail-closes — the
+        transport RETURNS (does not raise) on an error description it does not model,
+        so "the call did not raise" is NOT proof the verb landed.
+
+        The provider OWNS the xpath encoding here: ``set``/``get`` ride the
+        library's own ``urllib.parse.quote``, but this verb issues through the raw
+        seam (which does not quote), so the xpath is URL-quoted exactly once with
+        the datamodel-aware safe set (``/=[]'`` preserved — incl. ``Table[index]`` —
+        truly hostile chars encoded once, never double-quoted). ``parameters`` ride
+        verbatim in the JSON body (no URL-quoting — they are JSON-serialized).
+        """
+        client = self._require_client()
+        act: dict[str, Any] = {
+            "id": 0,
+            "method": method,
+            "xpath": quote(xpath, _SAH_XPATH_SAFE),
+            "parameters": parameters if parameters is not None else {},
+        }
+        try:
+            reply = self._run(_action_raw(client, act))
+        except DeviceError:
+            # A missing raw seam (no fallback) is already a fail-closed DeviceError —
+            # propagate it unwrapped rather than masking it as a transport error.
+            raise
+        except Exception as exc:  # normalize any transport error
+            msg = f"Sagemcom {method} failed for {xpath!r}: {exc}"
+            raise DeviceError(
+                msg, fix="check the hub is reachable and the session is valid"
+            ) from exc
+        err = _reply_error(reply)
+        if err is not None:
+            msg = f"Sagemcom {method} for {xpath!r} was rejected by the hub: {err}"
+            raise DeviceError(
+                msg,
+                fix="the hub did not accept the operation; check the verb/xpath/params and retry",
+            )
+        return OpResult(ok=True, detail=f"{method} {xpath}")
+
+    def add_row(self, xpath: str, params: dict[str, Any]) -> OpResult:
+        """Add a row to a multi-instance table via the SAH ``addChild`` verb.
+
+        For the one config class :meth:`set` cannot reach — a table of instances:
+        port-forwards (``Device/NAT/PortMapping``), DHCP static leases, firewall
+        rules. ``xpath`` is the table object; ``params`` are the new instance's
+        field values. Fail-closed via :meth:`action` (a rejected addChild raises
+        rather than reporting a phantom row). Pair with :meth:`apply_changes` when
+        the firmware batches the transaction.
+        """
+        return self.action("addChild", xpath, params)
+
+    def delete_row(self, xpath: str, index: int) -> OpResult:
+        """Delete row ``index`` from a multi-instance table via ``deleteChild``.
+
+        ``xpath`` is the table object and ``index`` identifies the instance to
+        remove (carried in the action's ``parameters`` as ``{"index": index}``).
+        Fail-closed via :meth:`action`. If a firmware variant instead addresses the
+        instance in the path (``Table[index]``), reach it through :meth:`action`
+        directly — this convenience encodes the conventional SAH ``deleteChild``
+        shape.
+        """
+        return self.action("deleteChild", xpath, {"index": index})
+
+    def apply_changes(self) -> OpResult:
+        """Commit pending table/leaf changes via the SAH ``applyChanges`` verb.
+
+        Issued at the ``Device`` root (the conventional global-apply target, as
+        :meth:`reboot` targets ``Device``). Fail-closed via :meth:`action`. Some
+        firmwares auto-apply each ``setValue``/``addChild`` and treat this as a
+        no-op; others batch a transaction that only lands on ``applyChanges`` — so
+        a table mutation that must be durable calls this after the row verbs.
+        """
+        return self.action("applyChanges", "Device")
 
     def capabilities(self) -> AbstractSet[Capability]:
         """Operations this hub actually supports."""
