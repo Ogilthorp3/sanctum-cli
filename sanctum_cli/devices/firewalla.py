@@ -74,18 +74,18 @@ _SSH_PORT = 22
 _SSH_PROBE_TIMEOUT_S = 1.0
 
 # The policy subtree we snapshot before a mutating intent. A policy-state
-# snapshot is the restorable baseline a pause/set rollback restores.
+# snapshot is the restorable baseline a future pause/set rollback would restore.
 #
-# PROVISIONAL (Task 6 finding 2): ``/policies/restore`` is NOT yet part of the
+# HONEST-VERIFY (Task 6 finding 2): there is NO ``POST /policies/restore`` in the
 # established Firewalla bridge contract — the shipping screen_time surface only
 # GETs /info, /policies, /host/<mac>, /hosts and references the one documented
-# mutate POST /policies/purge. ``snapshot``/``rollback`` below are retained so the
-# machinery exists for a future re-enable, but the CLI ``pause`` mutate path that
-# would drive them is DESCOPED (see ``commands/net.py``) until this route is
-# implemented in the bridge server and an env-gated read-only contract smoke
-# confirms its shape. No live POST to this route is fired in the shipped surface.
+# mutate POST /policies/purge. ``snapshot`` is retained (the captured baseline is
+# the audit-trail record for a manual recovery), but ``rollback`` no longer POSTs
+# to that non-existent route — it reports ``ok=False`` so the rails surface a
+# manual-recovery instruction instead of a false success. The CLI ``pause`` mutate
+# path that would drive it is DESCOPED (see ``commands/net.py``) until the bridge
+# implements the route and an env-gated contract smoke confirms its shape.
 _POLICIES_PATH = "/policies"
-_POLICIES_RESTORE_PATH = "/policies/restore"
 _INFO_PATH = "/info"
 
 # HTTP timeout for bridge calls (seconds). Matches the screen_time engine.
@@ -446,12 +446,18 @@ class FirewallaProvider:
         return OpResult(ok=True, detail=f"set {path}", before=before, after=value)
 
     def capabilities(self) -> AbstractSet[Capability]:
-        """Operations this box actually supports through the bridge."""
+        """Operations this box actually supports through the bridge.
+
+        Honest-verify: WAN_MODE is NOT advertised. NAT/DMZ/WAN-mode are GUI-only on
+        a Firewalla — the bridge proxies no WAN-mode route — so a WAN_MODE cap would
+        name an op that does not exist. Only the surfaces the bridge truly drives
+        are advertised: READ (the GET seam), POLICY (per-device policy/rules/pause),
+        and SCREEN_TIME (the screen-time engine's bridge reads/writes).
+        """
         return {
             Capability.READ,
             Capability.POLICY,
             Capability.SCREEN_TIME,
-            Capability.WAN_MODE,
         }
 
     def capability_op(self, capability: Capability) -> CapabilityOp | None:  # noqa: ARG002
@@ -489,13 +495,21 @@ class FirewallaProvider:
         )
 
     def rollback(self, snap: Snapshot) -> OpResult:
-        """Restore the captured policy state through the bridge restore endpoint.
+        """Honestly report that the bridge cannot auto-restore policy state.
 
-        Reports ``ok=False`` when the snapshot carries no restorable baseline
-        (``snap.data`` empty, or no ``/policies`` key) — an empty rollback is NOT
-        a success: it would leave a half-applied box (e.g. a policy still paused)
-        while falsely reporting it was restored. The rails treat ``ok=False`` as
-        a failed restore and surface a manual-recovery instruction.
+        The Firewalla bridge exposes NO bulk policy-restore route — the established
+        contract is GET ``/policies`` + the one documented ``/policies/purge``
+        mutate; there is no ``POST /policies/restore``. The prior code POSTed to
+        that non-existent route, a silent no-op that (against a catch-all) could
+        even report a green restore that never happened — exactly the honest-verify
+        violation this fixes. So rollback fires NO phantom write and ALWAYS reports
+        ``ok=False``: an empty baseline AND a captured-but-unrestorable baseline are
+        both failed restores. The rails treat ``ok=False`` as a failed restore and
+        surface the manual-recovery instruction (revert in the Firewalla app),
+        instead of a false success on a route that does not exist. The captured
+        ``/policies`` snapshot is retained in the audit trail for that manual
+        recovery; the pause mutate path that would drive this is itself DESCOPED in
+        ``commands/net.py`` until the bridge implements the route.
         """
         captured = snap.data.get(_POLICIES_PATH)
         if not captured:
@@ -503,13 +517,13 @@ class FirewallaProvider:
                 ok=False,
                 detail="rollback failed: snapshot carried no restorable policy baseline",
             )
-        result = _post_bridge_json(_POLICIES_RESTORE_PATH, {"policies": captured})
-        if result is None:
-            return OpResult(
-                ok=False,
-                detail="rollback failed: bridge refused policy restore",
-            )
-        return OpResult(ok=True, detail="restored policy state")
+        return OpResult(
+            ok=False,
+            detail=(
+                "rollback unsupported: the Firewalla bridge exposes no policy-restore "
+                "route; restore the captured policy state manually in the Firewalla app"
+            ),
+        )
 
 
 # Self-register on import so the registry resolves ``firewalla`` to this provider.

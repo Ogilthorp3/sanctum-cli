@@ -83,11 +83,11 @@ class FakeOrbi:
         return OpResult(ok=True, detail=f"set {path}", before=before, after=value)
 
     def capabilities(self) -> set[Capability]:
+        # Honest surface: only caps with a real pynetgear write (no AP_MODE /
+        # CHANNELS SOAP action exists), mirroring the real OrbiProvider.
         return {
             Capability.READ,
             Capability.FIRMWARE,
-            Capability.AP_MODE,
-            Capability.CHANNELS,
             Capability.GUEST_WIFI,
         }
 

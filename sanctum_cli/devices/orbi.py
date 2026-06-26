@@ -348,12 +348,19 @@ class OrbiProvider:
         return OpResult(ok=False, detail=f"orbi: path not writable: {path}")
 
     def capabilities(self) -> AbstractSet[Capability]:
-        """Operations this Orbi actually supports."""
+        """Operations this Orbi actually supports.
+
+        Honest-verify: ``pynetgear``'s 49 fixed SOAP actions include NO write for
+        the AP/router operating mode and NO write for the radio channel — there is
+        no set-AP-mode or set-channel verb, and (unlike Sagemcom) no raw escape
+        hatch to reach an unmodeled leaf. So AP_MODE and CHANNELS are NOT
+        advertised: the only writable surface here is guest-wifi (the one cap with
+        a real ``set_*_guest_access_enabled`` setter + a capability_op). READ and
+        FIRMWARE are backed by the read / firmware-check getters.
+        """
         return {
             Capability.READ,
             Capability.FIRMWARE,
-            Capability.AP_MODE,
-            Capability.CHANNELS,
             Capability.GUEST_WIFI,
         }
 

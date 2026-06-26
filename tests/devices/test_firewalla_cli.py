@@ -68,11 +68,12 @@ class FakeFirewalla:
         return OpResult(ok=True, detail="set", before=None, after=value)
 
     def capabilities(self) -> set[Capability]:
+        # Honest surface: no WAN_MODE (the bridge proxies no WAN-mode route),
+        # mirroring the real FirewallaProvider.
         return {
             Capability.READ,
             Capability.POLICY,
             Capability.SCREEN_TIME,
-            Capability.WAN_MODE,
         }
 
     def capability_op(self, capability: Capability) -> CapabilityOp | None:

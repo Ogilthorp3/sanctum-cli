@@ -70,13 +70,35 @@ _BRIDGE_MODE_XPATH = "Device/Services/BellNetworkCfg/SetBridgeMode"
 _ADVANCED_DMZ_XPATH = "Device/Services/BellNetworkCfg/AdvancedDMZ"
 _SNAPSHOT_XPATHS = (_BRIDGE_MODE_XPATH, _ADVANCED_DMZ_XPATH)
 
-# The brand-owned vocabulary: high-level Capability → the Bell TR-069 (path,
-# engaged-value) that achieves it. A Layer-2 intent reaches bridge mode through
-# this map (via capability_op), so it never hardcodes a Bell XPath — adding a
-# non-TR-069 brand is one new provider with its own map, no intent change.
+# The WiFi/guest/channel leaves the near-total setValue surface also reaches.
+# These are the standard TR-181 Device:2 datamodel addresses (the BBF schema the
+# SAH datamodel implements — a different-author source than this module),
+# translated to SAH ``/`` xpath form. capability_op supplies the path a Layer-2
+# intent sets; ``discover()`` is the per-hub verifier that confirms the specific
+# leaf is settable (not pinned NON_WRITABLE / ACCESS_RESTRICTION) before a mutate.
+_WIFI_ENABLE_XPATH = "Device/WiFi/SSID/1/Enable"
+_GUEST_WIFI_ENABLE_XPATH = "Device/WiFi/SSID/2/Enable"
+_CHANNEL_XPATH = "Device/WiFi/Radio/1/Channel"
+
+# WAN_MODE on a Bell hub IS the bridge-vs-router control — the single-NAT cutover
+# the flip drives. It shares the SetBridgeMode leaf with BRIDGE_MODE: two
+# capability NAMES for the one physical WAN-operating-mode control on this hub, so
+# both honestly resolve to the same real settable leaf.
+_WAN_MODE_XPATH = _BRIDGE_MODE_XPATH
+
+# The brand-owned vocabulary: high-level Capability → the Bell (path,
+# engaged-value) that achieves it. A Layer-2 intent reaches each capability
+# through this map (via capability_op), so it never hardcodes a Bell XPath —
+# adding a non-TR-069 brand is one new provider with its own map, no intent
+# change. Every feature-cap the hub advertises in :meth:`capabilities` is backed
+# by an entry here (honest-verify: no advertised toggle-cap without a real op).
 _CAPABILITY_OPS: dict[Capability, CapabilityOp] = {
     Capability.BRIDGE_MODE: CapabilityOp(path=_BRIDGE_MODE_XPATH, engaged="on"),
     Capability.DMZ: CapabilityOp(path=_ADVANCED_DMZ_XPATH, engaged="on"),
+    Capability.WIFI: CapabilityOp(path=_WIFI_ENABLE_XPATH, engaged="true"),
+    Capability.GUEST_WIFI: CapabilityOp(path=_GUEST_WIFI_ENABLE_XPATH, engaged="true"),
+    Capability.CHANNELS: CapabilityOp(path=_CHANNEL_XPATH, engaged="auto"),
+    Capability.WAN_MODE: CapabilityOp(path=_WAN_MODE_XPATH, engaged="on"),
 }
 
 # The leaves a single-NAT cutover actually MUTATES (derived from the capability
@@ -755,11 +777,16 @@ class SagemcomHubProvider:
         return _walk_subtree(subtree, path, depth)
 
     def capabilities(self) -> AbstractSet[Capability]:
-        """Operations this hub actually supports."""
+        """Operations this hub actually supports.
+
+        The feature-caps come straight from :data:`_CAPABILITY_OPS` (BRIDGE_MODE,
+        DMZ, WIFI, GUEST_WIFI, CHANNELS, WAN_MODE) so every advertised toggle-cap
+        is backed by a real settable-leaf op — the two can never drift. The verb
+        caps (READ/SET/FIRMWARE/REBOOT) are backed by the provider's own methods.
+        """
         return set(_CAPABILITY_OPS) | {
             Capability.READ,
             Capability.SET,
-            Capability.WAN_MODE,
             Capability.FIRMWARE,
             Capability.REBOOT,
         }

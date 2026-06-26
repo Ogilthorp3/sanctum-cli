@@ -286,12 +286,15 @@ def test_capabilities_advertise_firewalla_surface(
 ) -> None:
     p, _ = _connected(monkeypatch)
     caps = p.capabilities()
+    # Honest-verify: WAN_MODE is NOT advertised — the bridge proxies no WAN-mode
+    # route (NAT/DMZ/WAN are GUI-only on a Firewalla), so a cap with no op behind
+    # it is dishonest. Only the surfaces the bridge truly drives are named.
     assert caps == {
         Capability.READ,
         Capability.POLICY,
         Capability.SCREEN_TIME,
-        Capability.WAN_MODE,
     }
+    assert Capability.WAN_MODE not in caps
 
 
 def test_capability_op_none_for_unbound(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -326,9 +329,19 @@ def test_snapshot_empty_when_policies_unreachable(
     assert snap.data == {}
 
 
-def test_rollback_restores_captured_policies(
+def test_rollback_is_honest_about_missing_restore_route(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Honest-verify: rollback fires NO phantom POST and reports ok=False.
+
+    The Firewalla bridge exposes no bulk policy-restore route (the established
+    contract is GET /policies + the documented /policies/purge mutate; there is no
+    POST /policies/restore). The prior code POSTed to that non-existent route — a
+    silent no-op that, against a catch-all, could even report a green restore that
+    never happened. The honest contract: do NOT hit a route that does not exist;
+    report ok=False so the rails surface a manual-recovery instruction instead of a
+    false success. A non-empty baseline must still NOT trigger any bridge write.
+    """
     from sanctum_cli.devices import firewalla as fw
     from sanctum_cli.devices.base import Snapshot
 
@@ -343,9 +356,10 @@ def test_rollback_restores_captured_policies(
         data={"/policies": '{"policies": [{"pid": "1", "paused": false}]}'},
     )
     res = p.rollback(snap)
-    assert res.ok is True
-    # rollback re-applies the captured policy state through the bridge.
-    assert any(path == "/policies/restore" for path, _ in posts)
+    assert res.ok is False
+    assert "restore" in res.detail.lower()
+    # The defect: NO POST to the non-existent /policies/restore (or anywhere).
+    assert posts == []
 
 
 def test_rollback_empty_snapshot_reports_failure(

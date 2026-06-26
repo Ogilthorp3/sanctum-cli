@@ -302,6 +302,36 @@ def test_capabilities_advertise_hub_surface(
     assert Capability.BRIDGE_MODE in caps
     assert Capability.DMZ in caps
     assert Capability.WAN_MODE in caps
+    # The near-total setValue surface reaches the WiFi/guest/channel leaves too, so
+    # the hub honestly advertises them — each backed by a real capability_op below.
+    assert Capability.WIFI in caps
+    assert Capability.GUEST_WIFI in caps
+    assert Capability.CHANNELS in caps
+
+
+def test_every_advertised_toggle_cap_maps_to_a_real_settable_leaf(
+    patched: FakeSahClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Honest-verify: each advertised feature-cap returns a real (path, engaged) op.
+
+    A capability the hub advertises is only honest if a Layer-2 intent can compose
+    a REAL ``set`` from it — i.e. ``capability_op`` returns a non-None binding whose
+    ``path`` is a concrete settable leaf (the near-total setValue surface drives it,
+    proven by the set tests). No feature-cap may be advertised with no op behind it.
+    """
+    p = _connected(monkeypatch, patched)
+    for cap in (
+        Capability.BRIDGE_MODE,
+        Capability.DMZ,
+        Capability.WIFI,
+        Capability.GUEST_WIFI,
+        Capability.CHANNELS,
+        Capability.WAN_MODE,
+    ):
+        op = p.capability_op(cap)
+        assert op is not None, f"{cap} advertised with no capability_op (honest-verify)"
+        assert op.path, f"{cap} maps to an empty path"
+        assert op.engaged
 
 
 def test_capability_op_maps_bridge_mode_to_bell_xpath(
@@ -315,6 +345,25 @@ def test_capability_op_maps_bridge_mode_to_bell_xpath(
     assert op is not None
     assert op.path == BRIDGE_PATH
     assert op.engaged == "on"
+
+
+def test_capability_op_maps_wifi_leaves_to_datamodel_xpaths(
+    patched: FakeSahClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The WiFi/guest/channel caps map to concrete TR-181 datamodel leaves.
+
+    discover() is the per-hub verifier of writability; capability_op supplies the
+    brand path a Layer-2 intent sets. The paths are the standard TR-181 Device
+    datamodel addresses (a different-author source than this producer), translated
+    to SAH ``/`` xpath form.
+    """
+    p = _connected(monkeypatch, patched)
+    wifi = p.capability_op(Capability.WIFI)
+    assert wifi is not None and wifi.path == "Device/WiFi/SSID/1/Enable"
+    guest = p.capability_op(Capability.GUEST_WIFI)
+    assert guest is not None and guest.path == "Device/WiFi/SSID/2/Enable"
+    channels = p.capability_op(Capability.CHANNELS)
+    assert channels is not None and channels.path == "Device/WiFi/Radio/1/Channel"
 
 
 def test_capability_op_none_for_unsupported(

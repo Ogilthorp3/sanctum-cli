@@ -322,9 +322,24 @@ def test_capabilities_advertise_orbi_surface(
     caps = p.capabilities()
     assert Capability.READ in caps
     assert Capability.FIRMWARE in caps
-    assert Capability.AP_MODE in caps
-    assert Capability.CHANNELS in caps
     assert Capability.GUEST_WIFI in caps
+
+
+def test_capabilities_omit_caps_with_no_soap_write(
+    patched: FakeNetgear, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Honest-verify: AP_MODE and CHANNELS are NOT advertised — pynetgear has no
+    SOAP action that writes either (no set-AP-mode, no set-channel verb), so the
+    only writable surface is guest-wifi. Advertising a cap with no backing write
+    is the dishonesty this guards: capabilities() may name only ops that exist.
+    """
+    p = _connected(monkeypatch, patched)
+    caps = p.capabilities()
+    assert Capability.AP_MODE not in caps
+    assert Capability.CHANNELS not in caps
+    # And no phantom capability_op for either (no blind mutation path).
+    assert p.capability_op(Capability.AP_MODE) is None
+    assert p.capability_op(Capability.CHANNELS) is None
 
 
 def test_capability_op_maps_guest_wifi(
