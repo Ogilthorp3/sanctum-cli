@@ -74,19 +74,42 @@ _SSH_PORT = 22
 _SSH_PROBE_TIMEOUT_S = 1.0
 
 # The policy subtree we snapshot before a mutating intent. A policy-state
-# snapshot is the restorable baseline a future pause/set rollback would restore.
+# snapshot is the restorable baseline ``rollback`` reconciles the live box against.
 #
-# HONEST-VERIFY (Task 6 finding 2): there is NO ``POST /policies/restore`` in the
-# established Firewalla bridge contract — the shipping screen_time surface only
-# GETs /info, /policies, /host/<mac>, /hosts and references the one documented
-# mutate POST /policies/purge. ``snapshot`` is retained (the captured baseline is
-# the audit-trail record for a manual recovery), but ``rollback`` no longer POSTs
-# to that non-existent route — it reports ``ok=False`` so the rails surface a
-# manual-recovery instruction instead of a false success. The CLI ``pause`` mutate
-# path that would drive it is DESCOPED (see ``commands/net.py``) until the bridge
-# implements the route and an env-gated contract smoke confirms its shape.
+# HONEST-VERIFY: there is NO ``POST /policies/restore`` in the Firewalla bridge
+# contract — the shipping surface GETs /info, /policies, /host/<mac>, /hosts and
+# mutates per-policy. So ``rollback`` does NOT hit a phantom bulk-restore route; it
+# reconciles the captured baseline against the live ``/policies`` state using the
+# routes that DO exist: ``DELETE /policy/:pid`` (for a policy added since the
+# snapshot) and the ``POST /raw`` ``policy:create`` escape hatch (for a policy
+# removed since the snapshot). It is fail-closed — an absent baseline, an unreadable
+# live state, or any primitive that reports failure makes the whole rollback
+# ``ok=False`` so the rails surface a manual-recovery instruction, never a false
+# success.
 _POLICIES_PATH = "/policies"
 _INFO_PATH = "/info"
+
+
+def _policies_by_pid(payload: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+    """Index a ``GET /policies`` reply by its string pid.
+
+    The bridge answers ``{"policies": [...], "count": N}`` where each policy carries
+    a ``pid`` (a string on the wire, e.g. ``"7"``). Returns a ``{pid: policy}`` map so
+    :meth:`FirewallaProvider.rollback` can diff the captured baseline against the live
+    state by id. A non-dict payload, a missing/!list ``policies`` field, or a policy
+    with no ``pid`` is skipped (it cannot be addressed by ``DELETE /policy/:pid`` nor
+    re-created deterministically) — keeping the diff honest about what it can restore.
+    """
+    if not payload:
+        return {}
+    policies = payload.get("policies")
+    if not isinstance(policies, list):
+        return {}
+    indexed: dict[str, dict[str, Any]] = {}
+    for pol in policies:
+        if isinstance(pol, dict) and pol.get("pid") is not None:
+            indexed[str(pol["pid"])] = pol
+    return indexed
 
 # HTTP timeout for bridge calls (seconds). Matches the screen_time engine.
 _HTTP_TIMEOUT_S = 15
@@ -356,6 +379,35 @@ def _ssh_port_open() -> bool:
     return True
 
 
+# Caps whose bridge routes exist regardless of the box's enforcement mode — reads,
+# box-level ops, and local-DNS behave the same in router / spoof / dhcp mode.
+_BASE_CAPS: frozenset[Capability] = frozenset(
+    {
+        Capability.READ,
+        Capability.LOCAL_DNS,
+        Capability.ALARM_ACK,
+        Capability.WAKE_ON_LAN,
+        Capability.SPEEDTEST,
+        Capability.REBOOT,
+    }
+)
+# Caps that only ENFORCE when the box is enforcement-ready (router mode). A per-device
+# block / policy / rule, a feature toggle, or a screen-time pause installs over the
+# bridge in any mode, but on a box that is NOT enforcement-ready the write does not
+# reliably take effect — so /info's ``enforcement_ready`` gates whether they are
+# advertised (an EXPLICIT ``false`` strips them; unknown keeps them — the routes exist).
+_ENFORCEMENT_CAPS: frozenset[Capability] = frozenset(
+    {
+        Capability.POLICY,
+        Capability.SCREEN_TIME,
+        Capability.DEVICE_BLOCK,
+        Capability.DEVICE_POLICY,
+        Capability.DEVICE_RULES,
+        Capability.FEATURE_TOGGLE,
+    }
+)
+
+
 class FirewallaProvider:
     """Layer-1 control surface for a Firewalla box (bridge HTTP + durable SSH)."""
 
@@ -508,6 +560,49 @@ class FirewallaProvider:
         after = json.dumps(result, separators=(",", ":"), ensure_ascii=False)
         return OpResult(ok=True, detail=f"POST {path}", before=before, after=after)
 
+    def raw(
+        self,
+        msg_type: str,
+        item: str,
+        *,
+        value: dict[str, Any] | None = None,
+        target: str | None = None,
+    ) -> OpResult:
+        """Generic escape hatch — ``POST /raw`` ``{type,item,value,target}``.
+
+        The Firewalla counterpart to Sagemcom's ``action`` escape hatch: it reaches
+        the bridge's ``POST /raw`` route, which builds a raw ``FWMessage(type,
+        {item, value}, target)`` and sends it straight to the box — so ANY SDK verb
+        the named ops do not wrap (a ``policy:create``, a fresh ``get`` the box
+        exposes, a future feature message) is reachable without a provider change.
+        ``msg_type`` and ``item`` are REQUIRED by the route (the bridge 400s without
+        both, so they are positional); ``value`` (box-side default ``{}``) and
+        ``target`` (box-side default ``"0.0.0.0"``) are OMITTED from the body when the
+        caller leaves them unset, so the bridge fills its own defaults rather than the
+        provider sending a field it never meant to specify. Rides the SAME
+        route-correct POST as :meth:`op`, so a bridge refusal yields ``ok=False``
+        (never a phantom success); composed behind ``guarded_apply`` at the intent
+        layer — never auto-fired.
+        """
+        body: dict[str, Any] = {"type": msg_type, "item": item}
+        if value is not None:
+            body["value"] = value
+        if target is not None:
+            body["target"] = target
+        return self.op("/raw", body)
+
+    def _recreate_policy(self, policy: dict[str, Any]) -> OpResult:
+        """Re-create a policy removed since the snapshot — ``POST /raw`` ``policy:create``.
+
+        The restore half that the bridge has no dedicated route for: it mirrors the
+        bridge's OWN policy-creation path (``sendCmd("policy:create", …)`` =
+        ``FWCmdMessage``), reached here through the generic :meth:`raw` escape hatch as
+        a ``cmd``-type message carrying the captured policy object as its value. The
+        box assigns a fresh pid on creation (the captured ``pid`` is advisory), so the
+        captured policy rides verbatim as the create payload.
+        """
+        return self.raw("cmd", "policy:create", value=policy)
+
     def _delete_op(self, path: str) -> OpResult:
         """Generic route-correct ``DELETE`` for ``/policy/:pid`` + ``/dns/:hostname``.
 
@@ -643,29 +738,35 @@ class FirewallaProvider:
         return self.box_reboot()
 
     def capabilities(self) -> AbstractSet[Capability]:
-        """Operations this box actually supports through the bridge.
+        """Operations this box actually supports — data-driven from ``GET /info``.
 
-        Honest-verify: every advertised cap is backed by a REAL, route-correct op on
-        this provider (the method that POSTs/DELETEs the matching bridge route). The
-        device/feature/dns/box/alarm/wol/speedtest caps go in because the named ops
-        back them; REBOOT goes in because :meth:`box_reboot`/:meth:`reboot` back it.
-        WAN_MODE stays OUT — NAT/DMZ/WAN-mode are GUI-only on a Firewalla (the bridge
-        proxies no such route), so a WAN_MODE cap would name an op that does not exist.
+        Honest-verify on two axes:
+
+        * every advertised cap is backed by a REAL, route-correct op on this provider
+          (the method that POSTs/DELETEs the matching bridge route); and
+        * the enforcement-class caps (per-device block / policy / rules, feature
+          toggles, screen-time) are advertised only when ``/info`` reports the box is
+          ``enforcement_ready`` (router mode). On a box NOT in router mode those policy
+          writes install but do not reliably ENFORCE, so advertising them would
+          over-promise — an EXPLICIT ``capabilities.enforcement_ready == false`` from
+          the box strips them. When ``/info`` is unreachable or omits the flag (older
+          bridge, transient down) the enforcement state is UNKNOWN and the ops' routes
+          still exist, so they are kept — only an explicit ``false`` shrinks the
+          surface, never a momentary read failure.
+
+        ``WAN_MODE`` is NEVER advertised — NAT/DMZ/WAN-mode are GUI-only on a Firewalla
+        (the bridge proxies no such route), so a ``WAN_MODE`` cap would name an op that
+        does not exist (it stays a real cap for the Sagemcom hub, which DOES back it).
         """
-        return {
-            Capability.READ,
-            Capability.POLICY,
-            Capability.SCREEN_TIME,
-            Capability.DEVICE_BLOCK,
-            Capability.DEVICE_POLICY,
-            Capability.DEVICE_RULES,
-            Capability.FEATURE_TOGGLE,
-            Capability.LOCAL_DNS,
-            Capability.ALARM_ACK,
-            Capability.WAKE_ON_LAN,
-            Capability.SPEEDTEST,
-            Capability.REBOOT,
-        }
+        caps: set[Capability] = set(_BASE_CAPS)
+        info = _fetch_bridge_json(_INFO_PATH)
+        info_caps = info.get("capabilities") if isinstance(info, dict) else None
+        enforcement_ready = (
+            info_caps.get("enforcement_ready") if isinstance(info_caps, dict) else None
+        )
+        if enforcement_ready is not False:
+            caps |= _ENFORCEMENT_CAPS
+        return caps
 
     def capability_op(self, capability: Capability) -> CapabilityOp | None:  # noqa: ARG002
         """No brand-specific (path, engaged) binding is exposed.
@@ -702,33 +803,77 @@ class FirewallaProvider:
         )
 
     def rollback(self, snap: Snapshot) -> OpResult:
-        """Honestly report that the bridge cannot auto-restore policy state.
+        """Restore the captured policy baseline via the bridge's REAL primitives.
 
-        The Firewalla bridge exposes NO bulk policy-restore route — the established
-        contract is GET ``/policies`` + the one documented ``/policies/purge``
-        mutate; there is no ``POST /policies/restore``. The prior code POSTed to
-        that non-existent route, a silent no-op that (against a catch-all) could
-        even report a green restore that never happened — exactly the honest-verify
-        violation this fixes. So rollback fires NO phantom write and ALWAYS reports
-        ``ok=False``: an empty baseline AND a captured-but-unrestorable baseline are
-        both failed restores. The rails treat ``ok=False`` as a failed restore and
-        surface the manual-recovery instruction (revert in the Firewalla app),
-        instead of a false success on a route that does not exist. The captured
-        ``/policies`` snapshot is retained in the audit trail for that manual
-        recovery; the pause mutate path that would drive this is itself DESCOPED in
-        ``commands/net.py`` until the bridge implements the route.
+        Re-based off the routes that ACTUALLY exist (the prior code POSTed a
+        non-existent ``POST /policies/restore`` — a silent no-op that, against a
+        catch-all, could even report a green restore that never happened). The diff
+        between the captured ``/policies`` baseline and the LIVE state is reconciled:
+
+        * a policy present in the live state but NOT in the baseline was ADDED since
+          the snapshot → removed with ``DELETE /policy/:pid``;
+        * a policy in the baseline but gone from the live state was REMOVED since the
+          snapshot → re-created with the ``POST /raw`` ``policy:create`` escape hatch.
+
+        Fail-closed throughout — an absent baseline, an unreadable live state, OR any
+        primitive that reports ``ok=False`` makes the WHOLE rollback ``ok=False`` so
+        the rails surface a manual-recovery instruction instead of a false success. A
+        live state already equal to the baseline is a successful restore that mutates
+        nothing (``ok=True``).
         """
+        self._require_connected()
         captured = snap.data.get(_POLICIES_PATH)
         if not captured:
             return OpResult(
                 ok=False,
                 detail="rollback failed: snapshot carried no restorable policy baseline",
             )
+        try:
+            baseline_raw = json.loads(captured)
+        except (json.JSONDecodeError, TypeError):
+            return OpResult(
+                ok=False,
+                detail="rollback failed: snapshot policy baseline is not valid JSON",
+            )
+        baseline = _policies_by_pid(baseline_raw if isinstance(baseline_raw, dict) else None)
+
+        live = _fetch_bridge_json(_POLICIES_PATH)
+        if live is None:
+            return OpResult(
+                ok=False,
+                detail=(
+                    "rollback failed: could not read the live policy state to reconcile "
+                    "against the baseline; restore manually in the Firewalla app"
+                ),
+            )
+        current = _policies_by_pid(live)
+
+        # Added since the snapshot → delete; removed since the snapshot → re-create.
+        to_delete = [pid for pid in current if pid not in baseline]
+        to_recreate = [pol for pid, pol in baseline.items() if pid not in current]
+
+        failures: list[str] = []
+        for pid in to_delete:
+            if not self._delete_op(f"/policy/{pid}").ok:
+                failures.append(f"delete pid={pid}")
+        for pol in to_recreate:
+            if not self._recreate_policy(pol).ok:
+                failures.append(f"recreate pid={pol.get('pid')}")
+
+        if failures:
+            return OpResult(
+                ok=False,
+                detail=(
+                    "rollback FAILED (fail-closed): "
+                    + ", ".join(failures)
+                    + "; restore the remaining policy state manually in the Firewalla app"
+                ),
+            )
         return OpResult(
-            ok=False,
+            ok=True,
             detail=(
-                "rollback unsupported: the Firewalla bridge exposes no policy-restore "
-                "route; restore the captured policy state manually in the Firewalla app"
+                f"rollback restored policy baseline "
+                f"(deleted {len(to_delete)} added, re-created {len(to_recreate)} removed)"
             ),
         )
 

@@ -27,7 +27,7 @@ import httpx
 import pytest
 
 from sanctum_cli.devices import firewalla as fw
-from sanctum_cli.devices.base import Capability, Creds
+from sanctum_cli.devices.base import Capability, Creds, Snapshot
 from sanctum_cli.devices.firewalla import FirewallaProvider
 
 
@@ -355,4 +355,235 @@ def test_capabilities_advertise_only_backed_ops(monkeypatch: pytest.MonkeyPatch)
         Capability.REBOOT,
     }
     assert caps == expected
+    assert Capability.WAN_MODE not in caps
+
+
+# ── /raw escape hatch: POST /raw {type,item,value,target} ─────────────────
+
+
+def test_raw_escape_hatch_posts_type_item_value_target(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The generic escape hatch reaches POST /raw with the route's own body keys.
+
+    Derived from the REAL bridge contract (firewalla-bridge.js: ``POST /raw`` reads
+    ``const {type, item, value, target} = body`` and builds ``new FWMessage(type,
+    {item, value}, target)``) — NOT a convenient fake. So the body the provider puts
+    on the wire must carry exactly ``type``/``item``/``value``/``target``.
+    """
+    cap = _capture(monkeypatch)
+    p = _provider(monkeypatch)
+    res = p.raw(
+        "cmd",
+        "policy:create",
+        value={"type": "mac", "action": "block"},
+        target=MAC,
+    )
+    assert res.ok is True
+    assert (cap[-1]["method"], cap[-1]["path"]) == ("POST", "/raw")
+    assert cap[-1]["body"] == {
+        "type": "cmd",
+        "item": "policy:create",
+        "value": {"type": "mac", "action": "block"},
+        "target": MAC,
+    }
+    assert cap[-1]["auth"] == "Bearer tok"
+
+
+def test_raw_omits_optional_value_and_target(monkeypatch: pytest.MonkeyPatch) -> None:
+    """type+item are required; value/target are omitted so the bridge fills its defaults.
+
+    The route defaults ``value`` to ``{}`` and ``target`` to ``"0.0.0.0"`` server-side
+    (``value || {}`` / ``target || "0.0.0.0"``), so the provider sends only what the
+    caller set — no phantom ``value``/``target`` it never meant to specify.
+    """
+    cap = _capture(monkeypatch)
+    p = _provider(monkeypatch)
+    p.raw("get", "policies")
+    assert cap[-1]["body"] == {"type": "get", "item": "policies"}
+
+
+def test_raw_bridge_refusal_reports_not_ok(monkeypatch: pytest.MonkeyPatch) -> None:
+    _capture(monkeypatch, status=500, reply={"error": "boom"})
+    p = _provider(monkeypatch)
+    assert p.raw("cmd", "policy:create").ok is False
+
+
+def test_raw_before_connect_raises() -> None:
+    from sanctum_cli.devices.base import DeviceError
+
+    p = FirewallaProvider()
+    with pytest.raises(DeviceError):
+        p.raw("cmd", "policy:create")
+
+
+# ── rollback: re-based off the REAL primitives (DELETE /policy/:pid + /raw) ─
+
+
+def _baseline(policies: list[dict[str, Any]]) -> Snapshot:
+    """A Snapshot whose /policies baseline is the given policy list (bridge shape)."""
+    payload = json.dumps({"policies": policies, "count": len(policies)})
+    return Snapshot(brand="firewalla", taken_at="t", data={"/policies": payload})
+
+
+def test_rollback_deletes_policies_added_since_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A policy present NOW but not in the baseline was added → DELETE /policy/:pid.
+
+    Proves rollback calls the REAL restore primitive (DELETE /policy/:pid) rather
+    than the prior silent POST to a non-existent /policies/restore.
+    """
+    cap = _capture(monkeypatch)
+    p = _provider(monkeypatch)
+    # Live state has an extra pid 9 that the captured baseline never had.
+    live = {"policies": [{"pid": "7"}, {"pid": "9"}], "count": 2}
+    monkeypatch.setattr(fw, "_fetch_bridge_json", lambda *a, **k: live)
+    res = p.rollback(_baseline([{"pid": "7"}]))
+    assert res.ok is True
+    deletes = [(c["method"], c["path"]) for c in cap if c["method"] == "DELETE"]
+    assert ("DELETE", "/policy/9") in deletes  # the added policy is removed
+    assert ("DELETE", "/policy/7") not in deletes  # the baseline policy is untouched
+
+
+def test_rollback_recreates_removed_policies_via_raw(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A policy in the baseline but gone NOW was removed → re-create via POST /raw.
+
+    Proves rollback uses the OTHER real primitive (the /raw policy:create escape
+    hatch), carrying the captured policy object verbatim as the create value.
+    """
+    cap = _capture(monkeypatch)
+    p = _provider(monkeypatch)
+    live = {"policies": [{"pid": "7"}], "count": 1}
+    monkeypatch.setattr(fw, "_fetch_bridge_json", lambda *a, **k: live)
+    removed = {"pid": "5", "type": "mac", "action": "block", "target": MAC}
+    res = p.rollback(_baseline([{"pid": "7"}, removed]))
+    assert res.ok is True
+    raws = [c for c in cap if c["path"] == "/raw"]
+    assert raws, "rollback must re-create the removed policy via the /raw escape hatch"
+    assert raws[-1]["method"] == "POST"
+    assert raws[-1]["body"]["item"] == "policy:create"
+    assert raws[-1]["body"]["value"] == removed  # the captured policy object, verbatim
+
+
+def test_rollback_fail_closed_when_delete_primitive_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the DELETE primitive reports failure, the whole rollback is ok=False.
+
+    Fail-closed: a half-restored device must NOT report a green restore. The bridge
+    answers ``500 {success:false}`` on a failed delete → ``delete_policy`` ok=False →
+    rollback ok=False (but it DID attempt the real primitive, not a silent no-op).
+    """
+    cap = _capture(monkeypatch, status=500, reply={"success": False})
+    p = _provider(monkeypatch)
+    live = {"policies": [{"pid": "7"}, {"pid": "9"}], "count": 2}
+    monkeypatch.setattr(fw, "_fetch_bridge_json", lambda *a, **k: live)
+    res = p.rollback(_baseline([{"pid": "7"}]))
+    assert res.ok is False
+    assert any(c["method"] == "DELETE" and c["path"] == "/policy/9" for c in cap)
+
+
+def test_rollback_fail_closed_when_live_state_unreadable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bridge that cannot report the live policy state → fail-closed ok=False.
+
+    Without a live read the diff cannot be computed, so rollback must NOT guess —
+    it reports failure (no phantom DELETE/POST) so the rails surface manual recovery.
+    """
+    cap = _capture(monkeypatch)
+    p = _provider(monkeypatch)
+    monkeypatch.setattr(fw, "_fetch_bridge_json", lambda *a, **k: None)  # bridge down
+    res = p.rollback(_baseline([{"pid": "7"}]))
+    assert res.ok is False
+    assert [c for c in cap if c["method"] in ("DELETE", "POST")] == []
+
+
+def test_rollback_empty_baseline_fail_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An empty snapshot has no baseline to restore to → ok=False, nothing mutated."""
+    cap = _capture(monkeypatch)
+    p = _provider(monkeypatch)
+    res = p.rollback(Snapshot(brand="firewalla", taken_at="t", data={}))
+    assert res.ok is False
+    assert cap == []
+
+
+def test_rollback_noop_when_already_at_baseline_is_ok(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Live state already equal to the baseline → successful restore that mutates nothing.
+
+    The key proof the new rollback is NOT just "always ok=False": when there is
+    genuinely nothing to reconcile it reports ok=True and fires no primitive.
+    """
+    cap = _capture(monkeypatch)
+    p = _provider(monkeypatch)
+    state = {"policies": [{"pid": "7"}], "count": 1}
+    monkeypatch.setattr(fw, "_fetch_bridge_json", lambda *a, **k: state)
+    res = p.rollback(_baseline([{"pid": "7"}]))
+    assert res.ok is True
+    assert [c for c in cap if c["method"] in ("DELETE", "POST")] == []
+
+
+# ── capabilities: data-driven from GET /info (router_mode/enforcement_ready) ─
+
+
+def test_capabilities_drop_enforcement_when_not_enforcement_ready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An EXPLICIT enforcement_ready=false from /info strips the enforcement caps.
+
+    On a box not in router mode, per-device/feature blocks install but do not
+    reliably ENFORCE — advertising them would over-promise. The base (read /
+    box-level / local-DNS) caps remain; WAN_MODE is never advertised either way.
+    Contract derived from firewalla-bridge.js ``capabilities().enforcement_ready``.
+    """
+    p = _provider(monkeypatch)
+    info = {"capabilities": {"router_mode": False, "enforcement_ready": False}}
+    monkeypatch.setattr(fw, "_fetch_bridge_json", lambda *a, **k: info)
+    caps = p.capabilities()
+    for gated in (
+        Capability.POLICY,
+        Capability.SCREEN_TIME,
+        Capability.DEVICE_BLOCK,
+        Capability.DEVICE_POLICY,
+        Capability.DEVICE_RULES,
+        Capability.FEATURE_TOGGLE,
+    ):
+        assert gated not in caps
+    for base in (
+        Capability.READ,
+        Capability.REBOOT,
+        Capability.SPEEDTEST,
+        Capability.LOCAL_DNS,
+        Capability.ALARM_ACK,
+        Capability.WAKE_ON_LAN,
+    ):
+        assert base in caps
+    assert Capability.WAN_MODE not in caps
+
+
+def test_capabilities_full_set_when_enforcement_ready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """enforcement_ready=true (router mode) → the enforcement caps ARE advertised."""
+    p = _provider(monkeypatch)
+    info = {"capabilities": {"router_mode": True, "enforcement_ready": True}}
+    monkeypatch.setattr(fw, "_fetch_bridge_json", lambda *a, **k: info)
+    caps = p.capabilities()
+    assert Capability.DEVICE_BLOCK in caps
+    assert Capability.POLICY in caps
+    assert Capability.SCREEN_TIME in caps
+    assert Capability.WAN_MODE not in caps
+
+
+def test_capabilities_permissive_when_info_unreachable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unknown enforcement state (no /info, or no flag) keeps the route-backed caps.
+
+    Only an EXPLICIT enforcement_ready=false strips them; a transient down / older
+    bridge that omits the flag must not silently shrink the advertised surface.
+    WAN_MODE stays out regardless.
+    """
+    p = _provider(monkeypatch)  # _provider patches _fetch_bridge_json -> None
+    caps = p.capabilities()
+    assert Capability.DEVICE_BLOCK in caps
     assert Capability.WAN_MODE not in caps

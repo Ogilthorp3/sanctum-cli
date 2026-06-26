@@ -366,18 +366,20 @@ def test_snapshot_empty_when_policies_unreachable(
     assert snap.data == {}
 
 
-def test_rollback_is_honest_about_missing_restore_route(
+def test_rollback_fail_closed_when_live_state_unreadable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Honest-verify: rollback fires NO phantom POST and reports ok=False.
+    """Honest-verify: with no readable live state, rollback fires NO write and ok=False.
 
-    The Firewalla bridge exposes no bulk policy-restore route (the established
-    contract is GET /policies + the documented /policies/purge mutate; there is no
-    POST /policies/restore). The prior code POSTed to that non-existent route — a
-    silent no-op that, against a catch-all, could even report a green restore that
-    never happened. The honest contract: do NOT hit a route that does not exist;
-    report ok=False so the rails surface a manual-recovery instruction instead of a
-    false success. A non-empty baseline must still NOT trigger any bridge write.
+    The Firewalla bridge exposes no bulk policy-restore route (the prior code POSTed a
+    non-existent ``POST /policies/restore`` — a silent no-op). The re-based rollback
+    reconciles the captured baseline against the LIVE ``/policies`` state with real
+    primitives (DELETE /policy/:pid + the /raw policy:create escape hatch) — but when
+    the bridge can't report the live state (``_fetch_bridge_json`` → None here, the
+    default in this test's connect mock), the diff is uncomputable. It must then
+    fail-closed: report ``ok=False`` with a restore instruction and fire NO phantom
+    write, so the rails surface manual recovery instead of a false success. (The
+    happy-path restore-via-primitives behavior is covered in test_firewalla_ops.)
     """
     from sanctum_cli.devices import firewalla as fw
     from sanctum_cli.devices.base import Snapshot
@@ -395,7 +397,7 @@ def test_rollback_is_honest_about_missing_restore_route(
     res = p.rollback(snap)
     assert res.ok is False
     assert "restore" in res.detail.lower()
-    # The defect: NO POST to the non-existent /policies/restore (or anywhere).
+    # Fail-closed: NO phantom write when the live state can't be read to diff against.
     assert posts == []
 
 
