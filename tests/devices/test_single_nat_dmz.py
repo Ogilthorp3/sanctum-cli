@@ -1,0 +1,363 @@
+"""Layer-2 ``single_nat_dmz`` orchestrator — guarded, dry-run-by-default flip.
+
+``single_nat_dmz`` is the attended Bell **Advanced DMZ + ``/32`` single-NAT**
+cutover: it walks the pure :data:`sanctum_cli.devices.flip.FLIP_STAGES` machine,
+firing each stage's real I/O through mocked seams — the hub provider
+(``set`` DMZ engaged + ``reboot``), the Firewalla runner (WAN→DHCP/PPPoE +
+observe the downstream lease), and the armor installer — and composes the whole
+sequence behind :func:`sanctum_cli.devices.rails.guarded_apply` so a failed
+stage unwinds the flip (disable DMZ → re-lease DHCP) and reports ``ok=False``.
+
+These tests author their expectations from the *consumer's* contract (the stage
+order the runbook performs, the armor's ``classify_wan_ip`` WAN vocabulary, the
+``guarded_apply`` rails) — never from the production module's own assumptions
+(Contracts at the Boundary). Every boundary that the bug could live in is the
+*real* thing: the pure flip machine, the real ``guarded_apply`` rails, and the
+real ``IntentResult`` shape. Only the genuinely expensive / dangerous edges (a
+live hub, a live SSH lease, a live armor install) are mocked — and the mocks
+record every write so a dry-run can be proven to make ZERO of them.
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+import pytest
+
+from sanctum_cli.devices import flip
+from sanctum_cli.devices.base import (
+    Capability,
+    CapabilityOp,
+    DeviceError,
+    OpResult,
+    Snapshot,
+)
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+# The Bell Advanced-DMZ leaf the cutover engages (the brand's DMZ capability op).
+DMZ_PATH = "Device/Services/BellNetworkCfg/AdvancedDMZ"
+
+
+class FakeHub:
+    """In-memory Sagemcom-shaped hub: records set/reboot/rollback for assertions.
+
+    Mirrors the real provider's contract surface the orchestrator touches:
+    ``capability_op(DMZ)`` returns the Bell (path, engaged) binding, ``set``
+    flips the leaf and counts the write, ``reboot`` counts a reboot, and
+    ``snapshot``/``rollback`` capture + restore the DMZ leaf. ``set``/``reboot``
+    return an :class:`OpResult` (ok=True) so the rails fall through to verify on
+    the happy path; a test may flip ``reboot_fails`` to exercise the failure fork.
+    """
+
+    kind = "hub"
+    brand = "fake-bell-hub"
+
+    def __init__(self) -> None:
+        self._v: dict[str, str] = {DMZ_PATH: "off"}
+        self.set_calls: list[tuple[str, str]] = []
+        self.reboot_calls = 0
+        self.rollback_calls = 0
+        self.reboot_fails = False
+
+    @staticmethod
+    def detect(net: object) -> float:
+        return 1.0
+
+    def connect(self, creds: object | None) -> None:
+        return None
+
+    def disconnect(self) -> None:
+        return None
+
+    def get(self, path: str) -> str | None:
+        return self._v.get(path)
+
+    def set(self, path: str, value: str) -> OpResult:
+        before = self._v.get(path)
+        self._v[path] = value
+        self.set_calls.append((path, value))
+        return OpResult(ok=True, detail=f"set {path}", before=before, after=value)
+
+    def reboot(self) -> OpResult:
+        self.reboot_calls += 1
+        if self.reboot_fails:
+            msg = "hub rejected reboot"
+            raise DeviceError(msg)
+        return OpResult(ok=True, detail="reboot issued")
+
+    def capabilities(self) -> set[Capability]:
+        return {Capability.READ, Capability.SET, Capability.DMZ, Capability.REBOOT}
+
+    def capability_op(self, capability: Capability) -> CapabilityOp | None:
+        if capability is Capability.DMZ:
+            return CapabilityOp(path=DMZ_PATH, engaged="on")
+        return None
+
+    def snapshot(self, scope: str | None = None) -> Snapshot:
+        return Snapshot(brand=self.brand, taken_at="t", data=dict(self._v))
+
+    def rollback(self, snap: Snapshot) -> OpResult:
+        self.rollback_calls += 1
+        self._v = dict(snap.data)
+        return OpResult(ok=True, detail="rolled back DMZ")
+
+
+class FakeRunner:
+    """Records every runner op the orchestrator fires; serves a scripted lease.
+
+    The orchestrator drives the Firewalla over the same ``Runner`` abstraction
+    the net layer uses (``Callable[[tuple[str, ...]], str]``). This fake records
+    every tag fired (so a dry-run can be asserted to fire ZERO mutating ops) and
+    returns a scripted downstream WAN address for the observe-lease probe, in the
+    armor's ``classify_wan_ip`` vocabulary's terms (a public IP → "public").
+    """
+
+    def __init__(self, wan_ip: str = "203.0.113.7") -> None:
+        self.calls: list[tuple[str, ...]] = []
+        self.wan_ip = wan_ip
+
+    def __call__(self, tag: tuple[str, ...]) -> str:
+        self.calls.append(tag)
+        if tag and tag[0] in ("fw_wan_ip", "lease_observe"):
+            return self.wan_ip
+        return ""
+
+
+class FakeArmor:
+    """Mock single-NAT armor installer: records the install, never touches disk."""
+
+    def __init__(self, *, ok: bool = True) -> None:
+        self.installed = 0
+        self._ok = ok
+
+    def install(self) -> OpResult:
+        self.installed += 1
+        if not self._ok:
+            return OpResult(ok=False, detail="armor install failed")
+        return OpResult(ok=True, detail="armor installed")
+
+
+def _all_pass_verifiers() -> dict[str, object]:
+    """A stage→verifier map where every stage's probe passes (the happy path)."""
+    return {stage: (lambda: True) for stage in flip.FLIP_STAGES}
+
+
+# ── dry-run: the hard guardrail (ZERO device writes) ─────────────────────────
+
+
+def test_dmz_dry_run_makes_zero_device_writes() -> None:
+    """apply=False returns the staged plan and fires NO set/reboot/runner/armor."""
+    from sanctum_cli.devices.intents import single_nat_dmz
+
+    hub, runner, armor = FakeHub(), FakeRunner(), FakeArmor()
+    res = single_nat_dmz(hub, runner, armor, apply=False)
+    assert res.applied is False
+    assert res.result is None
+    # Zero mutations anywhere — the overnight-build guardrail.
+    assert hub.set_calls == []
+    assert hub.reboot_calls == 0
+    assert hub.rollback_calls == 0
+    assert armor.installed == 0
+    assert runner.calls == []
+    assert hub.get(DMZ_PATH) == "off"  # untouched
+
+
+def test_dmz_dry_run_plan_names_the_stages() -> None:
+    """The staged plan describes the DMZ cutover stages for the operator."""
+    from sanctum_cli.devices.intents import single_nat_dmz
+
+    res = single_nat_dmz(FakeHub(), FakeRunner(), FakeArmor(), apply=False)
+    plan_text = "\n".join(res.plan).lower()
+    assert "dmz" in plan_text
+    # The plan reflects the real flip stages (observe lease, armor, reboot).
+    assert "reboot" in plan_text
+    assert "armor" in plan_text
+
+
+# ── out-of-band gate: refuse with zero writes when no recovery path ──────────
+
+
+def test_dmz_refuses_without_out_of_band_path_zero_writes() -> None:
+    """out_of_band_reachable=False → refuse the flip, mutate NOTHING.
+
+    The cutover drops the WAN; without an out-of-band recovery path a misstep
+    could strand the household dark with no way back in (flip.gate_ok)."""
+    from sanctum_cli.devices.intents import single_nat_dmz
+
+    hub, runner, armor = FakeHub(), FakeRunner(), FakeArmor()
+    res = single_nat_dmz(
+        hub,
+        runner,
+        armor,
+        apply=True,
+        out_of_band_reachable=False,
+        force=True,
+    )
+    assert res.applied is False
+    assert res.result is not None
+    assert res.result.ok is False
+    assert "out-of-band" in res.result.detail.lower() or "out of band" in res.result.detail.lower()
+    # Refused BEFORE any mutation: zero writes anywhere.
+    assert hub.set_calls == []
+    assert hub.reboot_calls == 0
+    assert hub.rollback_calls == 0
+    assert armor.installed == 0
+    assert runner.calls == []
+
+
+# ── apply happy path: walks the stages through guarded_apply ─────────────────
+
+
+def test_dmz_apply_walks_stages_and_commits(tmp_path: Path) -> None:
+    """apply=True + every stage verify passing → DMZ engaged, hub rebooted, armor
+    installed, lease observed, and the whole thing committed via guarded_apply."""
+    from sanctum_cli.devices.intents import single_nat_dmz
+
+    hub, runner, armor = FakeHub(), FakeRunner(), FakeArmor()
+    res = single_nat_dmz(
+        hub,
+        runner,
+        armor,
+        apply=True,
+        out_of_band_reachable=True,
+        force=True,
+        stage_verifiers=_all_pass_verifiers(),
+        log_path=tmp_path / "audit.jsonl",
+    )
+    assert res.applied is True
+    assert res.result is not None
+    assert res.result.ok is True
+    # The flip engaged Advanced DMZ via the provider's OWN capability op.
+    assert (DMZ_PATH, "on") in hub.set_calls
+    assert hub.get(DMZ_PATH) == "on"
+    # It rebooted the hub for the new WAN/DMZ config to take.
+    assert hub.reboot_calls == 1
+    # It installed the armor kit.
+    assert armor.installed == 1
+    # A successful flip never rolls back.
+    assert hub.rollback_calls == 0
+    # It drove the runner (WAN→DHCP + observe-lease).
+    assert runner.calls
+
+
+def test_dmz_apply_confirm_declined_makes_zero_writes(tmp_path: Path) -> None:
+    """apply=True without force and a declining confirm aborts with no mutation."""
+    from sanctum_cli.devices.intents import single_nat_dmz
+
+    hub, runner, armor = FakeHub(), FakeRunner(), FakeArmor()
+    res = single_nat_dmz(
+        hub,
+        runner,
+        armor,
+        apply=True,
+        out_of_band_reachable=True,
+        force=False,
+        confirm=lambda _plan: False,
+        stage_verifiers=_all_pass_verifiers(),
+        log_path=tmp_path / "audit.jsonl",
+    )
+    assert res.applied is True
+    assert res.result is not None
+    assert res.result.ok is False
+    assert hub.set_calls == []
+    assert hub.reboot_calls == 0
+    assert armor.installed == 0
+
+
+# ── apply failure forks: a failed stage unwinds the whole flip ───────────────
+
+
+def test_dmz_stage_verify_failure_rolls_back(tmp_path: Path) -> None:
+    """A stage whose verify probe FAILS trips guarded_apply rollback: DMZ disabled
+    (provider.rollback) AND a DHCP re-lease fired on the runner — and ok=False."""
+    from sanctum_cli.devices.intents import single_nat_dmz
+
+    hub, runner, armor = FakeHub(), FakeRunner(), FakeArmor()
+    verifiers = _all_pass_verifiers()
+    # The observe-lease stage's verify fails (downstream never got a public lease).
+    verifiers["observe_lease"] = lambda: False
+    res = single_nat_dmz(
+        hub,
+        runner,
+        armor,
+        apply=True,
+        out_of_band_reachable=True,
+        force=True,
+        stage_verifiers=verifiers,
+        log_path=tmp_path / "audit.jsonl",
+    )
+    assert res.applied is True
+    assert res.result is not None
+    assert res.result.ok is False
+    # The flip unwound: DMZ rolled back to "off".
+    assert hub.rollback_calls == 1
+    assert hub.get(DMZ_PATH) == "off"
+    # And the rollback re-leased DHCP downstream (disable DMZ → re-lease).
+    assert any(tag and "release" in tag[0] for tag in runner.calls)
+
+
+def test_dmz_reboot_failure_rolls_back(tmp_path: Path) -> None:
+    """A stage whose I/O RAISES (the hub rejects the reboot) trips rollback too —
+    a raised change is the worst case the rails exist to catch."""
+    from sanctum_cli.devices.intents import single_nat_dmz
+
+    hub, runner, armor = FakeHub(), FakeRunner(), FakeArmor()
+    hub.reboot_fails = True
+    res = single_nat_dmz(
+        hub,
+        runner,
+        armor,
+        apply=True,
+        out_of_band_reachable=True,
+        force=True,
+        stage_verifiers=_all_pass_verifiers(),
+        log_path=tmp_path / "audit.jsonl",
+    )
+    assert res.applied is True
+    assert res.result is not None
+    assert res.result.ok is False
+    assert hub.reboot_calls == 1  # it tried
+    assert hub.rollback_calls == 1  # and unwound
+    assert hub.get(DMZ_PATH) == "off"
+    # Armor must NOT have been installed if the reboot (earlier stage) failed.
+    assert armor.installed == 0
+
+
+def test_dmz_armor_install_failure_rolls_back(tmp_path: Path) -> None:
+    """The armor installer reporting ok=False is a failed stage → rollback + ok=False."""
+    from sanctum_cli.devices.intents import single_nat_dmz
+
+    hub, runner, armor = FakeHub(), FakeRunner(), FakeArmor(ok=False)
+    res = single_nat_dmz(
+        hub,
+        runner,
+        armor,
+        apply=True,
+        out_of_band_reachable=True,
+        force=True,
+        stage_verifiers=_all_pass_verifiers(),
+        log_path=tmp_path / "audit.jsonl",
+    )
+    assert res.applied is True
+    assert res.result is not None
+    assert res.result.ok is False
+    assert armor.installed == 1  # it tried
+    assert hub.rollback_calls == 1  # and unwound
+    assert hub.get(DMZ_PATH) == "off"
+
+
+def test_dmz_unsupported_provider_raises_legibly() -> None:
+    """A hub with no DMZ capability op fails legibly, mutating nothing."""
+    from sanctum_cli.devices.intents import single_nat_dmz
+
+    class NoDmzHub(FakeHub):
+        def capability_op(self, capability: Capability) -> CapabilityOp | None:
+            return None
+
+    hub, runner, armor = NoDmzHub(), FakeRunner(), FakeArmor()
+    with pytest.raises(DeviceError) as ei:
+        single_nat_dmz(hub, runner, armor, apply=False)
+    assert "dmz" in str(ei.value).lower()
+    assert hub.set_calls == []

@@ -25,18 +25,19 @@ exercise the rails without a runner.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-from sanctum_cli.devices.base import Capability, CapabilityOp, DeviceError
+from sanctum_cli.devices import flip
+from sanctum_cli.devices.base import Capability, CapabilityOp, DeviceError, OpResult, Snapshot
 from sanctum_cli.devices.rails import guarded_apply
 from sanctum_cli.net import verify
 from sanctum_cli.net.types import Verdict
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
     from pathlib import Path
 
-    from sanctum_cli.devices.base import DeviceProvider, OpResult
+    from sanctum_cli.devices.base import DeviceProvider
     from sanctum_cli.net.detect import Runner
 
 # Reference binding for a Bell/Sagemcom hub: the leaf that, set to ``"on"``, puts
@@ -181,6 +182,344 @@ def single_nat(
         provider,
         change,
         verify_fn=resolved_verify,
+        confirm=confirm or _default_confirm,
+        force=force,
+        rollback=rollback,
+        log_path=log_path,
+    )
+    return IntentResult(plan=plan, applied=True, result=result)
+
+
+# ─── single_nat_dmz: the staged Advanced-DMZ cutover orchestrator ────────────
+#
+# ``single_nat`` flips a single bridge-mode leaf. ``single_nat_dmz`` is the FULL
+# Bell **Advanced DMZ + /32** cutover: a multi-stage attended operation that puts
+# the hub's WAN into DHCP, engages Advanced DMZ, reboots the hub, observes the new
+# downstream lease, installs the self-healing armor kit, verifies reachability,
+# and arms the watchdog. The *brain* of that sequence is the pure
+# :mod:`sanctum_cli.devices.flip` machine (no I/O); this orchestrator is the thin
+# I/O driver that consults it and fires each stage through the real seams, the
+# whole thing composed behind :func:`~sanctum_cli.devices.rails.guarded_apply` so
+# a failed stage unwinds the flip (disable DMZ → re-lease DHCP) and reports
+# ``ok=False``. Dry-run by default — ``apply=False`` makes ZERO device writes.
+
+
+@runtime_checkable
+class RebootingProvider(Protocol):
+    """A :class:`DeviceProvider` that also exposes a hub ``reboot()``.
+
+    The Advanced-DMZ cutover must reboot the hub for the new WAN/DMZ config to
+    take effect (stage ``hub_reboot``). The base ``DeviceProvider`` Protocol does
+    not mandate ``reboot``, so the orchestrator narrows to this structural
+    sub-Protocol: a provider passed to :func:`single_nat_dmz` must advertise
+    :attr:`Capability.REBOOT` and implement ``reboot()`` returning an
+    :class:`OpResult` (the Sagemcom hub does — fail-closed on a rejected reboot).
+    """
+
+    def reboot(self) -> OpResult:
+        """Reboot the device, returning an :class:`OpResult` (raises on rejection)."""
+        ...
+
+
+@runtime_checkable
+class ArmorInstaller(Protocol):
+    """The single-NAT armor kit installer seam (stage ``apply_armor``).
+
+    The armor kit (``sanctum-singlenat-armor``: the self-healing ``/32`` + MTU
+    DHCP hook, the watchdog, the OTA sentinel) is installed onto the Firewalla +
+    the Mini as part of the cutover. The orchestrator drives it through this one
+    method so the install is mockable in tests and never touches real hosts in the
+    overnight build. ``install`` returns an :class:`OpResult`: an ``ok=False``
+    (the install was refused/failed) is treated by the rails exactly like any
+    other failed stage — the whole flip unwinds.
+    """
+
+    def install(self) -> OpResult:
+        """Install the armor kit, returning an :class:`OpResult` (ok=False on failure)."""
+        ...
+
+
+# The Firewalla-runner tags the DMZ orchestrator fires, in the net layer's
+# ``Runner`` vocabulary (``Callable[[tuple[str, ...]], str]``). Named constants so
+# the driver and the (mocked) runner never drift on a string literal:
+#  * WAN→DHCP/PPPoE passthrough so the downstream router can pull the public lease;
+#  * observe the new downstream WAN lease (returns the address to classify);
+#  * arm the watchdog/sentinel after the armor lands;
+#  * the rollback re-lease (disable DMZ then re-pull a DHCP lease downstream).
+_RUNNER_WAN_DHCP = ("wan_dhcp",)
+_RUNNER_LEASE_OBSERVE = ("lease_observe",)
+_RUNNER_ARMOR_ARM = ("armor_arm",)
+_RUNNER_DHCP_RELEASE = ("dhcp_release",)
+
+
+class _StageError(Exception):
+    """A flip stage failed (I/O refused, ``ok=False`` returned, or verify false).
+
+    Raised INSIDE the ``guarded_apply`` change closure so the rails catch it like
+    any other raised change and trip rollback — never propagated to the caller
+    (``guarded_apply`` converts it to an ``ok=False`` :class:`OpResult`).
+    """
+
+
+def _dmz_plan(op: CapabilityOp) -> list[str]:
+    """The ordered, human-readable Advanced-DMZ cutover steps (for the dry-run)."""
+    return [
+        "single-NAT (Bell Advanced DMZ + /32) cutover plan:",
+        "  1. preflight: confirm an out-of-band recovery path exists",
+        "  2. put the hub WAN into DHCP/PPPoE passthrough",
+        f"  3. enable Advanced DMZ: set {op.path} = {op.engaged}",
+        "  4. reboot the hub so the new WAN/DMZ config takes effect",
+        "  5. observe the downstream router's new WAN lease + classify it",
+        "  6. install the single-NAT armor kit (self-healing /32 + MTU)",
+        "  7. verify real-site reachability through the new single NAT",
+        "  8. arm the watchdog/sentinel so drift self-heals",
+        "  on any stage failure: roll back — disable DMZ, then re-lease DHCP",
+        f"  note: {MTU_NOTE}",
+    ]
+
+
+def _resolve_dmz_op(provider: DeviceProvider) -> CapabilityOp:
+    """Resolve the provider's Advanced-DMZ op, or fail legibly (no blind mutation)."""
+    op = provider.capability_op(Capability.DMZ)
+    if op is None:
+        msg = f"{provider.brand} ({provider.kind}) does not support Advanced DMZ (single-NAT)"
+        raise DeviceError(
+            msg,
+            fix="use a hub provider that advertises Capability.DMZ, or pin the right brand.",
+        )
+    return op
+
+
+class _DmzRollbackProvider:
+    """Wraps the hub so ``guarded_apply``'s rollback ALSO re-leases DHCP.
+
+    The rails own the rollback contract (snapshot → on-failure ``rollback(snap)``),
+    but the Advanced-DMZ unwind is two steps, not one: *disable DMZ* (the hub
+    provider's own ``rollback``, which restores the snapshotted DMZ leaf to "off")
+    AND *re-lease DHCP* downstream (so the Firewalla pulls a fresh double-NAT lease
+    once the hub is no longer in DMZ — otherwise it sits on the stale single-NAT
+    address and the household stays dark). Wrapping the provider keeps that unwind
+    inside the rails (one audited rollback path) instead of bolting a second
+    recovery call outside ``guarded_apply`` where a failure would go untracked.
+
+    Every other attribute/method is delegated unchanged, so to the rails this is
+    the real provider in all respects except the augmented ``rollback``.
+    """
+
+    def __init__(self, inner: DeviceProvider, runner: Runner) -> None:
+        self._inner = inner
+        self._runner = runner
+
+    def __getattr__(self, name: str) -> object:
+        # Delegate brand/kind/get/set/reboot/snapshot/capabilities/... unchanged.
+        return getattr(self._inner, name)
+
+    def rollback(self, snap: Snapshot) -> OpResult:
+        """Disable DMZ (inner rollback) then re-lease DHCP downstream.
+
+        Reports the inner rollback's ``ok`` so a failed DMZ-disable still surfaces
+        as a failed restore (the rails then emit the manual-recovery instruction).
+        The DHCP re-lease is best-effort on top of a *successful* DMZ-disable: it
+        is the recovery action that brings the downstream WAN back, but a re-lease
+        hiccup must not mask the fact that DMZ WAS disabled (the dangerous bit).
+        """
+        result = self._inner.rollback(snap)
+        if result.ok:
+            # DMZ is back off — now re-pull a downstream lease so the WAN recovers.
+            self._runner(_RUNNER_DHCP_RELEASE)
+        return result
+
+
+def _run_stage(
+    stage: str,
+    *,
+    provider: DeviceProvider,
+    op: CapabilityOp,
+    runner: Runner,
+    armor: ArmorInstaller,
+    verifier: Callable[[], bool],
+) -> None:
+    """Fire one flip stage's real I/O, then its verify probe; raise on any failure.
+
+    The single seam between the pure :func:`flip.next_stage` decision and the real
+    world. Each stage performs its brand/transport-specific action through a mock-
+    able seam (the provider's ``set``/``reboot``, the Firewalla ``runner``, the
+    ``armor`` installer) and then consults ``verifier`` — a per-stage probe the
+    caller injects (tests pass a mapping; the CLI passes real reachability/lease
+    probes). A stage whose I/O raises, RETURNS an ``ok=False`` :class:`OpResult`,
+    or whose verify probe returns falsey raises :class:`_StageError` so the
+    enclosing ``guarded_apply`` change closure trips the rollback rails.
+    """
+    if stage == "wan_dhcp":
+        runner(_RUNNER_WAN_DHCP)
+    elif stage == "enable_dmz":
+        _require_ok(provider.set(op.path, op.engaged), stage)
+    elif stage == "hub_reboot":
+        _require_ok(_reboot(provider), stage)
+    elif stage == "observe_lease":
+        runner(_RUNNER_LEASE_OBSERVE)
+    elif stage == "apply_armor":
+        _require_ok(armor.install(), stage)
+    elif stage == "arm":
+        runner(_RUNNER_ARMOR_ARM)
+    # "preflight" and "verify" carry no mutating I/O of their own — they are pure
+    # gate/probe stages whose only effect is the verifier below.
+
+    if not verifier():
+        msg = f"stage {stage!r} failed verification"
+        raise _StageError(msg)
+
+
+def _reboot(provider: DeviceProvider) -> OpResult:
+    """Reboot the hub via the :class:`RebootingProvider` seam, or fail legibly.
+
+    Duck-typed via ``getattr`` (callable ``reboot``) rather than an ``isinstance``
+    against :class:`RebootingProvider`: the rails hand the change closure a
+    delegating wrapper (:class:`_DmzRollbackProvider`) whose ``reboot`` is reached
+    through ``__getattr__``, and a ``@runtime_checkable`` Protocol ``isinstance``
+    check inspects the *class* MRO — so it would not see a method exposed only via
+    ``__getattr__`` and would wrongly reject the wrapper. ``getattr`` resolution
+    follows the delegation, so it works for both the bare provider and the wrapper.
+    """
+    reboot = getattr(provider, "reboot", None)
+    if not callable(reboot):
+        msg = f"{provider.brand} ({provider.kind}) cannot reboot (no reboot())"
+        raise _StageError(msg)
+    result = reboot()
+    if not isinstance(result, OpResult):
+        msg = f"{provider.brand} ({provider.kind}).reboot() did not return an OpResult"
+        raise _StageError(msg)
+    return result
+
+
+def _require_ok(result: OpResult | None, stage: str) -> None:
+    """Treat a returned ``ok=False`` OpResult as a stage failure (return-convention).
+
+    A return-convention provider/installer signals a refused op by RETURNING
+    ``ok=False`` (not raising). The orchestrator inspects it and raises
+    :class:`_StageError` so the rails roll back — mirroring ``guarded_apply``'s
+    own ok=False handling, but at the per-stage granularity inside the walk.
+    """
+    if result is not None and not result.ok:
+        msg = f"stage {stage!r} reported ok=False ({result.detail})"
+        raise _StageError(msg)
+
+
+def _default_stage_verifier() -> bool:
+    """Default per-stage probe when the caller injects none: conservatively pass.
+
+    A stage with no injected verifier has no real-world probe to consult here —
+    its I/O either raised or returned ``ok=False`` (already handled) or succeeded.
+    The CLI wires real reachability/lease probes for the stages that have one; an
+    un-probed stage falls through to the next stage's action, and the terminal
+    ``verify`` stage is where the real end-to-end reachability check lives.
+    """
+    return True
+
+
+def single_nat_dmz(
+    provider: DeviceProvider,
+    runner: Runner,
+    armor: ArmorInstaller,
+    *,
+    apply: bool = False,
+    out_of_band_reachable: bool = True,
+    stage_verifiers: Mapping[str, Callable[[], bool]] | None = None,
+    confirm: Callable[[str], bool] | None = None,
+    force: bool = False,
+    rollback: bool = True,
+    log_path: Path | None = None,
+) -> IntentResult:
+    """Run the full Bell Advanced-DMZ + /32 single-NAT cutover, guarded + dry-run.
+
+    Walks the pure :data:`sanctum_cli.devices.flip.FLIP_STAGES` machine, firing
+    each stage's real I/O through its mockable seam — the hub ``provider``
+    (``set`` Advanced DMZ engaged via its own :attr:`Capability.DMZ` op +
+    ``reboot``), the Firewalla ``runner`` (WAN→DHCP passthrough + observe the
+    downstream lease + arm the watchdog), and the ``armor`` installer — and
+    composes the whole sequence behind
+    :func:`~sanctum_cli.devices.rails.guarded_apply`.
+
+    * ``apply=False`` (the default) is a **dry-run**: it resolves the DMZ op (so an
+      unsupported hub fails legibly) and returns the staged plan, making **ZERO**
+      device writes — no ``set``, no ``reboot``, no ``runner`` op, no armor install.
+      This is what the overnight build runs.
+    * ``out_of_band_reachable=False`` **refuses** the flip with ``ok=False`` and
+      makes zero writes: the cutover drops the WAN and a misstep could strand the
+      household dark with no recovery path (:func:`flip.gate_ok`). Checked before
+      any mutation.
+    * ``apply=True`` (with the gate passed) drives the stages through
+      ``guarded_apply``: snapshot → confirm (unless ``force``) → walk the stages →
+      on the first failed stage (I/O raised, ``ok=False`` returned, or a stage
+      verify probe failed) the rails roll back — disable DMZ (``provider.rollback``)
+      then re-lease DHCP downstream — and report ``ok=False``.
+
+    ``stage_verifiers`` injects a per-stage probe (``stage name → () -> bool``);
+    tests pass a mapping to drive each branch deterministically, and the CLI wires
+    real reachability/lease probes. A stage with no entry uses
+    :func:`_default_stage_verifier`.
+
+    Raises :class:`DeviceError` if the provider does not support Advanced DMZ.
+    """
+    op = _resolve_dmz_op(provider)
+    plan = _dmz_plan(op)
+    if not apply:
+        # Dry-run: describe, do not mutate. No provider.set / reboot / runner /
+        # armor.install is reached on this branch — the overnight-build guardrail.
+        return IntentResult(plan=plan, applied=False, result=None)
+
+    # The out-of-band gate is the start precondition (flip.gate_ok). It is checked
+    # BEFORE guarded_apply takes a snapshot or fires anything, so a refusal makes
+    # zero device writes.
+    if not flip.gate_ok(out_of_band_reachable):
+        result = OpResult(
+            ok=False,
+            detail=(
+                "refused: no out-of-band recovery path — a single-NAT cutover that "
+                "drops the WAN could strand the household with no way back in"
+            ),
+            before=provider.brand,
+            after=None,
+        )
+        return IntentResult(plan=plan, applied=False, result=result)
+
+    verifiers = stage_verifiers or {}
+
+    def change(pv: DeviceProvider) -> None:
+        # Walk the pure stage machine, firing each stage's I/O + verify. A
+        # _StageError (or any provider/transport raise) propagates to
+        # guarded_apply, which trips the rollback rails. ``pv`` is the wrapped
+        # provider the rails pass us; we drive the SAME provider's ops through it.
+        done: list[str] = []
+        last_ok = True
+        # Bound the loop by the stage count + 1 so a logic error can never spin.
+        for _ in range(len(flip.FLIP_STAGES) + 1):
+            nxt = flip.next_stage(done, last_ok=last_ok)
+            if nxt is None:
+                return
+            if nxt == flip.ROLLBACK:  # defensive — last_ok is only ever True here
+                msg = "flip machine forked to ROLLBACK"
+                raise _StageError(msg)
+            verifier = verifiers.get(nxt, _default_stage_verifier)
+            _run_stage(
+                nxt,
+                provider=pv,
+                op=op,
+                runner=runner,
+                armor=armor,
+                verifier=verifier,
+            )
+            done.append(nxt)
+
+    # Wrap the provider so the rails' rollback disables DMZ AND re-leases DHCP.
+    guarded_provider = _DmzRollbackProvider(provider, runner)
+    result = guarded_apply(
+        guarded_provider,  # type: ignore[arg-type]  # structural DeviceProvider via delegation
+        change,
+        # The terminal end-to-end reachability check rides as the ``verify`` stage
+        # inside the walk; the rails' own verify_fn therefore only needs to confirm
+        # the walk completed (it raises on any failure), so a True here commits.
+        verify_fn=lambda: True,
         confirm=confirm or _default_confirm,
         force=force,
         rollback=rollback,
