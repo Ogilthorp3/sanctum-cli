@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, TypeVar
 from urllib.parse import quote
@@ -245,6 +246,150 @@ async def _action_raw(client: Any, action: dict[str, Any]) -> Any:
                 "version that exposes it (table/transaction verbs have no fallback)"
             ),
         )
+    return await raw([action], False)
+
+
+# ── read-only subtree discovery ─────────────────────────────────────────────
+#
+# The two writability WALL classes the audit found on the Bell F5697: a leaf is
+# settable through the near-total ``setValue`` surface UNLESS its SAH ``flags``
+# metadata carries one of these. ``NON_WRITABLE`` is the firmware-locked class
+# (e.g. SoftwareVersion); ``ACCESS_RESTRICTION`` is the Bell-locked class (the
+# carrier pins certain network-config leaves). Matched case-insensitively against
+# the flags token string so a ``"read_only NON_WRITABLE"`` style value still trips
+# the wall. Everything else discover() reports as settable.
+_WALL_TOKENS = ("NON_WRITABLE", "ACCESS_RESTRICTION")
+
+# The SAH attribute-form getValue marks a parameter LEAF with a ``value`` key
+# (its current value); a non-leaf datamodel OBJECT is a dict of child names → child
+# nodes with no ``value`` of its own. This is the discriminator the walk uses to
+# tell a leaf from an object to recurse into.
+_LEAF_VALUE_KEY = "value"
+_LEAF_FLAGS_KEY = "flags"
+
+
+@dataclass(frozen=True)
+class DiscoveredLeaf:
+    """One datamodel leaf found by :meth:`SagemcomHubProvider.discover`.
+
+    ``path`` is the full SAH xpath (PascalCase preserved — the walk runs over the
+    RAW, un-decamelized getValue envelope), ``value`` is the leaf's current value
+    stringified (``None`` when the firmware surfaced none), ``writable`` is True
+    iff no wall flag pins it, and ``restriction`` carries the wall token
+    (``NON_WRITABLE`` / ``ACCESS_RESTRICTION``) when ``writable`` is False, else
+    ``None``. The settable subset is ``[leaf for leaf in leaves if leaf.writable]``
+    — what a Layer-2 intent gates on before composing a real ``set``.
+    """
+
+    path: str
+    value: str | None
+    writable: bool
+    restriction: str | None
+
+
+def _leaf_writability(flags: Any) -> tuple[bool, str | None]:
+    """Derive (writable, restriction) from a SAH leaf's ``flags`` metadata.
+
+    ``flags`` may be a token string (``"read_only NON_WRITABLE"``) or a list of
+    tokens; either is normalized to one upper-cased blob and matched against the
+    two wall classes. A leaf with no wall flag is settable (the near-total
+    ``setValue`` surface reaches it); a walled leaf reports the first wall token
+    found so the caller can show *why* it is locked.
+    """
+    if isinstance(flags, str):
+        text = flags
+    elif isinstance(flags, (list, tuple)):
+        text = " ".join(str(token) for token in flags)
+    else:
+        text = ""
+    upper = text.upper()
+    for token in _WALL_TOKENS:
+        if token in upper:
+            return False, token
+    return True, None
+
+
+def _extract_subtree(reply: Any) -> dict[str, Any] | None:
+    """Pull the datamodel subtree out of a raw getValue reply envelope.
+
+    Navigates ``reply["reply"]["actions"][0]["callbacks"][0]["parameters"]
+    ["value"]`` — the SAME path the installed ``sagemcom_api``'s own
+    ``__get_response`` / ``__get_response_value`` use (derived from the library
+    source, a different author than this producer — Contracts at the Boundary). We
+    read the RAW envelope (not the library's decamelizing wrapper) precisely so the
+    datamodel keys stay PascalCase; decamelize would rewrite ``WiFi`` → ``wi_fi``
+    and mangle every discovered path. Any missing/garbled level yields ``None`` (an
+    empty discovery), never a crash.
+    """
+    if not isinstance(reply, dict):
+        return None
+    try:
+        params = reply["reply"]["actions"][0]["callbacks"][0]["parameters"]
+    except (KeyError, IndexError, TypeError):
+        return None
+    if not isinstance(params, dict):
+        return None
+    value = params.get(_LEAF_VALUE_KEY, params)
+    return value if isinstance(value, dict) else None
+
+
+def _walk_subtree(node: dict[str, Any], prefix: str, depth: int) -> list[DiscoveredLeaf]:
+    """Walk ``node`` up to ``depth`` object levels, collecting annotated leaves.
+
+    A child carrying a ``value`` key is a parameter leaf (recorded with its
+    writability); a child that is a plain object dict is recursed into while the
+    ``depth`` budget allows (``depth`` counts object levels below ``prefix`` — at
+    ``depth == 1`` only this level's leaves are taken and no deeper object is
+    descended). Scalars/lists at a level are skipped (not attribute-form leaves).
+    """
+    leaves: list[DiscoveredLeaf] = []
+    for key, child in node.items():
+        path = f"{prefix}/{key}"
+        if isinstance(child, dict) and _LEAF_VALUE_KEY in child:
+            raw_value = child[_LEAF_VALUE_KEY]
+            writable, restriction = _leaf_writability(child.get(_LEAF_FLAGS_KEY))
+            leaves.append(
+                DiscoveredLeaf(
+                    path=path,
+                    value=None if raw_value is None else str(raw_value),
+                    writable=writable,
+                    restriction=restriction,
+                )
+            )
+        elif isinstance(child, dict) and depth > 1:
+            leaves.extend(_walk_subtree(child, path, depth - 1))
+    return leaves
+
+
+async def _discover_raw(client: Any, path: str, depth: int) -> Any:
+    """Issue ONE read-only ``getValue`` at ``path`` and return the RAW envelope.
+
+    Mirrors :func:`_action_raw` (same name-mangled raw seam, same fail-closed
+    missing-seam contract) but for the discovery read. It must go through the raw
+    seam — NOT the library's ``get_value_by_xpath`` — because that wrapper
+    decamelizes the value and would mangle every datamodel path; the raw envelope
+    preserves the PascalCase keys the walk reports. ``depth`` is threaded into the
+    getValue ``options`` as a request-side hint; the provider ALSO bounds the walk
+    by ``depth`` client-side, so the bound holds even if the firmware ignores the
+    option. The xpath is URL-quoted exactly once with the datamodel-aware safe set
+    (the raw seam does not quote), matching :meth:`action`.
+    """
+    raw = getattr(client, "_SagemcomClient__api_request_async", None)
+    if raw is None:
+        msg = "sagemcom_api raw request seam (_SagemcomClient__api_request_async) is missing"
+        raise DeviceError(
+            msg,
+            fix=(
+                "the installed sagemcom_api dropped/renamed the raw seam; pin a "
+                "version that exposes it (discovery has no decamelize-safe fallback)"
+            ),
+        )
+    action = {
+        "id": 0,
+        "method": "getValue",
+        "xpath": quote(path, _SAH_XPATH_SAFE),
+        "options": {"depth": depth},
+    }
     return await raw([action], False)
 
 
@@ -572,6 +717,42 @@ class SagemcomHubProvider:
         a table mutation that must be durable calls this after the row verbs.
         """
         return self.action("applyChanges", "Device")
+
+    def discover(self, path: str = "Device", depth: int = 1) -> list[DiscoveredLeaf]:
+        """Read-only subtree walk: every leaf under ``path`` + its writability.
+
+        Issues a SINGLE SAH ``getValue`` at ``path`` through the raw seam (NEVER a
+        ``setValue`` — discovery must not mutate), then walks the returned datamodel
+        subtree up to ``depth`` object levels, reporting each leaf's current value
+        and whether it is *settable* on this hub (per its ``flags`` metadata — the
+        firmware ``NON_WRITABLE`` and Bell ``ACCESS_RESTRICTION`` walls are reported
+        ``writable=False`` with their restriction token; everything else is settable
+        through the near-total ``setValue`` surface).
+
+        This is the honest capability-mapping engine: a Layer-2 caller discovers
+        which leaves are actually writable on a given hub before composing a
+        mutating ``set``, instead of trusting a hardcoded path that the carrier may
+        have locked. The walk runs over the RAW (un-decamelized) envelope so the
+        datamodel paths stay PascalCase — see :func:`_extract_subtree`. A subtree
+        the firmware does not surface yields an empty list (best-effort), not a
+        crash; a missing raw seam fails closed (no decamelize-safe fallback).
+        """
+        client = self._require_client()
+        try:
+            reply = self._run(_discover_raw(client, path, depth))
+        except DeviceError:
+            # A missing raw seam is already a fail-closed DeviceError — propagate
+            # it unwrapped rather than masking it as a transport error.
+            raise
+        except Exception as exc:  # normalize any transport error
+            msg = f"Sagemcom discover failed for {path!r}: {exc}"
+            raise DeviceError(
+                msg, fix="check the hub is reachable and the session is valid"
+            ) from exc
+        subtree = _extract_subtree(reply)
+        if not subtree:
+            return []
+        return _walk_subtree(subtree, path, depth)
 
     def capabilities(self) -> AbstractSet[Capability]:
         """Operations this hub actually supports."""
