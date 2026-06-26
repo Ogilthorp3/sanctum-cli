@@ -77,14 +77,24 @@ _CAPABILITY_OPS: dict[Capability, CapabilityOp] = {
     Capability.DMZ: CapabilityOp(path=_ADVANCED_DMZ_XPATH, engaged="on"),
 }
 
-# The leaves a single-NAT cutover actually MUTATES (derived from the bridge-mode
-# capability op so the two never drift). The snapshot MUST carry a restorable
-# baseline for each even if the read returns None at snapshot time — otherwise a
-# rollback after a failed cutover would have nothing to restore and would
-# silently "succeed" while leaving the household in bridge mode (internet down).
-# A None read of the bridge-mode leaf means the hub is not in bridge mode, so the
-# safe pre-cutover baseline is "off".
-_MUTATED_XPATHS = (_CAPABILITY_OPS[Capability.BRIDGE_MODE].path,)
+# The leaves a single-NAT cutover actually MUTATES (derived from the capability
+# ops so the two never drift). The snapshot MUST carry a restorable baseline for
+# each even if the read returns None at snapshot time — otherwise a rollback after
+# a failed cutover would have nothing to restore and would silently "succeed"
+# while leaving the household in bridge mode / Advanced DMZ (internet down).
+#
+# BOTH the bridge-mode AND the Advanced-DMZ leaf are listed: the `single_nat`
+# intent flips bridge mode, the `single_nat_dmz` orchestrator engages Advanced DMZ
+# — both are single-NAT cutovers that strand the household if a rollback cannot
+# disable them. The real Bell firmware returns None for an un-engaged leaf, so
+# without DMZ here a failed DMZ cutover's rollback would have no DMZ baseline to
+# restore and would leave the hub stuck in single-NAT (FIX-2, CRITICAL). A None
+# read of either leaf means the hub is not in that mode, so the safe pre-cutover
+# baseline is "off".
+_MUTATED_XPATHS = (
+    _CAPABILITY_OPS[Capability.BRIDGE_MODE].path,
+    _CAPABILITY_OPS[Capability.DMZ].path,
+)
 _SAFE_BASELINE = "off"
 
 # XPath that identifies the device class once authenticated, used to refine the
@@ -464,14 +474,14 @@ class SagemcomHubProvider:
         """Capture the Bell network-config leaves we may need to restore.
 
         A best-effort read of each tracked XPath, with one hard guarantee: every
-        leaf a mutating intent will actually change (``_MUTATED_XPATHS``) is
-        ALWAYS present in the baseline, even if its read returns None. A leaf the
-        firmware does not surface at snapshot time would otherwise be dropped,
-        leaving rollback with nothing to restore — so it would silently "succeed"
-        while the hub stayed in bridge mode (internet down). For the bridge-mode
-        leaf a None read means "not in bridge mode", so the safe pre-cutover
-        baseline is ``"off"``. Non-mutated leaves (e.g. DMZ) stay best-effort:
-        captured only when read, since we never write them.
+        leaf a mutating intent will actually change (``_MUTATED_XPATHS`` — both the
+        bridge-mode and the Advanced-DMZ leaf) is ALWAYS present in the baseline,
+        even if its read returns None. A leaf the firmware does not surface at
+        snapshot time would otherwise be dropped, leaving rollback with nothing to
+        restore — so it would silently "succeed" while the hub stayed in bridge
+        mode / Advanced DMZ (internet down). A None read of either leaf means "not
+        in that mode", so the safe pre-cutover baseline is ``"off"``. Any other
+        tracked-but-not-mutated leaf stays best-effort: captured only when read.
         """
         data: dict[str, str] = {}
         for xpath in _SNAPSHOT_XPATHS:

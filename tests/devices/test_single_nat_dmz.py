@@ -32,6 +32,7 @@ from sanctum_cli.devices.base import (
     OpResult,
     Snapshot,
 )
+from sanctum_cli.devices.sagemcom import _MUTATED_XPATHS, _SAFE_BASELINE
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -49,13 +50,34 @@ class FakeHub:
     ``snapshot``/``rollback`` capture + restore the DMZ leaf. ``set``/``reboot``
     return an :class:`OpResult` (ok=True) so the rails fall through to verify on
     the happy path; a test may flip ``reboot_fails`` to exercise the failure fork.
+
+    Snapshot/rollback mirror the REAL :class:`SagemcomHubProvider`, not a
+    convenient shortcut that shares the producer's assumption (Contracts at the
+    Boundary). Two fidelity choices matter:
+
+    * The firmware does NOT surface the Advanced-DMZ leaf at snapshot time until a
+      ``set`` writes it — the real Bell firmware shape (a getValue of an un-set
+      leaf returns None, and the real provider drops a None read). So a fresh hub's
+      ``_v`` does NOT seed ``DMZ_PATH``; the earlier fake seeded ``{DMZ_PATH:
+      "off"}``, which masked the bug by making the leaf always present.
+    * ``snapshot`` therefore reproduces the real provider's hard guarantee:
+      every leaf in the PRODUCTION ``_MUTATED_XPATHS`` gets a ``_SAFE_BASELINE``
+      even when its read is absent. Deriving the guarantee from the production
+      tuple (a different source than the producer's snapshot body) is what makes
+      this test fail until DMZ is actually added to ``_MUTATED_XPATHS``.
+    * ``rollback`` re-issues a ``set`` per captured leaf (driving the recorded
+      write path) and reports ``ok=False`` on an empty baseline — exactly the
+      real provider — so "rollback drove DMZ off" is proven from a real restore,
+      not a dict swap that would silently lose an omitted key.
     """
 
     kind = "hub"
     brand = "fake-bell-hub"
 
     def __init__(self) -> None:
-        self._v: dict[str, str] = {DMZ_PATH: "off"}
+        # The firmware does NOT surface the DMZ leaf until it is written — the real
+        # shape. A fresh hub reads None for DMZ_PATH (absent from _v).
+        self._v: dict[str, str] = {}
         self.set_calls: list[tuple[str, str]] = []
         self.reboot_calls = 0
         self.rollback_calls = 0
@@ -96,12 +118,22 @@ class FakeHub:
         return None
 
     def snapshot(self, scope: str | None = None) -> Snapshot:
-        return Snapshot(brand=self.brand, taken_at="t", data=dict(self._v))
+        # Best-effort capture of what the firmware surfaces (None reads dropped) …
+        data = {path: value for path, value in self._v.items() if value is not None}
+        # … then the REAL provider's hard guarantee: every leaf the cutover MUTATES
+        # gets a restorable baseline even when unread. Derived from the PRODUCTION
+        # tuple so this fake fails until DMZ is actually in _MUTATED_XPATHS.
+        for path in _MUTATED_XPATHS:
+            data.setdefault(path, _SAFE_BASELINE)
+        return Snapshot(brand=self.brand, taken_at="t", data=data)
 
     def rollback(self, snap: Snapshot) -> OpResult:
         self.rollback_calls += 1
-        self._v = dict(snap.data)
-        return OpResult(ok=True, detail="rolled back DMZ")
+        if not snap.data:
+            return OpResult(ok=False, detail="rollback failed: no restorable baseline")
+        for path, value in snap.data.items():
+            self.set(path, value)
+        return OpResult(ok=True, detail=f"rolled back {len(snap.data)} key(s)")
 
 
 class FakeRunner:
@@ -161,7 +193,7 @@ def test_dmz_dry_run_makes_zero_device_writes() -> None:
     assert hub.rollback_calls == 0
     assert armor.installed == 0
     assert runner.calls == []
-    assert hub.get(DMZ_PATH) == "off"  # untouched
+    assert hub.get(DMZ_PATH) is None  # untouched (firmware never surfaced the leaf)
 
 
 def test_dmz_dry_run_plan_names_the_stages() -> None:
@@ -296,6 +328,54 @@ def test_dmz_stage_verify_failure_rolls_back(tmp_path: Path) -> None:
     assert hub.get(DMZ_PATH) == "off"
     # And the rollback re-leased DHCP downstream (disable DMZ → re-lease).
     assert any(tag and "release" in tag[0] for tag in runner.calls)
+
+
+def test_dmz_rollback_drives_dmz_off_even_when_firmware_omits_it(tmp_path: Path) -> None:
+    """The CRITICAL fix: even when the hub's snapshot OMITS the DMZ leaf (the real
+    firmware shape — a getValue of the un-engaged leaf returns None), a failed
+    cutover's rollback MUST still drive DMZ → off.
+
+    This is the fail-to-DARK trap: the cutover engages Advanced DMZ (single-NAT),
+    then a stage fails. If the pre-cutover snapshot never carried a DMZ baseline,
+    the rollback has nothing to restore for DMZ and silently "succeeds" while the
+    hub stays in single-NAT — the household left dark with no recovery path. The
+    snapshot MUST guarantee a DMZ baseline of "off" (DMZ in ``_MUTATED_XPATHS``)
+    so rollback re-issues ``set(DMZ_PATH, "off")``.
+
+    ``FakeHub`` here models the real firmware: its ``_v`` does NOT surface the DMZ
+    leaf until written, so the snapshot the rails take is built purely from the
+    PRODUCTION ``_MUTATED_XPATHS`` baseline guarantee — exactly the seam the fix
+    repairs.
+    """
+    from sanctum_cli.devices.intents import single_nat_dmz
+
+    hub, runner, armor = FakeHub(), FakeRunner(), FakeArmor()
+    # Pre-cutover: the firmware does not surface the DMZ leaf at all.
+    assert hub.get(DMZ_PATH) is None
+
+    verifiers = _all_pass_verifiers()
+    verifiers["observe_lease"] = lambda: False  # a stage fails → unwind
+    res = single_nat_dmz(
+        hub,
+        runner,
+        armor,
+        apply=True,
+        out_of_band_reachable=True,
+        force=True,
+        stage_verifiers=verifiers,
+        log_path=tmp_path / "audit.jsonl",
+    )
+    assert res.applied is True
+    assert res.result is not None
+    assert res.result.ok is False
+    # The cutover engaged DMZ …
+    assert (DMZ_PATH, "on") in hub.set_calls
+    # … and despite the firmware never surfacing the leaf at snapshot time, the
+    # rollback drove it back OFF (proof the snapshot carried the guaranteed
+    # baseline and rollback re-issued the restore write).
+    assert hub.rollback_calls == 1
+    assert (DMZ_PATH, "off") in hub.set_calls
+    assert hub.get(DMZ_PATH) == "off"
 
 
 def test_dmz_reboot_failure_rolls_back(tmp_path: Path) -> None:

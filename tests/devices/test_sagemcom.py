@@ -32,6 +32,7 @@ import pytest
 from sanctum_cli.devices.base import Capability, Creds, DeviceError
 
 BRIDGE_PATH = "Device/Services/BellNetworkCfg/SetBridgeMode"
+DMZ_PATH = "Device/Services/BellNetworkCfg/AdvancedDMZ"
 
 
 class FakeSahClient:
@@ -226,6 +227,46 @@ def test_snapshot_guarantees_bridge_mode_baseline_when_unread(
     snap = p.snapshot()
     # The leaf the cutover mutates MUST be present even though its read was None.
     assert snap.data[BRIDGE_PATH] == "off"
+
+
+def test_snapshot_guarantees_dmz_baseline_when_unread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Advanced-DMZ leaf is MUTATED by single_nat_dmz, so snapshot must carry a
+    safe restorable baseline for it even when the firmware does not surface it.
+
+    The real Bell firmware shape: a getValue of an un-set leaf returns None. If
+    snapshot drops the DMZ leaf on a None read, a rollback after a failed DMZ
+    cutover would have nothing to drive DMZ → off and would silently "succeed"
+    while the hub stays in single-NAT/DMZ — the household left dark with no
+    recovery. We monkeypatch the provider's own ``_raw_get`` to return None for
+    the DMZ xpath (the real None-read contract, not a convenient empty dict that
+    shares the producer's assumption) and assert the baseline is present == "off".
+    """
+    from sanctum_cli.devices import sagemcom
+    from sanctum_cli.devices.sagemcom import SagemcomHubProvider
+
+    fake = FakeSahClient({})
+    monkeypatch.setattr("sanctum_cli.devices.sagemcom._make_client", lambda creds: fake)
+    monkeypatch.setattr("sanctum_cli.keychain.read", lambda account, service: "pw")
+    p = SagemcomHubProvider()
+    p.connect(Creds(host="192.168.2.1", username="admin", secret=None, key_path=None))
+    _OPENED.append(p)
+
+    # Force the DMZ leaf's read to None (firmware does not expose it) — every other
+    # read falls through to the real provider seam.
+    real_raw_get = p._raw_get
+
+    def raw_get(path: str) -> str | None:
+        if path == sagemcom._ADVANCED_DMZ_XPATH:
+            return None
+        return real_raw_get(path)
+
+    monkeypatch.setattr(p, "_raw_get", raw_get)
+
+    snap = p.snapshot()
+    # The DMZ leaf the cutover mutates MUST be present even though its read was None.
+    assert snap.data[sagemcom._ADVANCED_DMZ_XPATH] == "off"
 
 
 def test_rollback_empty_snapshot_reports_failure(
