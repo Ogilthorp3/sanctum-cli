@@ -99,9 +99,17 @@ class FakeHub:
 
 
 class FakeRunner:
-    """Records every Firewalla runner op; serves a scripted public lease."""
+    """Records every Firewalla runner op; serves a scripted public lease.
 
-    def __init__(self, wan_ip: str = "203.0.113.7") -> None:
+    The default ``wan_ip`` is a genuinely-GLOBAL Bell address (the same one the
+    net-layer ``fixtures.SINGLE_NAT`` scenario uses), NOT a documentation/test-net
+    address. RFC-5737 ranges like 203.0.113.x are classified ``is_private`` by
+    Python's ``ipaddress`` — so the REAL ``verify.verify`` / ``classify_nat``
+    probes the CLI now wires would (correctly) treat them as double-NAT and roll
+    back. The fixture must therefore model an actual public single-NAT WAN.
+    """
+
+    def __init__(self, wan_ip: str = "70.53.241.21") -> None:
         self.calls: list[tuple[str, ...]] = []
         self.wan_ip = wan_ip
 
@@ -248,6 +256,43 @@ def test_net_single_nat_apply_without_force_declined_confirm_zero_writes(
     assert hub.set_calls == []
     assert hub.reboot_calls == 0
     assert armor.installed == 0
+
+
+# ── --apply: the REAL per-stage verify gates the commit (honest-verify) ───────
+
+
+def test_net_single_nat_apply_apipa_lease_rolls_back_nonzero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`--apply` with the downstream serving a 169.254.x (APIPA) lease MUST roll
+    back and exit non-zero — the cutover never reaches a real public WAN.
+
+    This is the honest-verify contract: the CLI must wire the SAME real probe
+    (``sanctum_cli.net.verify.verify`` over the runner) that ``net optimize`` and
+    the old ``single_nat`` used as the per-stage ``verify`` gate. With it wired,
+    an APIPA lease is ``Verdict.APIPA_ROLLBACK`` (NOT ``VERIFIED``) so the
+    ``verify`` stage's probe returns falsey, the rails unwind (disable DMZ →
+    re-lease DHCP), and the command exits non-zero.
+
+    WITHOUT it wired (today's bug), the ``verify`` stage falls through to
+    ``intents._default_stage_verifier`` (unconditional ``True``) and the cutover
+    COMMITS on a dead APIPA WAN — fail-to-DARK. This test fails today for exactly
+    that reason: no rollback, exit 0.
+
+    The runner serves the APIPA address for BOTH ``lease_observe`` and
+    ``fw_wan_ip`` — the latter is what ``verify.verify`` actually reads — so the
+    expectation is derived from the real ``verify.verify`` contract, not from a
+    convenient stub that shares the producer's assumption.
+    """
+    hub, fw, armor = FakeHub(), FakeRunner(wan_ip="169.254.10.4"), FakeArmor()
+    _wire(monkeypatch, hub=hub, fw=fw, armor=armor, out_of_band=True)
+    result = runner.invoke(app, ["net", "single-nat", "--apply", "--force"])
+    # The cutover did NOT succeed on a dead APIPA WAN.
+    assert result.exit_code != 0, result.stdout
+    # The rails unwound: DMZ disabled (provider.rollback) and re-leased DHCP.
+    assert hub.rollback_calls == 1
+    assert hub.get(DMZ_PATH) == "off"
+    assert any(tag and "release" in tag[0] for tag in fw.calls)
 
 
 # ── --rollback: drives the undo path ──────────────────────────────────────────

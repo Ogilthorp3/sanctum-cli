@@ -25,7 +25,7 @@ from sanctum_cli.devices.base import (
 )
 from sanctum_cli.errors import SanctumError
 from sanctum_cli.net import detect, playbooks, render, safety, speedtest, system, verify
-from sanctum_cli.net.types import SpeedReport, Verdict
+from sanctum_cli.net.types import Nat, SpeedReport, Verdict
 from sanctum_cli.onboard_experience import chapter_banner, green_check
 
 if TYPE_CHECKING:
@@ -609,6 +609,56 @@ def _print_dmz_stage_plan(plan: list[str]) -> None:
             console.print(green_check(stripped))
 
 
+def _dmz_stage_verifiers(runner: Runner) -> dict[str, Callable[[], bool]]:
+    """The REAL per-stage probes the apply path gates each mutating stage on.
+
+    Honest-verify: a stage's ``✓`` MUST derive from a real-world outcome, never
+    from :func:`intents._default_stage_verifier`'s unconditional ``True``. Two
+    stages carry a probe that can fail-closed the moment the downstream WAN is bad:
+
+    * ``observe_lease`` — read the REAL downstream WAN lease via the runner
+      (``("lease_observe",)`` over the Firewalla SSH seam) and REJECT an
+      APIPA (169.254.x) / empty / double-NAT lease. This trips the instant the
+      router fails to pull a public lease — *before* the hub is left engaged in
+      Advanced DMZ on a dead WAN.
+    * ``verify`` — the terminal end-to-end check: the SAME
+      :func:`sanctum_cli.net.verify.verify` real-site probe net_optimize and the
+      old single_nat used. ONLY a single-NAT :class:`Verdict.VERIFIED` passes;
+      APIPA / still-double-NAT / inconclusive all fail the stage so
+      ``guarded_apply`` unwinds (disable DMZ → re-lease DHCP) and the command
+      exits non-zero.
+
+    The remaining stages (preflight/wan_dhcp/enable_dmz/hub_reboot/apply_armor/
+    arm) have no extra real-world readback of their own — their I/O already
+    fail-closes (a refused ``set``/``reboot``/armor-install returns ``ok=False``
+    or raises, which the orchestrator turns into a stage failure) — so they are
+    left to fall through; the two probes above are the gates that catch a WAN
+    that came up dead.
+    """
+
+    def _observe_lease_ok() -> bool:
+        # Read the REAL downstream WAN the router just leased. A self-assigned
+        # APIPA (169.254.x), an empty/no lease, or a still-private (double-NAT)
+        # address means the cutover did NOT land a public single-NAT WAN — fail
+        # the stage so the rails unwind before DMZ is left engaged on a dead WAN.
+        lease = runner(("lease_observe",)).strip() or None
+        if lease is None or detect.is_apipa(lease):
+            return False
+        # classify_nat off the lease alone (no hop2): a private address is
+        # double-NAT, a public one is the single-NAT win. Only SINGLE passes.
+        return detect.classify_nat(hop2=None, wan_ip=lease) is Nat.SINGLE
+
+    def _verify_ok() -> bool:
+        # The terminal honest-verify: only a confirmed single-NAT public WAN path
+        # commits. APIPA_ROLLBACK / NOT_YET (still double) / INCONCLUSIVE all fail.
+        return verify.verify(runner=runner)[0] is Verdict.VERIFIED
+
+    return {
+        "observe_lease": _observe_lease_ok,
+        "verify": _verify_ok,
+    }
+
+
 @net_app.command(
     "single-nat",
     help=(
@@ -658,6 +708,16 @@ def net_single_nat(
                 _build_armor_installer() if apply else None,
                 apply=apply,
                 out_of_band_reachable=oob,
+                # Wire the REAL per-stage probes (honest-verify): the ``verify``
+                # stage runs the SAME ``net.verify.verify`` real-world probe that
+                # net_optimize/the old single_nat used — only a single-NAT
+                # ``Verdict.VERIFIED`` commits; APIPA/double-NAT/inconclusive fail
+                # the stage so the rails unwind. ``observe_lease`` rejects an
+                # APIPA/empty downstream lease the instant it is read (before the
+                # hub is left in DMZ on a dead WAN). Without these the stages would
+                # fall through to ``intents._default_stage_verifier`` (unconditional
+                # True) and a dead-WAN cutover would COMMIT — fail-to-DARK.
+                stage_verifiers=_dmz_stage_verifiers(runner) if apply else None,
                 force=force,
                 confirm=lambda plan: typer.confirm(f"{plan}\nAre you at the box (not remote)?"),
             )
