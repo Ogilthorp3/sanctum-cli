@@ -48,6 +48,7 @@ from sanctum_cli.devices.base import (
     Snapshot,
     build_capability_map,
 )
+from sanctum_cli.devices.transport import TransportKind
 
 if TYPE_CHECKING:
     from collections.abc import Set as AbstractSet
@@ -667,6 +668,19 @@ class OrbiProvider:
         guest leaf; every other capability returns ``None`` (no blind mutation).
         """
         return _CAPABILITY_OPS.get(capability)
+
+    def fallback_transport(self) -> TransportKind:
+        """The GUI transport for the Orbi's GUI-only ceiling: agent-browser.
+
+        An Orbi exposes BOTH a web admin UI (``orbilogin.com`` / the gateway) and
+        the Orbi mobile app, so per the API→agent-browser→android priority chain the
+        web UI (agent-browser) wins as the fallback for the surfaces pynetgear's
+        fixed SOAP set cannot reach (SSID/channel/AP-mode/port-forward/IPv6/VPN —
+        incl. the AP_MODE + CHANNELS honesty defects). The multi-transport router
+        reads this via the optional
+        :class:`~sanctum_cli.devices.transport.FallbackTransportProvider` protocol.
+        """
+        return TransportKind.BROWSER
 
     def capability_map(self) -> CapabilityMap:
         """Honest "what can I change on this Orbi": real SOAP ops + the GUI-only ceiling.

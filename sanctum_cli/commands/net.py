@@ -14,6 +14,7 @@ from sanctum_cli import config
 from sanctum_cli.devices import firewalla as firewalla_provider
 from sanctum_cli.devices import intents, rails, registry, sagemcom
 from sanctum_cli.devices import orbi as orbi_provider
+from sanctum_cli.devices import transport as transport_router
 from sanctum_cli.devices.armor import SinglenatArmorInstaller
 from sanctum_cli.devices.base import (
     Capability,
@@ -114,6 +115,50 @@ def device_creds(kind: str, net: NetContext) -> Creds:
         key_path=None,
         keychain_service=service or None,
     )
+
+
+def _render_capabilities(provider: DeviceProvider) -> None:
+    """Print the per-setting transport plan: live API ops + the Phase-2 ceiling.
+
+    Builds the honest multi-transport plan (:func:`transport_router.plan_routes`)
+    from the provider's OWN capability map, then renders two sections:
+
+    * **API (live)** — each advertised capability with the concrete real op that
+      backs it (driven now); and
+    * the **GUI-only ceiling** — the surfaces the API cannot reach, each tagged with
+      the brand's Phase-2 fallback transport (agent-browser for a web-UI box,
+      android for the app-only Firewalla) and the ``Phase 2: live recipe`` marker.
+
+    Read-only: it only reads the provider's (already honest-verified) map and
+    mutates nothing. The 3 honesty defects (Orbi AP_MODE/CHANNELS, Firewalla
+    WAN_MODE) surface here as ceiling rows under a GUI fallback — never as a live
+    API op they lack.
+    """
+    plan = transport_router.plan_routes(provider)
+    console.print(f"[bold]{escape(provider.kind)}:[/] {escape(plan.brand)}")
+    console.print(
+        f"[bold]GUI-only fallback transport:[/] {escape(plan.fallback.value)}"
+    )
+    live = [r for r in plan.routes if r.live]
+    ceiling = [r for r in plan.routes if not r.live]
+    console.print("\n[bold]API (live) — driven now:[/]")
+    if live:
+        for route in live:
+            console.print(
+                f"  [cyan]{escape(route.setting)}[/]  "
+                f"[dim]{escape(route.transport.value)}[/]  {escape(route.op)}"
+            )
+    else:
+        console.print("  [dim](none)[/]")
+    console.print("\n[bold]GUI-only ceiling — Phase 2 (not yet implemented):[/]")
+    if ceiling:
+        for route in ceiling:
+            console.print(
+                f"  [yellow]{escape(route.transport.value)}[/]  "
+                f"{escape(route.setting)}  [dim]({escape(route.op)})[/]"
+            )
+    else:
+        console.print("  [dim](none — the API reaches every known surface)[/]")
 
 
 def _firewalla_key_path() -> Path:
@@ -465,6 +510,19 @@ def hub_status() -> None:
     console.print(f"[bold]model:[/] {escape(model or '-')}")
     console.print(f"[bold]firmware:[/] {escape(firmware or '-')}")
     console.print(f"[bold]bridge-mode:[/] {escape(bridge or '-')}")
+
+
+@hub_app.command(
+    "capabilities",
+    help="List what can be changed on the hub, per transport (API now; GUI = Phase 2).",
+)
+def hub_capabilities() -> None:
+    try:
+        with _connected_hub() as provider:
+            _render_capabilities(provider)
+    except SanctumError as exc:
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code)) from exc
 
 
 @hub_app.command("get", help="Read one hub leaf value by its provider path.")
@@ -1029,6 +1087,19 @@ def firewalla_status() -> None:
     console.print(f"[bold]info:[/] {escape(info or '-')}")
 
 
+@firewalla_app.command(
+    "capabilities",
+    help="List what can be changed on the box, per transport (API now; app = Phase 2).",
+)
+def firewalla_capabilities() -> None:
+    try:
+        with _connected_firewalla() as provider:
+            _render_capabilities(provider)
+    except SanctumError as exc:
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code)) from exc
+
+
 @firewalla_app.command("policies", help="Read-only: the box's policy state.")
 def firewalla_policies() -> None:
     try:
@@ -1227,6 +1298,19 @@ def orbi_status() -> None:
     console.print(f"[bold]model:[/] {escape(model or '-')}")
     console.print(f"[bold]guest-wifi 2g:[/] {escape(guest_2g or '-')}")
     console.print(f"[bold]guest-wifi 5g:[/] {escape(guest_5g or '-')}")
+
+
+@orbi_app.command(
+    "capabilities",
+    help="List what can be changed on the Orbi, per transport (API now; GUI = Phase 2).",
+)
+def orbi_capabilities() -> None:
+    try:
+        with _connected_orbi() as provider:
+            _render_capabilities(provider)
+    except SanctumError as exc:
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code)) from exc
 
 
 @orbi_app.command("firmware", help="Read-only: the Orbi's available firmware update, if any.")

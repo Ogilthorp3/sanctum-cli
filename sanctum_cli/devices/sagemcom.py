@@ -55,6 +55,7 @@ from sanctum_cli.devices.base import (
     Snapshot,
     build_capability_map,
 )
+from sanctum_cli.devices.transport import TransportKind
 
 if TYPE_CHECKING:
     from collections.abc import Coroutine
@@ -832,6 +833,18 @@ class SagemcomHubProvider:
         same capabilities to its own paths/values via its own ``capability_op``.
         """
         return _CAPABILITY_OPS.get(capability)
+
+    def fallback_transport(self) -> TransportKind:
+        """The GUI transport for this hub's carrier-locked ceiling: agent-browser.
+
+        A Bell Home Hub exposes a web admin UI at the gateway, so the surfaces the
+        near-total ``setValue`` cannot reach (the firmware NON_WRITABLE image, the
+        Bell ACCESS_RESTRICTION leaves) are driven through the web UI — the
+        agent-browser transport (the priority chain's first non-API rung) — not the
+        mobile-app rung. The multi-transport router reads this via the optional
+        :class:`~sanctum_cli.devices.transport.FallbackTransportProvider` protocol.
+        """
+        return TransportKind.BROWSER
 
     def capability_map(self) -> CapabilityMap:
         """Honest "what can I change on this hub": real SAH ops + the carrier ceiling.

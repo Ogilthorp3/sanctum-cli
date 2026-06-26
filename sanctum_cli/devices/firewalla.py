@@ -59,6 +59,7 @@ from sanctum_cli.devices.base import (
     Snapshot,
     build_capability_map,
 )
+from sanctum_cli.devices.transport import TransportKind
 
 if TYPE_CHECKING:
     from collections.abc import Set as AbstractSet
@@ -832,6 +833,19 @@ class FirewallaProvider:
         ``CapabilityOp``.
         """
         return None
+
+    def fallback_transport(self) -> TransportKind:
+        """The GUI transport for the Firewalla's GUI-only ceiling: android.
+
+        Unlike a Bell hub or an Orbi, a Firewalla box exposes NO admin web UI — the
+        GUI-only surfaces (NAT/DMZ/WAN-mode/VPN, incl. the WAN_MODE honesty defect)
+        are reachable ONLY through the Firewalla mobile app. So this brand's GUI
+        fallback skips the agent-browser rung and resolves to ``android`` (the live
+        app recipe is Phase 2). The multi-transport router reads this via the
+        optional :class:`~sanctum_cli.devices.transport.FallbackTransportProvider`
+        protocol.
+        """
+        return TransportKind.ANDROID
 
     def capability_map(self) -> CapabilityMap:
         """Honest "what can I change on this box": real bridge routes + the GUI ceiling.
