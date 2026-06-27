@@ -288,3 +288,122 @@ def test_evaluate_interlock_reason_names_each_missing_precondition() -> None:
     assert "out-of-band" in low or "out of band" in low or "tailscale" in low
     assert "armor" in low
     assert "rollback" in low
+
+
+# ── settle_poll_decision: distinguish "still settling" from "hard fail" (FIX a) ─
+#
+# After the hub reboot the downstream WAN is normally DARK for 2-5 min (apipa/none)
+# before the public lease arrives. The old single-shot observe_lease raced that
+# window and FALSE-FAILED a cutover that would have succeeded. settle_poll_decision
+# is the PURE brain (no clock — elapsed is passed in) the bounded poll consults:
+#   - "public"                    -> settled_ok (the single-NAT win)
+#   - "double_nat"                -> hard_fail at once (DMZ did not take; waiting cannot fix)
+#   - apipa/none AND elapsed<bound -> keep_polling (the normal hub-dark window)
+#   - apipa/none AND elapsed>=bound -> hard_fail (the WAN genuinely never came up)
+# These author the truth table directly from that contract (Contracts at the
+# Boundary: a /1-poisoned lease, a hub still dark mid-window, a transient past the
+# bound are the hostile inputs).
+
+
+def test_settle_poll_public_is_settled_ok_no_relelease() -> None:
+    """A public lease is the single-NAT win: stop the poll, no re-lease."""
+    d = flip.settle_poll_decision("public", elapsed_s=5.0, timeout_s=360.0)
+    assert d.action == "settled_ok"
+    assert d.re_lease is False
+
+
+def test_settle_poll_double_nat_is_immediate_hard_fail_never_waited_on() -> None:
+    """double_nat is a DEFINITE failure — DMZ did not take; waiting/re-leasing cannot
+    fix it, so it hard-fails AT ONCE (well within the window) and is never masked."""
+    d = flip.settle_poll_decision("double_nat", elapsed_s=1.0, timeout_s=360.0)
+    assert d.action == "hard_fail"
+    assert d.re_lease is False
+    assert "double" in d.reason.lower()
+
+
+@pytest.mark.parametrize("observed", ["apipa", "none"])
+def test_settle_poll_transient_within_window_keeps_polling(observed: str) -> None:
+    """The 06-26 hostile input: the hub is dark (apipa/none) MID-window. This must
+    NOT fail — it keeps polling and nudges a re-lease (the normal settling window)."""
+    d = flip.settle_poll_decision(observed, elapsed_s=30.0, timeout_s=360.0)
+    assert d.action == "keep_polling"
+    assert d.re_lease is True
+
+
+@pytest.mark.parametrize("observed", ["apipa", "none"])
+def test_settle_poll_transient_at_or_past_bound_hard_fails(observed: str) -> None:
+    """A transient that SURVIVES the whole window is a genuine failure surfaced only
+    AFTER the window proves it is not merely settling. Boundary elapsed==timeout
+    fails closed (>=) so the window can never be over-trusted."""
+    at_bound = flip.settle_poll_decision(observed, elapsed_s=360.0, timeout_s=360.0)
+    assert at_bound.action == "hard_fail"
+    assert at_bound.re_lease is False
+    past_bound = flip.settle_poll_decision(observed, elapsed_s=400.0, timeout_s=360.0)
+    assert past_bound.action == "hard_fail"
+
+
+# ── evaluate_wan_poison: refuse a "public" lease still carrying Bell's /1 (FIX c) ─
+#
+# Bell's Advanced DMZ hands the WAN a PUBLIC IP with a /1 netmask whose 0.0.0.0/1
+# on-link route overlaps the 1-127.x LAN and collapses forwarding. The /32 armor's
+# supersede pins the WAN to /32 + an on-link gateway. observe_lease only reads the
+# bare IPv4 (it strips the prefix), so a "public" lease that is actually poisoned
+# would commit green on a dead LAN — the exact 2026-06-26 condition. evaluate_wan_poison
+# is the PURE gate: committable IFF the WAN is pinned to /32 AND no 0.0.0.0/1 route
+# is present. Authored from the consumer's real artifact (`ip -4 -o addr show` /
+# `ip -4 route show`), the hostile inputs being the poisoned readbacks.
+
+
+def test_evaluate_wan_poison_healthy_armored_is_committable() -> None:
+    """The armored success state: a /32 WAN + a clean route table (no 0.0.0.0/1)."""
+    addr = "2: eth0    inet 24.150.33.7/32 brd 24.150.33.7 scope global eth0"
+    routes = "default via 10.0.0.1 dev eth0\n24.150.33.7 dev eth0 scope link"
+    v = flip.evaluate_wan_poison(addr, routes)
+    assert v.committable is True
+
+
+def test_evaluate_wan_poison_06_26_condition_refuses() -> None:
+    """HOSTILE 06-26: a public IP with a /1 netmask AND a 0.0.0.0/1 poison route ->
+    NOT committable; the reason names both the route and the /1."""
+    addr = "2: eth0    inet 24.150.33.7/1 brd 127.255.255.255 scope global eth0"
+    routes = "default via 10.111.0.1 dev eth0\n0.0.0.0/1 via 10.111.0.1 dev eth0"
+    v = flip.evaluate_wan_poison(addr, routes)
+    assert v.committable is False
+    low = v.reason.lower()
+    assert "0.0.0.0/1" in v.reason
+    assert "/1" in v.reason
+    assert "fail" in low
+
+
+def test_evaluate_wan_poison_armor_addr_but_poison_route_survived_refuses() -> None:
+    """HOSTILE: WAN pinned to /32 but the 0.0.0.0/1 route survived (route-supersede
+    failed) -> not committable (a half-holding armor must not commit)."""
+    addr = "2: eth0    inet 24.150.33.7/32 scope global eth0"
+    routes = "default via 10.0.0.1 dev eth0\n0.0.0.0/1 via 10.0.0.1 dev eth0"
+    v = flip.evaluate_wan_poison(addr, routes)
+    assert v.committable is False
+
+
+def test_evaluate_wan_poison_one_netmask_route_hidden_refuses() -> None:
+    """HOSTILE: the address carries a /1 but the route table HIDES the 0.0.0.0/1 line
+    (addr-only poison) -> still refuses on the /1 alone."""
+    addr = "2: eth0    inet 24.150.33.7/1 scope global eth0"
+    routes = "default via 10.0.0.1 dev eth0"
+    v = flip.evaluate_wan_poison(addr, routes)
+    assert v.committable is False
+
+
+def test_evaluate_wan_poison_transient_both_prefixes_refuses() -> None:
+    """HOSTILE: a transient where BOTH a /32 and a /1 are present -> any /1 fails."""
+    addr = "2: eth0    inet 24.150.33.7/32 scope global eth0\n    inet 24.150.33.7/1 scope global eth0"
+    routes = "default via 10.0.0.1 dev eth0"
+    v = flip.evaluate_wan_poison(addr, routes)
+    assert v.committable is False
+
+
+@pytest.mark.parametrize("addr", ["", "<no inet>", None])
+def test_evaluate_wan_poison_unparseable_readback_refuses(addr: str | None) -> None:
+    """HOSTILE: a garbage/empty readback cannot PROVE the /32 armor holds -> refuse
+    (fail-closed: we never commit unless we can prove the armor is holding)."""
+    v = flip.evaluate_wan_poison(addr, "default via 10.0.0.1 dev eth0")
+    assert v.committable is False

@@ -356,10 +356,22 @@ _FW_MUTATING_REMOTE: dict[tuple[str, ...], str] = {
     ("dhcp_release",): f"{_FW_WAN_DEV}; {_FW_RELEASE_RENEW}",
     # Re-run the boot-armor (post_main.sh) to (re)install the persistence hook + MTU.
     ("armor_arm",): "sudo /home/pi/.firewalla/config/post_main.sh 2>/dev/null",
+    # FIX (c) raw readbacks for the poison gate. Unlike lease_observe (which strips
+    # the IPv4 out), these RETURN THE RAW stdout so flip.evaluate_wan_poison can see
+    # the /PREFIX and the route table — the /1-vs-/32 signal + a surviving 0.0.0.0/1
+    # poison route the bare-IP read discards. Pure READS — never mutate the lease.
+    ("wan_addr_cidr",): f'{_FW_WAN_DEV}; ip -4 -o addr show dev "$WAN" 2>/dev/null',
+    ("wan_routes",): "ip -4 route show 2>/dev/null",
 }
 
-# The tags that READ + RETURN a value (the rest are fire-and-confirm mutations).
+# The tags that READ + RETURN the FIRST IPv4 in stdout (lease_observe). The rest are
+# fire-and-confirm mutations, EXCEPT the raw-readback tags below.
 _FW_READBACK_TAGS = frozenset({("lease_observe",)})
+
+# FIX (c): tags that READ + RETURN the RAW stdout verbatim (prefix + route table
+# preserved). These must be checked BEFORE _FW_READBACK_TAGS so the IPv4-extracting
+# parse never discards the /PREFIX + routes the poison gate needs.
+_FW_RAW_READBACK_TAGS = frozenset({("wan_addr_cidr",), ("wan_routes",)})
 
 
 def _fw_mutate_via_ssh(gateway: str, key: str, tag: tuple[str, ...]) -> str:
@@ -387,6 +399,9 @@ def _fw_mutate_via_ssh(gateway: str, key: str, tag: tuple[str, ...]) -> str:
         detail = (proc.stderr or proc.stdout or "").strip()
         msg = f"Firewalla single-NAT op {tag[0]!r} failed (ssh exit {proc.returncode}): {detail}"
         raise RuntimeError(msg)
+    if tag in _FW_RAW_READBACK_TAGS:
+        # FIX (c): the poison gate needs the prefix + route table — return verbatim.
+        return proc.stdout
     if tag in _FW_READBACK_TAGS:
         for line in proc.stdout.splitlines():
             s = line.strip()

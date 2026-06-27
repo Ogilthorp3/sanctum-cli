@@ -99,6 +99,12 @@ class FakeRunner:
         self.calls.append(tag)
         if tag and tag[0] in ("fw_wan_ip", "lease_observe"):
             return "203.0.113.7"
+        # FIX (c): a public lease must also carry the armored contract (the /32 +
+        # a clean route table) or the poison gate refuses to commit. Healthy default.
+        if tag == ("wan_addr_cidr",):
+            return "2: eth0    inet 203.0.113.7/32 brd 203.0.113.7 scope global eth0"
+        if tag == ("wan_routes",):
+            return "default via 10.0.0.1 dev eth0"
         return ""
 
 

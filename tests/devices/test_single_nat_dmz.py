@@ -155,6 +155,13 @@ class FakeRunner:
         self.calls.append(tag)
         if tag and tag[0] in ("fw_wan_ip", "lease_observe"):
             return self.wan_ip
+        # FIX (c): a fake that serves a 'public' lease must model the WHOLE contract
+        # the real box serves — the /32 armor + a clean route table — or the poison
+        # gate (correctly) refuses to commit. Healthy armored state by default.
+        if tag == ("wan_addr_cidr",):
+            return f"2: eth0    inet {self.wan_ip}/32 brd {self.wan_ip} scope global eth0"
+        if tag == ("wan_routes",):
+            return "default via 10.0.0.1 dev eth0"  # no 0.0.0.0/1 poison route
         return ""
 
 
@@ -176,13 +183,24 @@ class ScriptedLeaseRunner:
     def __init__(self, leases: list[str]) -> None:
         self.calls: list[tuple[str, ...]] = []
         self._leases = list(leases)
+        self._last_lease = "203.0.113.7"
 
     def __call__(self, tag: tuple[str, ...]) -> str:
         self.calls.append(tag)
         if tag and tag[0] in ("fw_wan_ip", "lease_observe"):
-            if len(self._leases) > 1:
-                return self._leases.pop(0)
-            return self._leases[0] if self._leases else ""
+            lease = self._leases.pop(0) if len(self._leases) > 1 else (
+                self._leases[0] if self._leases else ""
+            )
+            if lease:
+                self._last_lease = lease
+            return lease
+        # FIX (c): model the WHOLE contract a 'public' lease carries — the /32 armor
+        # holding + a clean route table — so a committing cutover is proven armored,
+        # not just public. (A poisoned readback is modelled by a dedicated runner.)
+        if tag == ("wan_addr_cidr",):
+            return f"3: eth0    inet {self._last_lease}/32 brd {self._last_lease} scope global eth0"
+        if tag == ("wan_routes",):
+            return "default via 10.0.0.1 dev eth0"  # no 0.0.0.0/1 poison route
         return ""
 
     def lease_reads(self) -> int:
@@ -228,6 +246,21 @@ class FakeArmor:
 def _all_pass_verifiers() -> dict[str, object]:
     """A stage→verifier map where every stage's probe passes (the happy path)."""
     return {stage: (lambda: True) for stage in flip.FLIP_STAGES}
+
+
+@pytest.fixture(autouse=True)
+def _fast_settle_poll(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Drive the observe_lease settle poll (FIX a) with a TINY real timeout + a short
+    real interval so the e2e cutover tests exercise the REAL bounded poll loop + the
+    REAL ``time.monotonic`` clock instantly — no time-mocking. A transient lease that
+    never clears hard-fails in ~50 ms (a handful of real ``time.sleep(0.005)`` ticks);
+    a transient-then-public settles on the next read. The direct ``_observe_lease``
+    driver tests above inject their own clock and are unaffected (they pass explicit
+    ``timeout_s``/``now``/``sleep``). The CLI path uses the real 360 s default."""
+    from sanctum_cli.devices import intents
+
+    monkeypatch.setattr(intents, "_SETTLE_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(intents, "_SETTLE_POLL_INTERVAL_S", 0.005)
 
 
 # ── dry-run: the hard guardrail (ZERO device writes) ─────────────────────────
@@ -712,14 +745,17 @@ def test_observe_lease_apipa_then_public_fires_exactly_one_release_and_proceeds(
     assert armor.installed == 1
 
 
-def test_observe_lease_persistent_apipa_rolls_back_after_one_retry(tmp_path: Path) -> None:
-    """A 169.254.x APIPA that SURVIVES the single re-lease is a real failure: the
-    stage raises so the rails unwind — DMZ rolled back to off, ok=False — and only
-    ONE re-lease was attempted (no infinite re-lease loop)."""
+def test_observe_lease_persistent_apipa_rolls_back_past_the_settle_window(tmp_path: Path) -> None:
+    """A 169.254.x APIPA that NEVER clears through the whole settle window (FIX a) is
+    a GENUINE failure: the bounded poll waits through the window, nudging a re-lease
+    each tick, then hard-fails at the bound so the rails unwind — DMZ rolled back to
+    off, ok=False — without looping forever. (The fast-settle fixture shrinks the
+    window to a handful of real ``time.sleep`` ticks; the precise tick/re-lease counts
+    are pinned by the deterministic direct ``_observe_lease`` driver test above.)"""
     from sanctum_cli.devices.intents import single_nat_dmz
 
     hub, armor = FakeHub(), FakeArmor()
-    # APIPA on every read — the re-lease never clears it.
+    # APIPA on every read — the re-lease never clears it, the whole window through.
     runner = ScriptedLeaseRunner(["169.254.10.5"])
     res = single_nat_dmz(
         hub,
@@ -734,9 +770,10 @@ def test_observe_lease_persistent_apipa_rolls_back_after_one_retry(tmp_path: Pat
     assert res.applied is True
     assert res.result is not None
     assert res.result.ok is False
-    # Exactly ONE re-lease was attempted (one retry only — never loop forever).
+    # It polled through the window (more than one read) and nudged a re-lease per tick
+    # — bounded, not an infinite loop — then gave up.
+    assert runner.lease_reads() >= 2
     assert runner.releases_between_first_two_reads() == 1
-    assert runner.lease_reads() == 2  # observe, retry-observe — then give up
     # Persistent APIPA → the flip unwound: DMZ disabled, household not left dark.
     assert hub.rollback_calls == 1
     assert hub.get(DMZ_PATH) == "false"
@@ -795,21 +832,18 @@ def test_observe_lease_public_first_read_fires_no_release(tmp_path: Path) -> Non
     assert hub.get(DMZ_PATH) == "true"
 
 
-def test_observe_lease_double_nat_first_read_fires_no_release_but_fails_stage_verify(
+def test_observe_lease_double_nat_first_read_hard_fails_in_the_stage_itself(
     tmp_path: Path,
 ) -> None:
-    """A double_nat (RFC1918) lease is NOT retryable — re-leasing a hub-handed
-    private address would not help. The observe_lease stage proceeds WITHOUT a
-    re-lease (double_nat is not in the retry set); the CLI's real observe-lease
-    verifier is what then rejects double_nat. Here we model that with a failing
-    observe_lease verifier and assert: zero re-leases, then rollback."""
+    """A double_nat (RFC1918) lease is a DEFINITE failure (FIX a): re-leasing a
+    hub-handed private address cannot help and waiting on it cannot help, so the
+    settle poll hard-fails AT ONCE inside the stage — fired no re-lease of its own,
+    never waited on it. Every verifier PASSES here, so the rollback can ONLY come
+    from the stage's own lease classification (not from a verifier returning False)."""
     from sanctum_cli.devices.intents import single_nat_dmz
 
     hub, armor = FakeHub(), FakeArmor()
     runner = ScriptedLeaseRunner(["192.168.2.10"])  # hub's own LAN → double_nat
-    verifiers = _all_pass_verifiers()
-    # The real CLI verifier rejects a non-SINGLE lease; model that rejection here.
-    verifiers["observe_lease"] = lambda: False
     res = single_nat_dmz(
         hub,
         runner,
@@ -817,15 +851,267 @@ def test_observe_lease_double_nat_first_read_fires_no_release_but_fails_stage_ve
         apply=True,
         out_of_band_reachable=True,
         force=True,
-        stage_verifiers=verifiers,
+        stage_verifiers=_all_pass_verifiers(),  # every verifier passes; the STAGE fails
         log_path=tmp_path / "audit.jsonl",
     )
     assert res.result is not None
     assert res.result.ok is False
-    # double_nat is NOT retryable → the stage fired no re-lease of its own.
+    # double_nat hard-failed on the first read → the stage fired no re-lease of its
+    # own before raising (read it exactly once, no dhcp_release in the stage window).
+    assert runner.lease_reads() == 1
     assert not any(t and t[0] == "dhcp_release" for t in runner.calls[: runner.lease_reads() + 1])
     assert hub.rollback_calls == 1
     assert hub.get(DMZ_PATH) == "false"
+
+
+# ── FIX (a): the bounded settle/poll driver (real runner + injected fake clock) ─
+#
+# These drive intents._observe_lease DIRECTLY with an injected monotonic clock + a
+# no-op sleep against the REAL ScriptedLeaseRunner boundary (no time-mocking, no
+# subprocess) so every branch is deterministic and instant. The hostile input is
+# the 06-26 hub-dark window: a cutover that takes ~90s to settle must NOT false-fail
+# at t+5s, and a transient that NEVER clears must hard-fail at the bound (not loop
+# forever, not commit).
+
+
+class _FakeClock:
+    """A monotonic clock double: returns each scripted value in turn, then sticks.
+
+    The poll calls ``now()`` once at start then once per tick; a list of increasing
+    values drives ``elapsed = now() - start`` deterministically with no real time.
+    """
+
+    def __init__(self, values: list[float]) -> None:
+        self._values = list(values)
+        self._last = 0.0
+
+    def __call__(self) -> float:
+        if self._values:
+            self._last = self._values.pop(0)
+        return self._last
+
+
+def _relelease_count(runner: ScriptedLeaseRunner) -> int:
+    return sum(1 for t in runner.calls if t and t[0] == "dhcp_release")
+
+
+def test_observe_lease_settles_to_public_within_window_no_false_fail() -> None:
+    """REGRESSION for (a): leases [apipa, apipa, public] read at 30s/60s/90s (all <
+    the 360s bound) SETTLES to public — it must NOT false-fail mid-window. Proves a
+    cutover that takes ~90s to settle no longer false-fails at t+5s. Re-leases fired
+    between reads; the real ScriptedLeaseRunner boundary + a real monotonic-shaped
+    fake clock, no time-mocking of the impl."""
+    from sanctum_cli.devices import intents
+
+    runner = ScriptedLeaseRunner(["169.254.10.5", "169.254.10.5", "203.0.113.7"])
+    clock = _FakeClock([0.0, 30.0, 60.0, 90.0])
+    sleeps: list[float] = []
+    # Returns normally (no _StageError) → the cutover would COMMIT.
+    intents._observe_lease(
+        runner, timeout_s=360.0, poll_interval_s=15.0, now=clock, sleep=sleeps.append
+    )
+    assert runner.lease_reads() == 3  # apipa, apipa, public
+    assert _relelease_count(runner) == 2  # one nudge after each transient read
+    assert len(sleeps) == 2  # slept once per keep-polling tick, never after settling
+
+
+def test_observe_lease_persistent_transient_hard_fails_at_bound_not_forever() -> None:
+    """A transient that NEVER clears hard-fails at the bound — bounded (not an
+    infinite re-lease loop) and surfaced as a GENUINE failure only AFTER the window
+    proves it is not merely settling."""
+    from sanctum_cli.devices import intents
+
+    runner = ScriptedLeaseRunner(["169.254.10.5"])  # apipa sticks forever
+    clock = _FakeClock([0.0, 100.0, 200.0, 300.0, 400.0])  # crosses 360 on tick 4
+    sleeps: list[float] = []
+    with pytest.raises(intents._StageError) as ei:
+        intents._observe_lease(
+            runner, timeout_s=360.0, poll_interval_s=15.0, now=clock, sleep=sleeps.append
+        )
+    assert "never came up" in str(ei.value).lower() or "still" in str(ei.value).lower()
+    # Bounded: it polled a handful of times then gave up — never looped forever.
+    assert 1 <= len(sleeps) <= 5
+    assert _relelease_count(runner) == len(sleeps)  # one nudge per keep-polling tick
+
+
+def test_observe_lease_double_nat_first_read_hard_fails_immediately() -> None:
+    """A double_nat lease is a DEFINITE failure (DMZ did not take) — the stage raises
+    AT ONCE: zero re-leases, zero sleeps, never waited on."""
+    from sanctum_cli.devices import intents
+
+    runner = ScriptedLeaseRunner(["192.168.2.10"])  # hub's own LAN → double_nat
+    clock = _FakeClock([0.0, 1.0])
+    sleeps: list[float] = []
+    with pytest.raises(intents._StageError) as ei:
+        intents._observe_lease(
+            runner, timeout_s=360.0, poll_interval_s=15.0, now=clock, sleep=sleeps.append
+        )
+    assert "double" in str(ei.value).lower() or "did not take" in str(ei.value).lower()
+    assert runner.lease_reads() == 1
+    assert _relelease_count(runner) == 0
+    assert sleeps == []
+
+
+def test_observe_lease_public_first_read_no_relelease_no_sleep() -> None:
+    """A public lease on the first read settles at once: one read, no re-lease, no
+    sleep — a healthy WAN is never needlessly bounced."""
+    from sanctum_cli.devices import intents
+
+    runner = ScriptedLeaseRunner(["203.0.113.7"])
+    clock = _FakeClock([0.0, 1.0])
+    sleeps: list[float] = []
+    intents._observe_lease(
+        runner, timeout_s=360.0, poll_interval_s=15.0, now=clock, sleep=sleeps.append
+    )
+    assert runner.lease_reads() == 1
+    assert _relelease_count(runner) == 0
+    assert sleeps == []
+
+
+def test_observe_lease_transient_lan_blip_reads_as_settling_not_instant_fail() -> None:
+    """A runner that RAISES RuntimeError (a LAN-SSH blip during the reboot) on the
+    first read is treated as 'still settling' (classified none), NOT an instant fail
+    — then the LAN recovers and a public lease settles the poll. This is the (b)
+    overlap handled fail-soft within the bounded window (it would hard-fail at the
+    bound if the LAN stayed dark, never false-commit)."""
+    from sanctum_cli.devices import intents
+
+    class _BlipThenPublicRunner(ScriptedLeaseRunner):
+        def __init__(self) -> None:
+            super().__init__(["203.0.113.7"])
+            self._blipped = False
+
+        def __call__(self, tag: tuple[str, ...]) -> str:
+            if tag and tag[0] == "lease_observe" and not self._blipped:
+                self._blipped = True
+                self.calls.append(tag)
+                msg = "ssh: connect to host failed"
+                raise RuntimeError(msg)
+            return super().__call__(tag)
+
+    runner = _BlipThenPublicRunner()
+    clock = _FakeClock([0.0, 20.0, 40.0])
+    sleeps: list[float] = []
+    intents._observe_lease(
+        runner, timeout_s=360.0, poll_interval_s=15.0, now=clock, sleep=sleeps.append
+    )
+    # The blip read as 'none' (still settling), polled again, then settled on public.
+    assert len(sleeps) == 1
+
+
+# ── FIX (c): netmask/route poison gate — a poisoned-but-public lease never commits ─
+#
+# Bell's Advanced DMZ hands a PUBLIC IP carrying a /1 netmask + a 0.0.0.0/1 on-link
+# route that collapses LAN forwarding. classify_wan_ip reads only the bare IPv4 (it
+# strips the prefix), so a "public" lease that is actually poisoned — the /32 armor
+# NOT holding — would commit GREEN on a dead LAN (the exact 2026-06-26 condition).
+# These drive the FULL single_nat_dmz orchestrator with a runner that serves a public
+# lease but a POISONED route-state, and assert the cutover ROLLS BACK (never green);
+# the armored counterpart proves the genuine single-NAT win still commits.
+
+
+class PoisonedPublicRunner:
+    """Serves a PUBLIC lease but a POISONED netmask/route-state (the 06-26 trap).
+
+    ``lease_observe``/``fw_wan_ip`` return a public IP (so ``classify_wan_ip`` →
+    ``"public"`` → the old path would COMMIT), but the raw readbacks the poison gate
+    inspects carry Bell's poison: a ``/1`` WAN netmask and a ``0.0.0.0/1`` route. The
+    /32 armor did NOT hold — committing would strand the household on a dead LAN.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, ...]] = []
+
+    def __call__(self, tag: tuple[str, ...]) -> str:
+        self.calls.append(tag)
+        if tag and tag[0] in ("fw_wan_ip", "lease_observe"):
+            return "24.150.33.7"  # a real public IP → classify "public"
+        if tag == ("wan_addr_cidr",):
+            return "2: eth0    inet 24.150.33.7/1 brd 127.255.255.255 scope global eth0"
+        if tag == ("wan_routes",):
+            return "default via 10.111.0.1 dev eth0\n0.0.0.0/1 via 10.111.0.1 dev eth0"
+        return ""
+
+
+class ArmoredPublicRunner:
+    """Serves a PUBLIC lease WITH the /32 armor holding + a clean route table.
+
+    The genuine single-NAT win the cutover is allowed to commit: a public lease, the
+    WAN pinned to /32 (the armor's address-supersede held), and no 0.0.0.0/1 route.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, ...]] = []
+
+    def __call__(self, tag: tuple[str, ...]) -> str:
+        self.calls.append(tag)
+        if tag and tag[0] in ("fw_wan_ip", "lease_observe"):
+            return "24.150.33.7"
+        if tag == ("wan_addr_cidr",):
+            return "2: eth0    inet 24.150.33.7/32 brd 24.150.33.7 scope global eth0"
+        if tag == ("wan_routes",):
+            return "default via 10.111.0.1 dev eth0"
+        return ""
+
+
+def test_observe_lease_public_but_poisoned_netmask_rolls_back_never_commits_green(
+    tmp_path: Path,
+) -> None:
+    """THE 06-26 CONDITION: a 'public' lease that is actually carrying Bell's /1
+    poison (the /32 armor did NOT hold) must NEVER commit green — the poison gate
+    inspects the netmask + route and the cutover ROLLS BACK instead of committing on
+    a dead LAN."""
+    from sanctum_cli.devices.intents import single_nat_dmz
+
+    hub, armor = FakeHub(), FakeArmor()
+    runner = PoisonedPublicRunner()
+    res = single_nat_dmz(
+        hub,
+        runner,
+        armor,
+        apply=True,
+        out_of_band_reachable=True,
+        force=True,
+        stage_verifiers=_all_pass_verifiers(),  # every verifier passes; the GATE fails
+        log_path=tmp_path / "audit.jsonl",
+    )
+    assert res.result is not None
+    assert res.result.ok is False  # NOT green
+    # The rails unwound: DMZ rolled back to off.
+    assert hub.rollback_calls == 1
+    assert hub.get(DMZ_PATH) == "false"
+    # The poison gate ran BEFORE the post-cutover armor install — never reached it.
+    assert armor.installed == 0
+    # It really inspected the netmask AND the route table (not just the bare IP).
+    assert ("wan_addr_cidr",) in runner.calls
+    assert ("wan_routes",) in runner.calls
+
+
+def test_observe_lease_public_and_armored_commits_green(tmp_path: Path) -> None:
+    """The armored counterpart: a public lease WITH the /32 armor holding + a clean
+    route table is the genuine single-NAT win — it COMMITS (ok=True), no rollback."""
+    from sanctum_cli.devices.intents import single_nat_dmz
+
+    hub, armor = FakeHub(), FakeArmor()
+    runner = ArmoredPublicRunner()
+    res = single_nat_dmz(
+        hub,
+        runner,
+        armor,
+        apply=True,
+        out_of_band_reachable=True,
+        force=True,
+        stage_verifiers=_all_pass_verifiers(),
+        log_path=tmp_path / "audit.jsonl",
+    )
+    assert res.result is not None
+    assert res.result.ok is True
+    assert hub.rollback_calls == 0
+    assert hub.get(DMZ_PATH) == "true"
+    assert armor.installed == 1
+    # The gate inspected the armored netmask + clean routes and let it through.
+    assert ("wan_addr_cidr",) in runner.calls
+    assert ("wan_routes",) in runner.calls
 
 
 def test_dmz_unsupported_provider_raises_legibly() -> None:

@@ -163,6 +163,51 @@ def test_make_real_runner_armor_arm_bootstraps_persistence_over_ssh() -> None:
     assert "post_main.sh" in remote
 
 
+def test_make_real_runner_wan_addr_cidr_keeps_the_prefix_over_ssh() -> None:
+    # FIX (c): the poison gate needs the /PREFIX + the route table that lease_observe
+    # STRIPS. wan_addr_cidr reads `ip -4 -o addr show` and returns the RAW stdout
+    # (with the /32-or-/1 prefix intact) so flip.evaluate_wan_poison can prove the
+    # /32 armor is holding. Not the IPv4-only parse lease_observe does.
+    argv = _ssh_argv_for(("wan_addr_cidr",))
+    remote = _assert_ssh_shape(argv)
+    assert "addr show" in remote
+    assert "dhclient" not in remote  # pure read — never mutates the lease
+
+
+def test_make_real_runner_wan_addr_cidr_returns_raw_stdout_with_prefix() -> None:
+    # The raw readback must NOT be reduced to a bare IPv4 (that would discard the
+    # /1-vs-/32 signal). It returns the SSH stdout verbatim, prefix and all.
+    raw = "2: eth0    inet 24.150.33.7/32 brd 24.150.33.7 scope global eth0\n"
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 0, stdout=raw, stderr="")
+
+    with patch("sanctum_cli.net.system.subprocess.run", side_effect=fake_run):
+        runner = system.make_real_runner(fw_gateway="10.0.0.1", fw_key="/tmp/k")
+        out = runner(("wan_addr_cidr",))
+    assert out == raw  # full output, /32 preserved
+    assert "/32" in out
+
+
+def test_make_real_runner_wan_routes_returns_raw_route_table_over_ssh() -> None:
+    # wan_routes surfaces the route table so a surviving 0.0.0.0/1 poison route is
+    # visible to the gate. Returns raw stdout (the gate scans it line by line).
+    raw = "default via 10.111.0.1 dev eth0\n0.0.0.0/1 via 10.111.0.1 dev eth0\n"
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 0, stdout=raw, stderr="")
+
+    with patch("sanctum_cli.net.system.subprocess.run", side_effect=fake_run):
+        runner = system.make_real_runner(fw_gateway="10.0.0.1", fw_key="/tmp/k")
+        out = runner(("wan_routes",))
+    assert out == raw
+    assert "0.0.0.0/1" in out
+    argv = _ssh_argv_for(("wan_routes",))
+    remote = _assert_ssh_shape(argv)
+    assert "route show" in remote
+    assert "dhclient" not in remote
+
+
 def test_make_real_runner_unknown_tag_on_apply_path_raises() -> None:
     # CRITICAL: an unknown/empty tag the apply path could fire must be a HARD
     # failure, never a silent "" no-op (which would report a green cutover while
@@ -178,7 +223,14 @@ def test_make_real_runner_mutating_tag_without_transport_raises() -> None:
     # A mutating tag with no fw gateway/key has no way to perform the WAN change;
     # silently returning "" would be the silent-no-op the council BLOCKED. Hard-fail.
     runner = system.make_real_runner(fw_gateway=None, fw_key=None)
-    for tag in (("wan_dhcp",), ("lease_observe",), ("dhcp_release",), ("armor_arm",)):
+    for tag in (
+        ("wan_dhcp",),
+        ("lease_observe",),
+        ("dhcp_release",),
+        ("armor_arm",),
+        ("wan_addr_cidr",),
+        ("wan_routes",),
+    ):
         with pytest.raises(RuntimeError):
             runner(tag)
 
@@ -208,6 +260,9 @@ def test_runner_implements_every_mutating_tag_the_orchestrator_fires() -> None:
         intents._RUNNER_LEASE_OBSERVE,
         intents._RUNNER_ARMOR_ARM,
         intents._RUNNER_DHCP_RELEASE,
+        # FIX (c): the poison gate's raw readbacks (keep the /PREFIX + route table).
+        intents._RUNNER_WAN_ADDR_CIDR,
+        intents._RUNNER_WAN_ROUTES,
     }
     assert fired == set(system._FW_MUTATING_REMOTE)
 

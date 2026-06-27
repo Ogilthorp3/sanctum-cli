@@ -24,6 +24,8 @@ exercise the rails without a runner.
 
 from __future__ import annotations
 
+import contextlib
+import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
@@ -263,6 +265,20 @@ _RUNNER_WAN_DHCP = ("wan_dhcp",)
 _RUNNER_LEASE_OBSERVE = ("lease_observe",)
 _RUNNER_ARMOR_ARM = ("armor_arm",)
 _RUNNER_DHCP_RELEASE = ("dhcp_release",)
+# FIX (c): raw readbacks that KEEP the /PREFIX + the route table (which the
+# IPv4-only ``lease_observe`` strips), so the poison gate can prove the /32 armor
+# is holding. Resolved by the net-layer runner's raw-readback tags.
+_RUNNER_WAN_ADDR_CIDR = ("wan_addr_cidr",)
+_RUNNER_WAN_ROUTES = ("wan_routes",)
+
+# FIX (a): the bounded settle-poll window for ``observe_lease``. After the hub
+# reboot the downstream WAN is normally dark (apipa/none) for the 2-5 min hub-reboot
+# window before the public lease arrives; the poll waits THROUGH that window before
+# declaring failure. 360s = 6 min (> the worst-case 5-min window + ~1 min margin);
+# a 15s poll cadence. Exposed as constants so the window is easy to retune and so
+# tests can drive a tiny real timeout against the real loop.
+_SETTLE_TIMEOUT_S = 360.0
+_SETTLE_POLL_INTERVAL_S = 15.0
 
 # Default deploy coordinates for the armor-kit installer when a caller does not
 # inject an ``armor=`` seam. They mirror the kit README's deploy section (the
@@ -484,52 +500,111 @@ class _DmzRollbackProvider:
         )
 
 
-def _observe_lease(runner: Runner) -> None:
-    """Read the downstream WAN lease, classify it, and re-lease APIPA/none ONCE.
+def _settle_max_iters(timeout_s: float, poll_interval_s: float) -> int:
+    """A DEFENSIVE iteration cap for the settle poll (the clock is the real bound).
 
-    The ``observe_lease`` stage's real I/O. It captures the lease the downstream
-    router pulled (``runner(_RUNNER_LEASE_OBSERVE)`` — the ONE read among the
-    runner's single-NAT tags), classifies it with :func:`flip.classify_wan_ip`
-    (the armor's ``public | double_nat | apipa | none`` vocabulary), and acts on
-    the pure :func:`flip.should_retry_apipa` verdict:
-
-    * The router frequently grabs a self-assigned ``169.254.x`` APIPA — or no
-      lease at all (``none``) — on the FIRST DHCP right after the hub reboot. That
-      is a transient worth exactly one re-lease, so on attempt 1 we fire one
-      ``dhcp_release`` (release + re-acquire on the WAN dev) and re-observe.
-    * A retryable lease that SURVIVES that single re-lease is a real failure (the
-      WAN never came up public). We raise :class:`_StageError` so the enclosing
-      ``guarded_apply`` change closure trips the rollback rails — disable DMZ +
-      re-lease DHCP — rather than leave the hub engaged in Advanced DMZ on a dead
-      WAN (fail-closed; never fail-to-DARK).
-    * A ``public`` (single-NAT win) or ``double_nat`` lease is NOT re-leased here:
-      public is the success we want, and re-leasing a hub-handed private address
-      would not help — double_nat is a definite verdict the per-stage verifier
-      (the CLI's real ``observe_lease`` probe rejects a non-SINGLE lease) handles.
-
-    Only the lease read + the single conditional re-lease are I/O; the retry
-    decision is the pure flip machine, so this stays a thin boundary driver.
+    The poll terminates when the monotonic clock crosses ``timeout_s`` (the pure
+    :func:`flip.settle_poll_decision` returns ``hard_fail`` then). This cap only
+    guards against a pathological clock that never advances — it mirrors the
+    ``len(FLIP_STAGES)+1`` defensive bound the stage walk uses. With a sane clock it
+    is never reached. A zero/negative interval (tests drive an instant poll) is
+    clock-bounded only, so the cap is generous.
     """
-    attempt = 1
-    observed = flip.classify_wan_ip(runner(_RUNNER_LEASE_OBSERVE))
-    if flip.should_retry_apipa(observed, attempt):
-        # Exactly one re-lease, then re-observe — never loop (should_retry_apipa
-        # is False for every attempt > 1, but we only call it once by construction).
-        runner(_RUNNER_DHCP_RELEASE)
-        attempt += 1
-        observed = flip.classify_wan_ip(runner(_RUNNER_LEASE_OBSERVE))
-    # ``should_retry_apipa(observed, attempt=1)`` is exactly the predicate "observed
-    # is a retryable bad class (apipa/none)" — consuming the flip machine's
-    # _RETRYABLE_LEASE_CLASSES vocabulary through its public seam rather than
-    # reaching into the private set. A retryable lease that PERSISTED past the
-    # single re-lease above is a real failure: unwind the flip instead of
-    # committing a dead-WAN cutover (fail-closed; never fail-to-DARK).
-    if flip.should_retry_apipa(observed, attempt=1):
-        msg = (
-            f"observe_lease: downstream WAN lease is {observed!r} after "
-            f"{attempt} attempt(s) — re-lease did not clear it"
-        )
+    if poll_interval_s <= 0:
+        return 1_000_000
+    return int(timeout_s / poll_interval_s) + 2
+
+
+def _assert_wan_not_poisoned(runner: Runner) -> None:
+    """FIX (c): refuse to commit a "public" lease still carrying Bell's /1 poison.
+
+    A ``public`` lease can still be the 2026-06-26 condition — a public IP with a
+    ``/1`` netmask + a ``0.0.0.0/1`` on-link route that collapses LAN forwarding —
+    if the ``/32`` armor's supersede did not hold. ``lease_observe`` strips the
+    prefix, so we read the WAN's raw CIDR + route table (the runner's raw-readback
+    tags) and consult the pure :func:`flip.evaluate_wan_poison`: committable IFF the
+    WAN is pinned to ``/32`` AND no ``0.0.0.0/1`` route is present. A non-committable
+    verdict raises :class:`_StageError` so ``guarded_apply`` unwinds — a poisoned
+    public lease can never commit green. The raw reads fail-CLOSED: if they raise
+    (LAN-SSH down at the commit moment) the raise propagates and the rails roll back,
+    because we cannot PROVE the armor holds.
+    """
+    verdict = flip.evaluate_wan_poison(
+        runner(_RUNNER_WAN_ADDR_CIDR), runner(_RUNNER_WAN_ROUTES)
+    )
+    if not verdict.committable:
+        msg = f"observe_lease: {verdict.reason}"
         raise _StageError(msg)
+
+
+def _observe_lease(
+    runner: Runner,
+    *,
+    timeout_s: float | None = None,
+    poll_interval_s: float | None = None,
+    now: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> None:
+    """Bounded settle-poll of the downstream WAN lease; raise on a genuine failure.
+
+    The ``observe_lease`` stage's real I/O. Engaging Advanced DMZ + rebooting the
+    hub leaves the downstream WAN dark (apipa/none) for the NORMAL 2-5 min hub-reboot
+    window before the public lease arrives — the old single-shot read raced that
+    window and FALSE-FAILED a cutover that would have succeeded (FIX a). This polls
+    THROUGH the window, driven by the pure :func:`flip.settle_poll_decision`, with an
+    injectable monotonic clock + sleep so the suite runs offline and instant:
+
+    * read + classify the lease (:func:`flip.classify_wan_ip`); a transient LAN-SSH
+      blip during the reboot (``RuntimeError``) reads as ``"none"`` — *still
+      settling*, not an instant fail (the recovery-over-LAN seam can blip mid-reboot);
+    * consult the pure decision with the elapsed monotonic time:
+        - ``settled_ok`` (a ``public`` lease) → run the poison gate
+          (:func:`_assert_wan_not_poisoned`, FIX c) and return (commit);
+        - ``hard_fail`` (``double_nat`` at once, or a transient that survived the
+          whole window) → raise :class:`_StageError` so the rails unwind (disable
+          DMZ + re-lease) rather than leave the hub in DMZ on a dead WAN;
+        - ``keep_polling`` → nudge ONE ``dhcp_release`` (a nudge that itself fails
+          mid-window is just another settling signal) and ``sleep`` to the next tick.
+
+    ``timeout_s``/``poll_interval_s`` default to the module constants
+    (:data:`_SETTLE_TIMEOUT_S`/:data:`_SETTLE_POLL_INTERVAL_S`) — read at call time so
+    they remain tunable/monkeypatchable; the real CLI path passes neither. The
+    monotonic clock (never wall-clock) means an NTP step while the hub reboots cannot
+    corrupt the elapsed measurement. The iteration cap (:func:`_settle_max_iters`) is
+    a defensive backstop against a frozen clock; the clock is the real bound.
+    """
+    resolved_timeout = _SETTLE_TIMEOUT_S if timeout_s is None else timeout_s
+    resolved_interval = _SETTLE_POLL_INTERVAL_S if poll_interval_s is None else poll_interval_s
+    start = now()
+    for _ in range(_settle_max_iters(resolved_timeout, resolved_interval)):
+        try:
+            observed = flip.classify_wan_ip(runner(_RUNNER_LEASE_OBSERVE))
+        except RuntimeError:
+            # A transient LAN-SSH blip during the reboot reads as 'still settling',
+            # NOT an instant fail — bounded by the timeout, so a genuinely LAN-dark
+            # household still (correctly) hard-fails at the bound.
+            observed = "none"
+        decision = flip.settle_poll_decision(
+            observed, elapsed_s=now() - start, timeout_s=resolved_timeout
+        )
+        if decision.action == "settled_ok":
+            # The lease is public — but a public lease can still carry Bell's /1
+            # poison if the /32 armor did not hold. Refuse to commit until proven.
+            _assert_wan_not_poisoned(runner)
+            return
+        if decision.action == "hard_fail":
+            msg = f"observe_lease: {decision.reason} (observed={observed!r})"
+            raise _StageError(msg)
+        if decision.re_lease:
+            # The nudge failing during the dark window is itself a settling signal —
+            # keep polling; the timeout is still the hard bound.
+            with contextlib.suppress(RuntimeError):
+                runner(_RUNNER_DHCP_RELEASE)
+        sleep(resolved_interval)
+    # Unreachable with a sane (advancing) clock — the decision hard-fails at the
+    # bound first. Fail-closed if the clock somehow never advanced.
+    msg = "observe_lease: settle poll exhausted its iteration cap"
+    raise _StageError(msg)
 
 
 def _run_stage(

@@ -19,8 +19,7 @@ The contract the command MUST honor:
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
+import pytest
 from typer.testing import CliRunner
 
 from sanctum_cli.cli import app
@@ -31,10 +30,18 @@ from sanctum_cli.devices.base import (
     Snapshot,
 )
 
-if TYPE_CHECKING:
-    import pytest
-
 runner = CliRunner()
+
+
+@pytest.fixture(autouse=True)
+def _fast_settle_poll(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Shrink the observe_lease settle window (FIX a) to a handful of real ms ticks so
+    the CLI apply tests exercise the REAL bounded poll instantly. A public lease
+    settles on the first read (no sleep); an APIPA lease that never clears hard-fails
+    in ~50 ms instead of the real 6-minute window. No time-mocking — real monotonic
+    clock + real ``time.sleep`` on a tiny interval."""
+    monkeypatch.setattr("sanctum_cli.devices.intents._SETTLE_TIMEOUT_S", 0.05)
+    monkeypatch.setattr("sanctum_cli.devices.intents._SETTLE_POLL_INTERVAL_S", 0.005)
 
 # The Bell single-NAT leaves: the bridge-mode leaf the old ``single_nat`` flipped
 # AND the Advanced-DMZ leaf the cutover engages. BOTH are single-NAT-mutating
@@ -143,6 +150,13 @@ class FakeRunner:
         self.calls.append(tag)
         if tag and tag[0] in ("fw_wan_ip", "lease_observe"):
             return self.wan_ip
+        # FIX (c): a 'public' lease must also carry the WHOLE contract the real box
+        # serves — the /32 armor holding + a clean route table — or the poison gate
+        # (correctly) refuses to commit. Healthy armored readback by default.
+        if tag == ("wan_addr_cidr",):
+            return f"2: eth0    inet {self.wan_ip}/32 brd {self.wan_ip} scope global eth0"
+        if tag == ("wan_routes",):
+            return "default via 192.168.2.1 dev eth0"  # no 0.0.0.0/1 poison route
         return ""
 
 
