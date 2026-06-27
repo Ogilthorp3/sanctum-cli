@@ -32,13 +32,14 @@ from sanctum_cli.devices.base import (
     OpResult,
     Snapshot,
 )
-from sanctum_cli.devices.sagemcom import _MUTATED_XPATHS, _SAFE_BASELINE
+from sanctum_cli.devices.sagemcom import _MUTATED_XPATHS, _SAFE_BASELINES
 
 if TYPE_CHECKING:
     from pathlib import Path
 
 # The Bell Advanced-DMZ leaf the cutover engages (the brand's DMZ capability op).
-DMZ_PATH = "Device/Services/BellNetworkCfg/AdvancedDMZ"
+# Verified live: the settable boolean leaf is .../AdvancedDMZ/Enable ('true'/'false').
+DMZ_PATH = "Device/Services/BellNetworkCfg/AdvancedDMZ/Enable"
 
 
 class FakeHub:
@@ -114,7 +115,7 @@ class FakeHub:
 
     def capability_op(self, capability: Capability) -> CapabilityOp | None:
         if capability is Capability.DMZ:
-            return CapabilityOp(path=DMZ_PATH, engaged="on")
+            return CapabilityOp(path=DMZ_PATH, engaged="true")  # live: 'true'/'false'
         return None
 
     def snapshot(self, scope: str | None = None) -> Snapshot:
@@ -122,9 +123,9 @@ class FakeHub:
         data = {path: value for path, value in self._v.items() if value is not None}
         # … then the REAL provider's hard guarantee: every leaf the cutover MUTATES
         # gets a restorable baseline even when unread. Derived from the PRODUCTION
-        # tuple so this fake fails until DMZ is actually in _MUTATED_XPATHS.
+        # tuple+baselines so this fake fails until DMZ is actually in _MUTATED_XPATHS.
         for path in _MUTATED_XPATHS:
-            data.setdefault(path, _SAFE_BASELINE)
+            data.setdefault(path, _SAFE_BASELINES[path])
         return Snapshot(brand=self.brand, taken_at="t", data=data)
 
     def rollback(self, snap: Snapshot) -> OpResult:
@@ -301,8 +302,8 @@ def test_dmz_apply_walks_stages_and_commits(tmp_path: Path) -> None:
     assert res.result is not None
     assert res.result.ok is True
     # The flip engaged Advanced DMZ via the provider's OWN capability op.
-    assert (DMZ_PATH, "on") in hub.set_calls
-    assert hub.get(DMZ_PATH) == "on"
+    assert (DMZ_PATH, "true") in hub.set_calls
+    assert hub.get(DMZ_PATH) == "true"
     # It rebooted the hub for the new WAN/DMZ config to take.
     assert hub.reboot_calls == 1
     # It installed the armor kit.
@@ -364,7 +365,7 @@ def test_dmz_stage_verify_failure_rolls_back(tmp_path: Path) -> None:
     assert res.result.ok is False
     # The flip unwound: DMZ rolled back to "off".
     assert hub.rollback_calls == 1
-    assert hub.get(DMZ_PATH) == "off"
+    assert hub.get(DMZ_PATH) == "false"
     # And the rollback re-leased DHCP downstream (disable DMZ → re-lease).
     assert any(tag and "release" in tag[0] for tag in runner.calls)
 
@@ -379,7 +380,7 @@ def test_dmz_rollback_drives_dmz_off_even_when_firmware_omits_it(tmp_path: Path)
     the rollback has nothing to restore for DMZ and silently "succeeds" while the
     hub stays in single-NAT — the household left dark with no recovery path. The
     snapshot MUST guarantee a DMZ baseline of "off" (DMZ in ``_MUTATED_XPATHS``)
-    so rollback re-issues ``set(DMZ_PATH, "off")``.
+    so rollback re-issues ``set(DMZ_PATH, "false")``.
 
     ``FakeHub`` here models the real firmware: its ``_v`` does NOT surface the DMZ
     leaf until written, so the snapshot the rails take is built purely from the
@@ -408,13 +409,13 @@ def test_dmz_rollback_drives_dmz_off_even_when_firmware_omits_it(tmp_path: Path)
     assert res.result is not None
     assert res.result.ok is False
     # The cutover engaged DMZ …
-    assert (DMZ_PATH, "on") in hub.set_calls
+    assert (DMZ_PATH, "true") in hub.set_calls
     # … and despite the firmware never surfacing the leaf at snapshot time, the
     # rollback drove it back OFF (proof the snapshot carried the guaranteed
     # baseline and rollback re-issued the restore write).
     assert hub.rollback_calls == 1
-    assert (DMZ_PATH, "off") in hub.set_calls
-    assert hub.get(DMZ_PATH) == "off"
+    assert (DMZ_PATH, "false") in hub.set_calls
+    assert hub.get(DMZ_PATH) == "false"
 
 
 def test_dmz_reboot_failure_rolls_back(tmp_path: Path) -> None:
@@ -447,7 +448,7 @@ def test_dmz_reboot_failure_rolls_back(tmp_path: Path) -> None:
     assert hub.rollback_calls == 1  # and unwound
     # The inner DMZ-disable ran before the latch-reboot was attempted, so the
     # dangerous leaf is off even though the latch-reboot then failed.
-    assert hub.get(DMZ_PATH) == "off"
+    assert hub.get(DMZ_PATH) == "false"
     # Armor must NOT have been installed if the reboot (earlier stage) failed.
     assert armor.installed == 0
 
@@ -472,7 +473,7 @@ def test_dmz_armor_install_failure_rolls_back(tmp_path: Path) -> None:
     assert res.result.ok is False
     assert armor.installed == 1  # it tried
     assert hub.rollback_calls == 1  # and unwound
-    assert hub.get(DMZ_PATH) == "off"
+    assert hub.get(DMZ_PATH) == "false"
 
 
 # ── observe_lease: classify the REAL lease, retry APIPA exactly once ─────────
@@ -516,7 +517,7 @@ def test_observe_lease_apipa_then_public_fires_exactly_one_release_and_proceeds(
     assert runner.lease_reads() == 2
     # The transient cleared → committed, NOT rolled back; DMZ stayed engaged.
     assert hub.rollback_calls == 0
-    assert hub.get(DMZ_PATH) == "on"
+    assert hub.get(DMZ_PATH) == "true"
     assert armor.installed == 1
 
 
@@ -547,7 +548,7 @@ def test_observe_lease_persistent_apipa_rolls_back_after_one_retry(tmp_path: Pat
     assert runner.lease_reads() == 2  # observe, retry-observe — then give up
     # Persistent APIPA → the flip unwound: DMZ disabled, household not left dark.
     assert hub.rollback_calls == 1
-    assert hub.get(DMZ_PATH) == "off"
+    assert hub.get(DMZ_PATH) == "false"
     # Armor is a LATER stage than observe_lease — it must never have run.
     assert armor.installed == 0
 
@@ -574,7 +575,7 @@ def test_observe_lease_empty_lease_retries_then_rolls_back(tmp_path: Path) -> No
     assert res.result.ok is False
     assert runner.releases_between_first_two_reads() == 1
     assert hub.rollback_calls == 1
-    assert hub.get(DMZ_PATH) == "off"
+    assert hub.get(DMZ_PATH) == "false"
 
 
 def test_observe_lease_public_first_read_fires_no_release(tmp_path: Path) -> None:
@@ -600,7 +601,7 @@ def test_observe_lease_public_first_read_fires_no_release(tmp_path: Path) -> Non
     assert runner.lease_reads() == 1
     assert not any(t and t[0] == "dhcp_release" for t in runner.calls)
     assert hub.rollback_calls == 0
-    assert hub.get(DMZ_PATH) == "on"
+    assert hub.get(DMZ_PATH) == "true"
 
 
 def test_observe_lease_double_nat_first_read_fires_no_release_but_fails_stage_verify(
@@ -633,7 +634,7 @@ def test_observe_lease_double_nat_first_read_fires_no_release_but_fails_stage_ve
     # double_nat is NOT retryable → the stage fired no re-lease of its own.
     assert not any(t and t[0] == "dhcp_release" for t in runner.calls[: runner.lease_reads() + 1])
     assert hub.rollback_calls == 1
-    assert hub.get(DMZ_PATH) == "off"
+    assert hub.get(DMZ_PATH) == "false"
 
 
 def test_dmz_unsupported_provider_raises_legibly() -> None:
@@ -733,15 +734,15 @@ def test_rollback_with_persistent_apipa_release_reports_not_ok() -> None:
     events: list[str] = []
     hub = EventHub(events)
     # DMZ is currently engaged (a prior cutover). The re-lease NEVER clears APIPA.
-    hub._v[DMZ_PATH] = "on"
+    hub._v[DMZ_PATH] = "true"
     runner = RecoveryRunner(["169.254.10.5"], events)
     wrapped = _DmzRollbackProvider(hub, runner)
 
-    snap = Snapshot(brand=hub.brand, taken_at="t", data={DMZ_PATH: "off"})
+    snap = Snapshot(brand=hub.brand, taken_at="t", data={DMZ_PATH: "false"})
     result = wrapped.rollback(snap)
 
     # The inner rollback DID disable DMZ (the dangerous bit is off) ...
-    assert hub.get(DMZ_PATH) == "off"
+    assert hub.get(DMZ_PATH) == "false"
     # ... but the WAN never recovered, so the OVERALL rollback is NOT ok.
     assert result.ok is False
     assert "apipa" in result.detail.lower() or "did not" in result.detail.lower()
@@ -755,18 +756,18 @@ def test_rollback_reboots_before_release_then_verifies_double_nat() -> None:
 
     events: list[str] = []
     hub = EventHub(events)
-    hub._v[DMZ_PATH] = "on"
+    hub._v[DMZ_PATH] = "true"
     # The downstream recovers to a private (double-NAT) lease — the expected post-
     # rollback state once DMZ is off and the WAN re-leases behind the hub's NAT.
     runner = RecoveryRunner(["192.168.2.20"], events)
     wrapped = _DmzRollbackProvider(hub, runner)
 
-    snap = Snapshot(brand=hub.brand, taken_at="t", data={DMZ_PATH: "off"})
+    snap = Snapshot(brand=hub.brand, taken_at="t", data={DMZ_PATH: "false"})
     result = wrapped.rollback(snap)
 
     # Recovered to a working double-NAT lease → ok=True.
     assert result.ok is True
-    assert hub.get(DMZ_PATH) == "off"
+    assert hub.get(DMZ_PATH) == "false"
     assert hub.reboot_calls == 1
     # Ordering: the hub reboot fired strictly BEFORE the downstream re-lease so the
     # DMZ-disable had latched before the router tried to pull its recovered lease.
@@ -789,11 +790,11 @@ def test_rollback_when_inner_disable_fails_does_not_reboot_or_release() -> None:
             return OpResult(ok=False, detail="hub rejected the DMZ-disable write")
 
     hub = FailingRollbackHub(events)
-    hub._v[DMZ_PATH] = "on"
+    hub._v[DMZ_PATH] = "true"
     runner = RecoveryRunner(["192.168.2.20"], events)
     wrapped = _DmzRollbackProvider(hub, runner)
 
-    snap = Snapshot(brand=hub.brand, taken_at="t", data={DMZ_PATH: "off"})
+    snap = Snapshot(brand=hub.brand, taken_at="t", data={DMZ_PATH: "false"})
     result = wrapped.rollback(snap)
 
     assert result.ok is False

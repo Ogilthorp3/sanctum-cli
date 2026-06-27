@@ -266,7 +266,7 @@ def test_snapshot_guarantees_dmz_baseline_when_unread(
 
     snap = p.snapshot()
     # The DMZ leaf the cutover mutates MUST be present even though its read was None.
-    assert snap.data[sagemcom._ADVANCED_DMZ_XPATH] == "off"
+    assert snap.data[sagemcom._ADVANCED_DMZ_XPATH] == "false"
 
 
 def test_rollback_empty_snapshot_reports_failure(

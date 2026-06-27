@@ -48,7 +48,7 @@ from sanctum_cli.devices.transport import (
 )
 
 BRIDGE_PATH = "Device/Services/BellNetworkCfg/SetBridgeMode"
-DMZ_PATH = "Device/Services/BellNetworkCfg/AdvancedDMZ"
+DMZ_PATH = "Device/Services/BellNetworkCfg/AdvancedDMZ/Enable"  # live: settable bool leaf
 
 
 # ── a minimal real-async Sagemcom client (the vendor seam, mocked) ───────────
@@ -331,11 +331,11 @@ def test_api_transport_execute_no_value_uses_capability_engaged(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """With no explicit value the transport writes the capability_op's engaged value."""
-    fake = _FakeSah({DMZ_PATH: "off"})
+    fake = _FakeSah({DMZ_PATH: "false"})
     p = _connected_sagemcom(monkeypatch, fake)
-    res = ApiTransport(p).execute(Capability.DMZ)  # engaged == "on"
+    res = ApiTransport(p).execute(Capability.DMZ)  # engaged == "true" (live leaf)
     assert res.ok
-    assert (DMZ_PATH, "on") in fake.set_calls
+    assert (DMZ_PATH, "true") in fake.set_calls
 
 
 def test_api_transport_execute_unsupported_cap_is_not_ok(

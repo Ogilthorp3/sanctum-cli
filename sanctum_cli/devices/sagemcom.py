@@ -71,7 +71,13 @@ KEYCHAIN_SERVICE = "bell-hub-admin"
 # The Bell-specific network-config subtree we snapshot before a mutating intent.
 # These are the leaf XPaths a single-NAT / DMZ cutover touches.
 _BRIDGE_MODE_XPATH = "Device/Services/BellNetworkCfg/SetBridgeMode"
-_ADVANCED_DMZ_XPATH = "Device/Services/BellNetworkCfg/AdvancedDMZ"
+# VERIFIED against the live F5697 (2026-06-26): the AdvancedDMZ parent is a NESTED
+# struct ({advanced_dmz:{enable, status, advanced_dm_zhost}}); the settable boolean
+# leaf is .../AdvancedDMZ/Enable ('true'/'false' string), and .../Status is a
+# read-only mirror. The engage write is Enable='true' (06-14 used Enable=false to
+# disable). The MAC host is already paired to the Firewalla WAN MAC, so engaging
+# is just this flag. Targeting the parent path with 'on' (the old guess) misfires.
+_ADVANCED_DMZ_XPATH = "Device/Services/BellNetworkCfg/AdvancedDMZ/Enable"
 _SNAPSHOT_XPATHS = (_BRIDGE_MODE_XPATH, _ADVANCED_DMZ_XPATH)
 
 # The WiFi/guest/channel leaves the near-total setValue surface also reaches.
@@ -98,7 +104,10 @@ _WAN_MODE_XPATH = _BRIDGE_MODE_XPATH
 # by an entry here (honest-verify: no advertised toggle-cap without a real op).
 _CAPABILITY_OPS: dict[Capability, CapabilityOp] = {
     Capability.BRIDGE_MODE: CapabilityOp(path=_BRIDGE_MODE_XPATH, engaged="on"),
-    Capability.DMZ: CapabilityOp(path=_ADVANCED_DMZ_XPATH, engaged="on"),
+    # DMZ engage = AdvancedDMZ/Enable='true' (verified live: the leaf reads
+    # 'true'/'false', NOT 'on'/'off'). Disengaged baseline is 'false' (see
+    # _SAFE_BASELINES) so rollback drives the right value.
+    Capability.DMZ: CapabilityOp(path=_ADVANCED_DMZ_XPATH, engaged="true"),
     Capability.WIFI: CapabilityOp(path=_WIFI_ENABLE_XPATH, engaged="true"),
     Capability.GUEST_WIFI: CapabilityOp(path=_GUEST_WIFI_ENABLE_XPATH, engaged="true"),
     Capability.CHANNELS: CapabilityOp(path=_CHANNEL_XPATH, engaged="auto"),
@@ -123,7 +132,15 @@ _MUTATED_XPATHS = (
     _CAPABILITY_OPS[Capability.BRIDGE_MODE].path,
     _CAPABILITY_OPS[Capability.DMZ].path,
 )
-_SAFE_BASELINE = "off"
+# Per-leaf disengaged baseline — the value that means "NOT in this mode", used to
+# guarantee a restorable rollback baseline when a leaf reads None at snapshot.
+# These DIFFER per leaf (verified live): SetBridgeMode is 'off'; AdvancedDMZ/Enable
+# is 'false'. A single shared "off" would restore the DMZ leaf to a value the
+# firmware does not accept. Keyed by the mutated path.
+_SAFE_BASELINES: dict[str, str] = {
+    _CAPABILITY_OPS[Capability.BRIDGE_MODE].path: "off",
+    _CAPABILITY_OPS[Capability.DMZ].path: "false",
+}
 
 # The honest capability map: each cap the hub advertises → (transport, concrete op).
 # The feature-cap rows are DERIVED from ``_CAPABILITY_OPS`` so a leaf and its map
@@ -895,9 +912,11 @@ class SagemcomHubProvider:
             value = self._raw_get(xpath)
             if value is not None:
                 data[xpath] = value
-        # Guarantee a restorable baseline for every leaf the cutover will mutate.
+        # Guarantee a restorable baseline for every leaf the cutover will mutate,
+        # using the per-leaf disengaged value (SetBridgeMode='off', AdvancedDMZ/
+        # Enable='false') so a None read never restores a value the firmware rejects.
         for xpath in _MUTATED_XPATHS:
-            data.setdefault(xpath, _SAFE_BASELINE)
+            data.setdefault(xpath, _SAFE_BASELINES[xpath])
         return Snapshot(
             brand=self.brand,
             taken_at=datetime.now(tz=UTC).isoformat(),
