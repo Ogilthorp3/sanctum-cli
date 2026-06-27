@@ -217,6 +217,71 @@ def settle_poll_decision(
     )
 
 
+# ── box-op dark-window ride (FIX a-2): an ACTIVE post-reboot box op must RIDE the
+#    hub-reboot dark window, not single-shot through it ──────────────────────────
+#
+# ``settle_poll_decision`` rides the dark window for the OBSERVE (a lease-class read).
+# But the two ACTIVE box ops — the ``wan_dhcp`` re-lease and the rollback's
+# ``dhcp_release`` — were single SSH attempts: the instant the box's WAN→Tailscale was
+# down during the 2-5 min hub-reboot window, the op's transport timed out and the stage
+# / the rollback false-failed (the 2026-06-27 "ROLLBACK FAILED, half-applied"). The
+# fix rides those ops through the window with the SAME bounded-poll machinery, but the
+# signal is the box's REACHABILITY (did the op's transport succeed) rather than a lease
+# class. :func:`box_op_retry_decision` is the PURE decision the ride consults AFTER a
+# transport failure — retry while inside the window, give up (fail closed) past it —
+# and it takes ``elapsed_s`` (no clock of its own) so every branch is exercised with a
+# hostile fixture.
+
+
+@dataclass(frozen=True)
+class BoxOpRetryDecision:
+    """One box-op dark-window tick's verdict, consulted AFTER the op's transport FAILED.
+
+    ``action`` is ``"retry"`` (still inside the hub-reboot window — the box has not come
+    back yet; wait + re-fire the op) or ``"give_up"`` (the bound elapsed — the box never
+    returned; fail closed). ``reason`` is a legible explanation for the audit log /
+    operator. There is no ``"succeeded"`` action: a transport SUCCESS is the ride loop's
+    own stop signal (the op landed), so the decision is only ever consulted on a failure.
+    """
+
+    action: str
+    reason: str
+
+
+def box_op_retry_decision(*, op: str, elapsed_s: float, timeout_s: float) -> BoxOpRetryDecision:
+    """Decide a box-op dark-window tick after a transport failure: retry / give_up. Pure.
+
+    The active box op (the ``wan_dhcp`` re-lease, the rollback's ``dhcp_release``) reaches
+    the box ONLY over the link the cutover is bouncing, so during the 2-5 min hub-reboot
+    window its SSH transport fails. That is NOT a genuine op failure — it is the box being
+    transiently unreachable — so:
+
+    * ``elapsed_s < timeout_s`` → ``retry`` (still inside the window; the box has not come
+      back yet — wait + re-fire the op).
+    * ``elapsed_s >= timeout_s`` → ``give_up`` (the box never returned by the bound — fail
+      closed: a genuinely dead box must surface, never hang forever, never be masked). The
+      ``>=`` makes the boundary fail closed, exactly like :func:`settle_poll_decision`.
+
+    ``op`` is the op's name (``"wan_dhcp"`` / ``"dhcp_release"``) woven into ``reason`` so
+    the audit log names which box op was riding the window.
+    """
+    if elapsed_s < timeout_s:
+        return BoxOpRetryDecision(
+            action="retry",
+            reason=(
+                f"box op {op!r} transport failed at {elapsed_s:.0f}/{timeout_s:.0f}s — "
+                "box unreachable in the hub-reboot window; retrying"
+            ),
+        )
+    return BoxOpRetryDecision(
+        action="give_up",
+        reason=(
+            f"box op {op!r} did not return within {timeout_s:.0f}s — "
+            "the box never came back from the hub-reboot window"
+        ),
+    )
+
+
 def classify_wan_ip(wan_ip: str | None) -> str:
     """Classify a downstream WAN IPv4 into the armor's 4-way vocabulary.
 

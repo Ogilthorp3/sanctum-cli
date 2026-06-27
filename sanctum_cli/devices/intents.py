@@ -281,6 +281,19 @@ _RUNNER_WAN_ROUTES = ("wan_routes",)
 _SETTLE_TIMEOUT_S = 360.0
 _SETTLE_POLL_INTERVAL_S = 15.0
 
+# FIX (a-2): the bounded dark-window RIDE for the ACTIVE post-reboot box ops — the
+# ``wan_dhcp`` re-lease (a flip stage) and the rollback's ``dhcp_release``. Unlike
+# ``observe_lease`` (which settle/polls a LEASE CLASS), these ride the box's
+# REACHABILITY: the op reaches the box only over the link the cutover bounces, so during
+# the 2-5 min hub-reboot window its SSH transport fails. The ride RETRIES the op THROUGH
+# that window, bounded by a monotonic deadline; a single shot false-failed the instant
+# the box was unreachable (the 2026-06-27 "ROLLBACK FAILED, half-applied"). 480 s = 8 min
+# (> the worst-case 5-min hub reboot + margin — wider than observe_lease's 360 s because
+# the rollback re-lease rides a SECOND reboot, the latch-reboot); a 15 s cadence. Exposed
+# as constants so the window is tunable and tests can drive a tiny real timeout.
+_BOX_OP_TIMEOUT_S = 480.0
+_BOX_OP_POLL_INTERVAL_S = 15.0
+
 # Default deploy coordinates for the armor-kit installer when a caller does not
 # inject an ``armor=`` seam. They mirror the kit README's deploy section (the
 # checkout dir + the Firewalla and the Mini jump host); a caller that needs other
@@ -515,8 +528,25 @@ class _DmzRollbackProvider:
                         f"reboot needed to latch it ({rb.detail}). {_MANUAL_RECOVERY}"
                     ),
                 )
-        # Now re-pull a downstream lease so the WAN recovers behind the hub's NAT.
-        self._runner(_RUNNER_DHCP_RELEASE)
+        # Now re-pull a downstream lease so the WAN recovers behind the hub's NAT —
+        # RIDING the post-reboot dark window (FIX a-2). The hub was JUST rebooted above
+        # to latch the disable, so the box's WAN→Tailscale is down for the 2-5 min
+        # window; a single SSH shot false-failed the instant the box was unreachable
+        # (the 2026-06-27 "ROLLBACK FAILED, half-applied"). The ride retries the re-lease
+        # THROUGH the window, failing closed (raising) only if the box never returns by
+        # the bound — which we surface as an HONEST ok=False with the manual-recovery
+        # instruction (the rollback contract returns an OpResult, it never raises).
+        try:
+            _ride_dark_window(lambda: self._runner(_RUNNER_DHCP_RELEASE), op="dhcp_release")
+        except _StageError as exc:
+            return OpResult(
+                ok=False,
+                detail=(
+                    f"rollback INCOMPLETE: DMZ disabled + hub rebooted, but the re-lease "
+                    f"never reached the box through the hub-reboot window ({exc}). "
+                    f"{_MANUAL_RECOVERY}"
+                ),
+            )
         # HONEST recovery check: re-read + classify the downstream WAN. A swallowed
         # re-lease that left the WAN APIPA/none did NOT recover the household.
         recovered, why = _verify_recovered_double_nat(self._runner)
@@ -548,6 +578,68 @@ def _settle_max_iters(timeout_s: float, poll_interval_s: float) -> int:
     if poll_interval_s <= 0:
         return 1_000_000
     return int(timeout_s / poll_interval_s) + 2
+
+
+def _ride_dark_window(
+    op_fn: Callable[[], object],
+    *,
+    op: str,
+    timeout_s: float | None = None,
+    poll_interval_s: float | None = None,
+    now: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> None:
+    """Fire an ACTIVE box op, RIDING the hub-reboot dark window; raise only if it never lands.
+
+    The two active post-reboot box ops — the ``wan_dhcp`` re-lease and the rollback's
+    ``dhcp_release`` — reach the box ONLY over the link the cutover is bouncing, so a
+    single SSH attempt false-fails the instant the box is unreachable mid-reboot (the
+    2-5 min window — the 2026-06-27 "ROLLBACK FAILED, half-applied"). This rides that
+    window with the SAME bounded-poll machinery as :func:`_observe_lease` — an injectable
+    monotonic clock + sleep, the :func:`_settle_max_iters` defensive cap — driven by the
+    pure :func:`flip.box_op_retry_decision`:
+
+    * fire ``op_fn``; if it returns (the box is reachable + the op landed) → done;
+    * if it raises :class:`RuntimeError` (the box's SSH transport failed — unreachable
+      mid-reboot, the fail-closed runner's signal), consult the decision with the elapsed
+      monotonic time:
+        - ``retry`` (still inside the window) → ``sleep`` to the next tick and re-fire;
+        - ``give_up`` (past the bound — the box never returned) → raise :class:`_StageError`
+          so the caller fails closed (the rails unwind for a stage; the rollback surfaces
+          manual recovery). Never hangs forever, never masks: a genuinely dead box surfaces
+          at the bound, exactly when ``box_op_retry_decision`` says the window is over.
+
+    Only a ``RuntimeError`` (the runner's transport-failure contract) is ridden; any other
+    exception is a genuine bug and propagates. ``timeout_s``/``poll_interval_s`` default to
+    the module constants read at call time (tunable/monkeypatchable); the real CLI path
+    passes neither and rides the full 480 s window. The monotonic clock (never wall-clock)
+    means an NTP step while the hub reboots cannot corrupt the elapsed measurement.
+    """
+    resolved_timeout = _BOX_OP_TIMEOUT_S if timeout_s is None else timeout_s
+    resolved_interval = _BOX_OP_POLL_INTERVAL_S if poll_interval_s is None else poll_interval_s
+    start = now()
+    last_exc: RuntimeError | None = None
+    for _ in range(_settle_max_iters(resolved_timeout, resolved_interval)):
+        try:
+            op_fn()
+        except RuntimeError as exc:
+            # The box's SSH transport failed — unreachable mid-reboot. Decide retry vs
+            # give-up purely on the elapsed monotonic time (never mask: a box that never
+            # returns hard-fails at the bound).
+            last_exc = exc
+            decision = flip.box_op_retry_decision(
+                op=op, elapsed_s=now() - start, timeout_s=resolved_timeout
+            )
+            if decision.action == "give_up":
+                msg = f"{decision.reason} (last transport error: {exc})"
+                raise _StageError(msg) from exc
+            sleep(resolved_interval)
+            continue
+        return
+    # Unreachable with a sane (advancing) clock — give_up fires at the bound first.
+    # Fail-closed if the clock somehow never advanced.
+    msg = f"box op {op!r}: dark-window ride exhausted its iteration cap"
+    raise _StageError(msg) from last_exc
 
 
 def _assert_wan_not_poisoned(runner: Runner) -> None:
@@ -663,7 +755,10 @@ def _run_stage(
     enclosing ``guarded_apply`` change closure trips the rollback rails.
     """
     if stage == "wan_dhcp":
-        runner(_RUNNER_WAN_DHCP)
+        # FIX (a-2): the active WAN re-lease RIDES the hub-reboot dark window — a single
+        # SSH shot false-failed the instant the box was unreachable mid-reboot. Retries
+        # through the window, failing closed only if the box never returns by the bound.
+        _ride_dark_window(lambda: runner(_RUNNER_WAN_DHCP), op="wan_dhcp")
     elif stage == "stage_armor":
         # FIX-2: deploy + structurally arm the /32 armor on the box BEFORE DMZ
         # engages, while the LAN is still healthy, so the supersede is in place when

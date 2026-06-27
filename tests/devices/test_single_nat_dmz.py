@@ -261,6 +261,15 @@ def _fast_settle_poll(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(intents, "_SETTLE_TIMEOUT_S", 0.05)
     monkeypatch.setattr(intents, "_SETTLE_POLL_INTERVAL_S", 0.005)
+    # FIX (a-2): shrink the ACTIVE box-op dark-window ride too (wan_dhcp re-lease +
+    # the rollback's dhcp_release) so the e2e tests that exercise a flaky/never-
+    # returning box run instantly against the REAL bounded ride loop + the REAL
+    # ``time.monotonic`` clock — no time-mocking. A box that never returns fails
+    # closed in ~0.2 s; a transient-then-reachable box rides through it. The direct
+    # ``_ride_dark_window`` driver tests below inject their own clock and are
+    # unaffected. The CLI path uses the real 480 s default.
+    monkeypatch.setattr(intents, "_BOX_OP_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(intents, "_BOX_OP_POLL_INTERVAL_S", 0.005)
 
 
 # ── dry-run: the hard guardrail (ZERO device writes) ─────────────────────────
@@ -1278,3 +1287,208 @@ def test_rollback_when_inner_disable_fails_does_not_reboot_or_release() -> None:
     # No reboot, no re-lease on top of a still-engaged DMZ.
     assert hub.reboot_calls == 0
     assert not any(t and t[0] == "dhcp_release" for t in runner.calls)
+
+
+# ── FIX (a-2): the ACTIVE box ops RIDE the post-reboot hub-dark window ─────────
+#
+# observe_lease already rides the dark window (FIX a). But the ACTIVE box ops — the
+# wan_dhcp re-lease (a flip stage) and the rollback's dhcp_release — were single SSH
+# shots: the instant the box's WAN→Tailscale was down during the 2-5 min hub-reboot
+# window, the op's transport (RuntimeError out of the fail-closed runner) false-failed
+# the stage / the rollback. On 2026-06-27 that left a "ROLLBACK FAILED, half-applied".
+# These tests pin the dark-window ride (intents._ride_dark_window) driven by the pure
+# flip.box_op_retry_decision: a box-op transport that fails N times THEN succeeds must
+# be RIDDEN (retry, ultimately succeed, never false-fail); a box that NEVER returns by
+# the bound must fail closed (raise/ok=False), bounded, never hang, never mask.
+#
+# The direct driver tests inject a monotonic-shaped fake clock + a no-op sleep against
+# a REAL flaky box-op callable (no time-mocking of the impl); the e2e tests drive the
+# REAL orchestrator / the REAL _DmzRollbackProvider with a flaky runner and the tiny
+# real ride window from the autouse fixture.
+
+
+def test_ride_dark_window_reachable_box_fires_once_no_sleep() -> None:
+    """A reachable box (the op returns) fires exactly ONCE and never sleeps — the ride
+    must add ZERO delay to the happy path (a healthy box is not needlessly waited on)."""
+    from sanctum_cli.devices import intents
+
+    calls = {"n": 0}
+
+    def box_op() -> str:
+        calls["n"] += 1
+        return ""
+
+    clock = _FakeClock([0.0, 1.0])
+    sleeps: list[float] = []
+    intents._ride_dark_window(
+        box_op, op="wan_dhcp", timeout_s=480.0, poll_interval_s=15.0, now=clock, sleep=sleeps.append
+    )
+    assert calls["n"] == 1
+    assert sleeps == []
+
+
+def test_ride_dark_window_rides_transport_failures_then_succeeds() -> None:
+    """THE HOSTILE SCENARIO: a box-op transport that times out 3x (box unreachable
+    mid-reboot) THEN succeeds (the box returned) must be RIDDEN — the op retries and
+    ultimately lands, returning normally (no false-fail). Re-fired once per tick, all
+    elapsed (<480) inside the window. Real flaky callable + a real monotonic-shaped
+    fake clock, no time-mocking of the impl."""
+    from sanctum_cli.devices import intents
+
+    calls = {"n": 0}
+
+    def box_op() -> str:
+        calls["n"] += 1
+        if calls["n"] <= 3:  # the box is unreachable for the first 3 ticks of the window
+            msg = "ssh: connect to host 100.68.36.16 port 22: Operation timed out"
+            raise RuntimeError(msg)
+        return ""  # the box came back from the hub reboot
+
+    clock = _FakeClock([0.0, 60.0, 120.0, 180.0])  # all < the 480 s bound
+    sleeps: list[float] = []
+    # Returns normally (no _StageError) → the op ultimately landed.
+    intents._ride_dark_window(
+        box_op, op="wan_dhcp", timeout_s=480.0, poll_interval_s=15.0, now=clock, sleep=sleeps.append
+    )
+    assert calls["n"] == 4  # 3 transport failures + 1 success
+    assert len(sleeps) == 3  # slept once per retry, never after the op landed
+
+
+def test_ride_dark_window_box_never_returns_fails_closed_at_bound() -> None:
+    """A box that NEVER returns by the bound fails CLOSED: the ride raises a _StageError
+    at/after the deadline — bounded (not an infinite retry loop), never hangs, and never
+    masks the failure as success."""
+    from sanctum_cli.devices import intents
+
+    def box_op() -> str:
+        msg = "ssh: connect to host 100.68.36.16 port 22: Operation timed out"
+        raise RuntimeError(msg)
+
+    clock = _FakeClock([0.0, 200.0, 400.0, 600.0])  # crosses the 480 s bound on tick 3
+    sleeps: list[float] = []
+    with pytest.raises(intents._StageError) as ei:
+        intents._ride_dark_window(
+            box_op,
+            op="dhcp_release",
+            timeout_s=480.0,
+            poll_interval_s=15.0,
+            now=clock,
+            sleep=sleeps.append,
+        )
+    low = str(ei.value).lower()
+    assert "dhcp_release" in low
+    assert "did not return" in low or "never reached" in low
+    # Bounded: a handful of retries then gave up — never an infinite loop.
+    assert 1 <= len(sleeps) <= 4
+
+
+class FlakyWanDhcpRunner(FakeRunner):
+    """A FakeRunner whose ``wan_dhcp`` op RAISES RuntimeError the first ``fail_times``
+    calls (the box unreachable in the hub-reboot dark window) then succeeds — so a test
+    can prove the wan_dhcp stage RIDES the window instead of false-failing on the first
+    timed-out SSH. Every other tag (incl. the armored ``public`` lease) is unchanged."""
+
+    def __init__(self, fail_times: int) -> None:
+        super().__init__()
+        self.fail_times = fail_times
+        self.wan_dhcp_attempts = 0
+
+    def __call__(self, tag: tuple[str, ...]) -> str:
+        if tag == ("wan_dhcp",):
+            self.wan_dhcp_attempts += 1
+            if self.wan_dhcp_attempts <= self.fail_times:
+                msg = "ssh: box unreachable in the hub-reboot dark window"
+                raise RuntimeError(msg)
+            self.calls.append(tag)
+            return ""
+        return super().__call__(tag)
+
+
+def test_wan_dhcp_stage_rides_dark_window_and_commits(tmp_path: Path) -> None:
+    """E2E: the wan_dhcp re-lease that times out 2x (box mid-reboot) then succeeds is
+    RIDDEN — the cutover does NOT false-fail/roll back, it commits. Drives the REAL
+    orchestrator; only the box-op transport is flaky."""
+    from sanctum_cli.devices.intents import single_nat_dmz
+
+    hub, armor = FakeHub(), FakeArmor()
+    runner = FlakyWanDhcpRunner(fail_times=2)
+    res = single_nat_dmz(
+        hub,
+        runner,
+        armor,
+        apply=True,
+        out_of_band_reachable=True,
+        force=True,
+        stage_verifiers=_all_pass_verifiers(),
+        log_path=tmp_path / "audit.jsonl",
+    )
+    assert res.result is not None
+    assert res.result.ok is True  # rode the window → committed, did NOT false-fail
+    assert runner.wan_dhcp_attempts == 3  # 2 transport failures + 1 success
+    assert hub.rollback_calls == 0
+    assert hub.get(DMZ_PATH) == "true"
+
+
+class FlakyReleaseRecoveryRunner(RecoveryRunner):
+    """A RecoveryRunner whose ``dhcp_release`` RAISES RuntimeError the first
+    ``fail_times`` calls (the box unreachable in the rollback's POST-REBOOT dark
+    window) then succeeds — modelling the box returning from the hub reboot. The
+    scripted recovery lease is served on the reads as usual."""
+
+    def __init__(self, leases: list[str], events: list[str], *, fail_times: int) -> None:
+        super().__init__(leases, events)
+        self.fail_times = fail_times
+        self.release_attempts = 0
+
+    def __call__(self, tag: tuple[str, ...]) -> str:
+        if tag and tag[0] == "dhcp_release":
+            self.release_attempts += 1
+            if self.release_attempts <= self.fail_times:
+                msg = "ssh: box unreachable in the rollback dark window"
+                raise RuntimeError(msg)
+        return super().__call__(tag)
+
+
+def test_rollback_rides_dark_window_for_release_then_recovers_double_nat() -> None:
+    """THE 06-27 INCIDENT, FIXED: the rollback's dhcp_release times out 2x (the box is
+    mid-reboot after the latch-reboot) then succeeds — the rollback RIDES the window,
+    the WAN recovers to a working double-NAT lease, and the rollback completes CLEANLY
+    (ok=True) instead of the old "ROLLBACK FAILED, half-applied"."""
+    from sanctum_cli.devices.intents import _DmzRollbackProvider
+
+    events: list[str] = []
+    hub = EventHub(events)
+    hub._v[DMZ_PATH] = "true"  # a prior cutover engaged DMZ
+    runner = FlakyReleaseRecoveryRunner(["192.168.2.20"], events, fail_times=2)
+    wrapped = _DmzRollbackProvider(hub, runner)
+
+    snap = Snapshot(brand=hub.brand, taken_at="t", data={DMZ_PATH: "false"})
+    result = wrapped.rollback(snap)
+
+    assert result.ok is True  # rode the dark window → recovered cleanly
+    assert runner.release_attempts == 3  # 2 transport failures + 1 success
+    assert hub.get(DMZ_PATH) == "false"  # DMZ disabled
+    assert hub.reboot_calls == 1  # the latch-reboot still fired before the re-lease
+
+
+def test_rollback_release_box_never_returns_reports_not_ok_with_manual_recovery() -> None:
+    """A box that NEVER returns for the rollback re-lease fails CLOSED: the rollback
+    reports ok=False with a manual-recovery instruction — it must never mask a truly
+    dark box as a clean recovery. The inner DMZ-disable still ran, so the dangerous
+    leaf is off."""
+    from sanctum_cli.devices.intents import _DmzRollbackProvider
+
+    events: list[str] = []
+    hub = EventHub(events)
+    hub._v[DMZ_PATH] = "true"
+    # The box never returns from the reboot for the re-lease (always raises transport).
+    runner = FlakyReleaseRecoveryRunner(["192.168.2.20"], events, fail_times=10_000)
+    wrapped = _DmzRollbackProvider(hub, runner)
+
+    snap = Snapshot(brand=hub.brand, taken_at="t", data={DMZ_PATH: "false"})
+    result = wrapped.rollback(snap)
+
+    assert result.ok is False  # fail closed — a dark box is never reported as recovered
+    assert hub.get(DMZ_PATH) == "false"  # the dangerous DMZ leaf was still disabled
+    low = result.detail.lower()
+    assert "recover" in low or "manual" in low or "did not return" in low

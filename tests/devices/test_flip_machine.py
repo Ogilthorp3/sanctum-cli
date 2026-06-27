@@ -342,6 +342,38 @@ def test_settle_poll_transient_at_or_past_bound_hard_fails(observed: str) -> Non
     assert past_bound.action == "hard_fail"
 
 
+# ── box_op_retry_decision: ride the post-reboot box-op dark window (FIX a-2) ──────
+#
+# observe_lease already rides the dark window (settle_poll_decision). But the ACTIVE
+# box ops — the wan_dhcp re-lease and the rollback's dhcp_release — were single SSH
+# shots: the instant the box's WAN→Tailscale was down (the 2-5 min hub-reboot window)
+# the op's transport timed out and the stage/rollback false-failed (the 06-27
+# "rollback half-applied" incident). box_op_retry_decision is the PURE brain (no clock
+# — elapsed is passed in) the bounded ride consults AFTER a transport failure: retry
+# while inside the window, give up (fail closed) past the bound. Same >=-fail-closed
+# boundary as settle_poll_decision; the hostile inputs are a box still dark mid-window
+# and a box that never returns by the bound.
+
+
+def test_box_op_retry_within_window_retries() -> None:
+    """A box-op transport failure INSIDE the hub-reboot window → retry: the box has not
+    come back from the reboot yet, this is NOT a genuine op failure."""
+    d = flip.box_op_retry_decision(op="wan_dhcp", elapsed_s=60.0, timeout_s=480.0)
+    assert d.action == "retry"
+    assert "wan_dhcp" in d.reason
+
+
+def test_box_op_retry_at_or_past_bound_gives_up_fail_closed() -> None:
+    """A box that NEVER returns by the bound is a genuine failure — give up (fail
+    closed), never hang forever, never mask. Boundary elapsed==timeout gives up (>=)
+    so the window can never be over-trusted (exactly like settle_poll_decision)."""
+    at_bound = flip.box_op_retry_decision(op="dhcp_release", elapsed_s=480.0, timeout_s=480.0)
+    assert at_bound.action == "give_up"
+    assert "dhcp_release" in at_bound.reason
+    past_bound = flip.box_op_retry_decision(op="dhcp_release", elapsed_s=600.0, timeout_s=480.0)
+    assert past_bound.action == "give_up"
+
+
 # ── evaluate_wan_poison: refuse a "public" lease still carrying Bell's /1 (FIX c) ─
 #
 # Bell's Advanced DMZ hands the WAN a PUBLIC IP with a /1 netmask whose 0.0.0.0/1
