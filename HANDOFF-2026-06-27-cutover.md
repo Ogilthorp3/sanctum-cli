@@ -1,8 +1,55 @@
 # Single-NAT cutover — code handoff (2026-06-27, worktree /tmp/sanctum-cli-flip)
 
-Branch: `fix/single-nat-three-safety-fixes`. OFFLINE worktree. No live network, no `--apply`,
-no push. Gate after all edits: `make check` (ruff + mypy + pytest via `.venv`, python3.12 —
-`uv.real` is missing in this sandbox so `.venv` was built directly).
+> ## ⬆ UPDATE 2026-06-27 (later) — FIX-b LANDED + off-LAN gate leg closed. The lines below this banner that say "FIX-b deferred" are STALE; this banner supersedes them.
+>
+> **FIX-b is LANDED** (`c35eb4f`) and the keystone OOB-gate Mini leg is now config-driven too
+> (this session, committed on this branch). The box + Mini transport is **config-first**: the armor
+> deploy, the `observe_lease`/`verify` box reads, the `_DmzRollbackProvider` recovery re-lease, AND
+> the OOB recovery gate (both its box leg and now its Mini leg) all read `devices.firewalla.host` /
+> `devices.firewalla.ssh_user` / `devices.mini.host` from `~/.sanctum/instance.yaml` at call time,
+> defaulting to the LAN coordinates so the shipped tool is unchanged. **With Bert's tailnet pin (see
+> the instance.yaml block in §"instance.yaml for Bert" below) the operator runs OFF the 10.x LAN —
+> on the Bell hub Wi-Fi (192.168.2.x), reaching the hub directly (192.168.2.1) and the box + Mini
+> over Tailscale — so the operator survives a `/1` collapse and recovers over the tailnet.**
+>
+> **What this session added on top of FIX-b:** `net._out_of_band_host()` (reads `devices.mini.host`,
+> strips the `user@` prefix for the bare-TCP probe → defaults to `_OUT_OF_BAND_HOST` = `10.0.0.10`);
+> `net._out_of_band_reachable()` now probes `_out_of_band_host()` instead of the hardcoded constant.
+> Before this, the gate's box leg was config-driven (FIX-b) but its **Mini leg was still
+> LAN-hardcoded to `10.0.0.10`** — a fail-closed AND-gate `--force` can't waive — so from the off-LAN
+> perch `10.0.0.10` (behind the Firewalla NAT) was unreachable and the gate **refused the very
+> cutover FIX-b enables**. That asymmetry is now closed.
+>
+> **Gate (independently re-run this session):** `.venv/bin/ruff check .` → All checks passed;
+> `.venv/bin/mypy sanctum_cli` → no issues in 93 files; `.venv/bin/pytest -q` → **1442 passed, 3
+> skipped** (was 1438 after FIX-b → +4 net new gate tests; the 3 skips are the opt-in
+> `SANCTUM_LIVE_{FIREWALLA,ORBI,HUB}` smokes). Mutation-checked the off-LAN gate tests non-vacuous
+> (revert the Mini leg → 2 go red for the right reason).
+>
+> **Still open (recovery, separate from FIX-b — for the attended morning batch):**
+> `_verify_recovered_double_nat` is still a SINGLE instant read, NOT the bounded settle/poll FIX-a put
+> on the forward path, so the rollback-verify can race the 2–5 min dark window and false-YELLOW (never
+> false-green). **Residual (live-verify, non-blocking):** the armor installer's scp/ssh do NOT pass
+> `-i <key>` (armor.py `_steps`), so the off-LAN armor deploy to `pi@100.68.36.16` authenticates via
+> ssh-agent/ssh config — confirm the box key is agent-loaded on the MBP before `--apply` (it fails
+> LOUDLY, raising before DMZ engage, never phantom-green). Also: `devices.firewalla.ssh_user` retargets
+> only the armor deploy (the runner hardcodes user `pi`); both resolve to `pi`, so consistent.
+
+Branch: `fix/single-nat-three-safety-fixes`. OFFLINE worktree. No live network, no
+`--apply`, no push. Gate after all edits: `make check` (ruff + mypy + pytest via `.venv`,
+python3.12 — `uv.real` is missing in this sandbox so `.venv` was built directly).
+
+**Original (3345fa0) handoff text follows — see the UPDATE banner above for what changed since.**
+
+**Independently re-verified 2026-06-27 (this doc-pass session):** `.venv/bin/ruff check .` → clean;
+`.venv/bin/mypy sanctum_cli` → no issues in 93 files; `.venv/bin/pytest -q` → **1431 passed, 3
+skipped** (the 3 are opt-in `SANCTUM_LIVE_{FIREWALLA,ORBI,HUB}` smokes). [STALE as of the banner —
+now 1442.] Recovery-transport gap re-confirmed by inspection: `intents._DmzRollbackProvider.rollback`
+re-leases via `self._runner` (LAN, line 484) and verifies via `_verify_recovered_double_nat(self._runner)`
+(LAN, single read, line 487/410) — **no tailnet primitive in the recovery path**, so automated rollback
+is NOT yet LAN-independent. FIX-b stays correctly deferred → cutover is **READY (attended), not
+push-button**. [STALE: FIX-b is now LANDED + the runner is config-driven to the tailnet via the pin;
+only the rollback-verify single-read remains, per the banner.]
 
 ## State of the three 06-26 safety fixes
 
@@ -14,7 +61,35 @@ no push. Gate after all edits: `make check` (ruff + mypy + pytest via `.venv`, p
 | FIX-3 fail-closed interlock on Tailscale OOB | LANDED at 4bff09a |
 | FIX-a post-reboot settle/poll (no false-fail in the 2–5 min dark window) | **LANDED this session** (see below) |
 | FIX-c netmask/route poison gate (a `/1`-poisoned "public" lease never commits green) | **LANDED this session** (see below) |
-| FIX-b recovery re-lease over Tailscale (LAN-independent rollback) | **DEFERRED this session — precise rationale below** |
+| FIX-b recovery re-lease over Tailscale (LAN-independent rollback) | **LANDED `c35eb4f` + off-LAN gate Mini leg LANDED this session — see UPDATE banner at top; the "DEFERRED" section below is STALE** |
+
+## instance.yaml for Bert — the tailnet pin that makes the operator off-LAN (FIX-b)
+
+Append to `~/.sanctum/instance.yaml` (the existing `devices.hub.{brand: sagemcom, host: 192.168.2.1}`
+block STAYS — the hub is reached DIRECTLY over the Bell Wi-Fi, no tailnet):
+
+```yaml
+devices:
+  firewalla:
+    host: 100.68.36.16        # box over Tailscale (was the 10.0.0.1 LAN gateway)
+    ssh_user: pi
+  mini:
+    host: bert@100.107.112.118  # Mini over Tailscale (was bert@10.0.0.10)
+firewalla:
+  ssh_key: ~/.openclaw/firewalla/keys/ssh_firewalla
+```
+
+What each key retargets:
+- `devices.firewalla.host` → the SSH runner (`observe_lease`/`verify` box reads + the recovery
+  re-lease) **and** the armor box scp/ssh **and** the OOB recovery gate's box leg.
+- `devices.mini.host` → the armor Mini scp/ssh **and** (new this session) the OOB recovery gate's
+  Mini leg (the `user@` prefix is stripped for the gate's bare-TCP probe).
+- `firewalla.ssh_key` (a PRE-EXISTING seam, not new in FIX-b) is **REQUIRED** so the runner's
+  `ssh -i <key> pi@100.68.36.16` uses the box key over the tailnet; without it the runner falls back
+  to `~/.ssh/firewalla_ed25519` and a mutating op raises (fail-closed, never phantom-green).
+
+DEFAULT stays LAN (`10.0.0.1` / `pi` / `bert@10.0.0.10`) when these keys are absent — no personal
+tailnet IP is a default anywhere; Bert pins them.
 
 ## Landed this session — FIX-1 shape-B (CORRECTNESS council must-fix)
 
@@ -112,6 +187,16 @@ every caller; the runbook's manual "no `0.0.0.0/1`" check (§5) remains as the i
 
 ## DEFERRED this session — FIX-b recovery-over-Tailscale (precise rationale)
 
+> **STALE — SUPERSEDED by the UPDATE banner at the top of this file.** FIX-b was LANDED in `c35eb4f`
+> (a later session) via a different, cleaner design than the one this section warned against: the box +
+> Mini transport is now CONFIG-FIRST (`devices.firewalla.host` / `devices.mini.host`) read at call
+> time, so NO personal tailnet node is hardcoded into the shipped `firewalla_wan_via_ssh` read path —
+> the leak this section rightly refused to ship. Bert's `~/.sanctum/instance.yaml` pin (see the
+> "instance.yaml for Bert" section above) routes the recovery re-lease + reads over the tailnet for
+> his haus only. The text below is retained as the historical rationale for why the FIRST attempt was
+> deferred; it no longer describes the shipped state. The ONE remaining recovery item is
+> `_verify_recovered_double_nat`'s single instant read (still to convert to settle/poll — see below).
+
 **Why deferred (not half-implemented):** the Locate-phase design routes the rollback re-lease +
 recovery-read fallback through `net/system._fw_mutate_via_ssh` AND `net/system.firewalla_wan_via_ssh`.
 The latter is a **shipped, general-purpose read** used by `net check` / `net optimize` / `verify` for
@@ -144,6 +229,14 @@ exit is the box's own verdict — never fall back on it; the zero-masking proper
 255 reproduces on the tailnet and raises, so the fallback can't mask a real box-side failure). LIVE-verify
 `root@100.68.36.16` runs the recovery commands during the attended dry-run before trusting it.
 
+**Land in the SAME batch (the second recovery must-fix):** convert `_verify_recovered_double_nat`
+from its current single instant read into the same bounded settle/poll as FIX-a (reuse
+`flip.settle_poll_decision` + a monotonic deadline). Today the rollback reboots the hub
+(`intents.py` ~line 474) and then reads ONCE, so it can race the same 2–5 min post-reboot dark
+window FIX-a closed on the forward path and false-report "rollback INCOMPLETE / manual recovery" on
+a rollback that would have settled. It errs SAFE (false-yellow, never false-green), so it is fine
+for tomorrow's ATTENDED run, but it must become a poll when the recovery transport (b) lands.
+
 ## Remaining code follow-ups (council REVISE — NOT landed; compensated operationally in the runbooks)
 
 These do NOT re-create the 06-26 strand (FIX-2 + FIX-3 hold), but they degrade a failed `--apply`
@@ -157,9 +250,13 @@ rather than rushed the night before the cutover.
    read — that half of the original item is folded into the (b) deferral (the rollback recovery path is
    what (b) reworks). The forward-apply false-fail is closed.
 
-2. **Recovery re-lease rides the LAN (Rollback/Recovery).** DEFERRED this session — see the
-   "DEFERRED — FIX-b" section above for the precise rationale + the to-land-later plan. Compensated
-   operationally (runbook §8/§9: finish recovery by hand over `root@100.68.36.16`).
+2. **Recovery re-lease rides the LAN (Rollback/Recovery).** ~~DEFERRED~~ → **LANDED (FIX-b, `c35eb4f`)
+   + off-LAN gate Mini leg this session.** The re-lease + box reads + the OOB gate (both legs) are now
+   config-first; Bert's tailnet pin routes them over Tailscale, so automated `--rollback` reaches the
+   box over the tailnet from the off-LAN perch. **Still open in this item:** only the
+   `_verify_recovered_double_nat` SINGLE instant read — convert to the bounded settle/poll FIX-a uses
+   (errs SAFE / false-YELLOW today, never false-green). Runbook §8/§9 manual Tailscale recovery remains
+   the belt-and-suspenders independent confirm.
 
 3. ~~**`observe_lease` doesn't inspect the netmask/route (Rollback/Recovery).**~~ **LANDED this session
    as FIX-c** — `intents._observe_lease` now reads the prefix + route table (the new `wan_addr_cidr` /

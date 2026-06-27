@@ -627,10 +627,14 @@ def hub_set(
 # tailnet while the shipped default stays the LAN coordinates.
 _ARMOR_KIT_DIR = "/Users/bert/Documents/Claude_Code/sanctum-singlenat-armor"
 
-# The out-of-band recovery host the cutover gate probes: the Mini jump host, which
-# the armor kit reaches on a SEPARATE link from the WAN the flip is changing (the
-# README deploys via ``bert@10.0.0.10``). A reachable Mini means there is a way to
-# recover the hub if the cutover strands it; its absence makes the flip refuse.
+# The SHIPPED-default out-of-band recovery host the cutover gate probes: the Mini
+# jump host, which the armor kit reaches on a SEPARATE link from the WAN the flip is
+# changing (the README deploys via ``bert@10.0.0.10``). A reachable Mini means there
+# is a way to recover the hub if the cutover strands it; its absence makes the flip
+# refuse. This is NO LONGER a hardcoded probe target (FIX-b): the gate resolves the
+# Mini config-first through :func:`_out_of_band_host` (``devices.mini.host`` → this
+# LAN default), so an off-LAN operator on the Bell hub Wi-Fi probes the tailnet Mini
+# (which survives the /1 collapse) while the shipped default stays the LAN address.
 _OUT_OF_BAND_HOST = "10.0.0.10"
 _OUT_OF_BAND_PORT = 22
 
@@ -654,6 +658,29 @@ def _firewalla_recovery_host() -> str | None:
     neither resolves (no recovery host → no recovery path).
     """
     return _firewalla_host()
+
+
+def _out_of_band_host() -> str:
+    """Resolve the Mini jump host the OOB recovery gate TCP-probes — config-first (FIX-b).
+
+    The recovery-path gate (:func:`_out_of_band_reachable`) checks the Mini is
+    reachable before authorizing the cutover. Reads ``devices.mini.host`` from
+    instance.yaml at CALL TIME and STRIPS any ``user@`` prefix (the gate does a bare
+    TCP connect, not an SSH login — ``bert@100.107.112.118`` → ``100.107.112.118``),
+    falling back to the shipped LAN default ``_OUT_OF_BAND_HOST`` so the
+    general-purpose tool is unchanged. It shares the SAME ``devices.mini.host`` key
+    the armor Mini deploy uses (:func:`intents._armor_mini_host`), so the gate and the
+    deploy reach the SAME Mini. This closes the keystone asymmetry: before FIX-b the
+    box leg of this gate was config-driven but the Mini leg was LAN-hardcoded, so an
+    off-LAN perch (Bell hub Wi-Fi, 192.168.2.x) could not reach ``10.0.0.10`` behind
+    the Firewalla NAT and the fail-closed gate refused the cutover it was meant to
+    authorize.
+    """
+    configured = config.instance_value("devices.mini.host", None)
+    if configured is None:
+        return _OUT_OF_BAND_HOST
+    # The gate connects by TCP, not SSH — drop any ``user@`` login prefix.
+    return str(configured).rsplit("@", 1)[-1]
 
 
 def _build_armor_installer() -> ArmorInstaller:
@@ -700,7 +727,9 @@ def _out_of_band_reachable() -> bool:
       below were up at gate-check time and then died WITH the LAN, so a gate that
       trusted only them green-lit a cutover it could not recover. The tailnet path
       is the safety net that makes the cutover survivable, so it is checked FIRST.
-    * the **Mini jump host** (``_OUT_OF_BAND_HOST``) — the LAN out-of-band link; and
+    * the **Mini jump host** (:func:`_out_of_band_host`, config-first from
+      ``devices.mini.host`` → the ``_OUT_OF_BAND_HOST`` LAN default) — the
+      out-of-band link the operator recovers the box over; and
     * the **Firewalla** (:func:`_firewalla_recovery_host`, the default gateway) —
       the host that actually PERFORMS the recovery re-lease (the rollback's
       ``dhcp_release`` SSHes it). Retained as secondary belt-and-suspenders.
@@ -716,7 +745,7 @@ def _out_of_band_reachable() -> bool:
     # survives a LAN collapse). Fail-closed if the root-SSH round-trip is not live.
     if not interlock.tailscale_oob_live():
         return False
-    if not _tcp_reachable(_OUT_OF_BAND_HOST, _OUT_OF_BAND_PORT):
+    if not _tcp_reachable(_out_of_band_host(), _OUT_OF_BAND_PORT):
         return False
     fw_host = _firewalla_recovery_host()
     if fw_host is None:
