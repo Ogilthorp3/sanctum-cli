@@ -186,6 +186,12 @@ class SinglenatArmorInstaller:
         # README step 1: land the boot-armor on the Firewalla, wire post_main.sh,
         # run it once. The wire+run is one ssh so the append is idempotent (grep -q).
         wire_and_run = (
+            # chmod +x FIRST: scp lands the script 0644, but the armed-check
+            # (_armed_check_argv) requires ``test -x`` — so make it executable
+            # explicitly. Without this the structural armed-check is FLAKY: it only
+            # passed when the boot-armor run happened to set +x (2026-06-27: fires
+            # #1/#3 left it 0644 → "hook NOT armed" → refused DMZ). Idempotent.
+            f"chmod +x {_FW_ARMOR_DEST}; "
             f"grep -q sanctum-singlenat-armor {_FW_POST_MAIN} "
             f'|| echo "bash {_FW_ARMOR_DEST}" >> {_FW_POST_MAIN}; '
             f"sudo bash {_FW_ARMOR_DEST}"

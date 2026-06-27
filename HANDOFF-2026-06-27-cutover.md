@@ -1,5 +1,61 @@
 # Single-NAT cutover — code handoff (2026-06-27, worktree /tmp/sanctum-cli-flip)
 
+> ## ⬆⬆ UPDATE 2026-06-27 (latest) — FIX a-2 LANDED (`6c91a1a`): the ACTIVE box ops now RIDE the hub-reboot dark window. This is the fix for the TWO failed attended live fires. Banners/sections below that call the active re-lease a "single SSH attempt" or warn the rollback re-lease can false-fail in the window are STALE; this banner supersedes them.
+>
+> **What broke (two attended live fires, both FAILED SAFE):** the haus is on clean double-NAT,
+> DMZ confirmed DISABLED, 10.x LAN intact — the fixes fail-closed correctly. But the cutover kept
+> dying in the **hub-reboot dark window**. When the hub reboots (~2–5 min) the Firewalla box's
+> WAN→internet→Tailscale is DOWN, so the box is UNREACHABLE over Tailscale for that whole window;
+> the operator runs OFF the 10.x LAN and reaches the box ONLY over Tailscale.
+> - **Attempt 1:** died the same way — a box-op issued during/right-after the reboot timed out.
+> - **Attempt 2 (traced):** `stage_armor` PASSED → `enable_dmz` PASSED → `hub_reboot` PASSED →
+>   then **`wan_dhcp` FAILED**: it SSHes `pi@100.68.36.16` and runs `dhclient -r $WAN; dhclient $WAN`
+>   to force the new DMZ lease — the SSH **timed out after 30 s** because the box was mid-reboot
+>   unreachable. The flip treated that as a stage failure → rolled back → the rollback's **`dhcp_release`
+>   op ALSO timed out** in the same window → **"ROLLBACK FAILED, half-applied."** (The DMZ-disable part
+>   of the rollback DID succeed — hence DMZ=DISABLED now — only the box re-lease sub-step failed; the box
+>   then auto-leased back to normal when the hub returned.)
+>
+> **Root cause:** `observe_lease` already rode the dark window (FIX-a's bounded settle/poll). But the
+> two ACTIVE box-ops — `wan_dhcp` (the forward re-lease) and the rollback's `dhcp_release` — did NOT.
+> They were single SSH attempts with a 30 s timeout, so they false-failed the instant the box was
+> unreachable.
+>
+> **The fix (approach A — settle/poll the box-ops, reusing the FIX-a machinery):**
+> - `flip.box_op_retry_decision` (+ frozen `BoxOpRetryDecision`) — PURE brain mirroring
+>   `settle_poll_decision`, consulted only AFTER a transport failure: `elapsed < timeout` → `retry`;
+>   `elapsed >= timeout` → `give_up` (the `>=` boundary fails closed, identical to `settle_poll_decision`).
+> - `intents._ride_dark_window` — thin bounded-poll driver (injectable monotonic `now`/`sleep`, the
+>   `_settle_max_iters` defensive cap). Fires the op; **rides ONLY `RuntimeError`** (the runner's
+>   fail-closed transport-failure contract — `_fw_mutate_via_ssh` raises it on the 30 s SSH timeout);
+>   any other exception propagates as a genuine bug. `give_up` → `_StageError`.
+> - **Both call sites wired:** the `wan_dhcp` stage now rides; `_DmzRollbackProvider.rollback`'s
+>   `dhcp_release` now rides AND converts a `give_up` into an **HONEST `ok=False` + manual-recovery**
+>   (the rollback contract returns an `OpResult`, never raises). DMZ stays disabled in that case.
+> - Constants `_BOX_OP_TIMEOUT_S=480.0` (8 min — wider than `observe_lease`'s 360 s because the
+>   rollback re-lease rides a SECOND latch-reboot) / `_BOX_OP_POLL_INTERVAL_S=15.0`. Monotonic clock
+>   (NTP-step-proof); the iteration cap backstops a frozen clock → raises, never infinite-hangs.
+>
+> **Does the rollback now complete cleanly through the dark window? YES** — `dhcp_release` times out
+> while the box is mid-reboot, the rollback RIDES it, and once the WAN recovers to a double-NAT lease
+> it returns `ok=True` (no more "ROLLBACK FAILED, half-applied"). A genuinely dead box is still
+> surfaced honestly: `ok=False` + manual-recovery, DMZ still disabled. **Bonus:** because the rollback
+> re-lease now retries-until-reachable, the subsequent `_verify_recovered_double_nat` runs only AFTER
+> the box is back — so the earlier banner's "recovery-VERIFY single read races the dark window" concern
+> is now largely mitigated (the read happens post-return, not into the dark).
+>
+> **OPERATOR NOTE (non-blocking, from review):** `_fw_mutate_via_ssh` raises the same `RuntimeError`
+> for BOTH a transport timeout/unreachable box AND a non-zero remote exit code. So if you see the ride
+> **visibly retrying while you CAN ssh the box** (the box is back, not in the dark window), that is a
+> REAL command-level failure (e.g. `dhclient` itself failing), not the reboot — investigate the remote
+> op rather than waiting out the full ~8 min bound.
+>
+> **TDD:** wrote the 8 hostile-scenario tests FIRST (confirmed RED — `AttributeError` on the missing
+> decision fn/constant), then implemented to green. **Gate (independently re-run):** ruff clean · mypy
+> clean (93 files) · **1450 passed, 3 skipped** (baseline before this fix was 1442 passed; +8 tests,
+> zero regressions; the 3 skips are the pre-existing opt-in live Firewalla/Orbi/hub smokes). Committed
+> local-only at `6c91a1a` (NO push, no live mutation, no device SSH).
+>
 > ## ⬆ UPDATE 2026-06-27 (later) — FIX-b LANDED + off-LAN gate leg closed. The lines below this banner that say "FIX-b deferred" are STALE; this banner supersedes them.
 >
 > **FIX-b is LANDED** (`c35eb4f`) and the keystone OOB-gate Mini leg is now config-driven too
@@ -59,7 +115,8 @@ only the rollback-verify single-read remains, per the banner.]
 | FIX-1 reboot contract (RAISE path, **shape-B**) | LANDED at 71cee0d |
 | FIX-2 armor staged BEFORE enable_dmz | LANDED at 4bff09a (ordering pinned by test) |
 | FIX-3 fail-closed interlock on Tailscale OOB | LANDED at 4bff09a |
-| FIX-a post-reboot settle/poll (no false-fail in the 2–5 min dark window) | **LANDED this session** (see below) |
+| FIX-a post-reboot settle/poll on the OBSERVE (no false-fail in the 2–5 min dark window) | **LANDED this session** (see below) |
+| FIX a-2 ACTIVE box-ops (`wan_dhcp` re-lease + rollback `dhcp_release`) RIDE the dark window | **LANDED `6c91a1a` — the fix for the two failed live fires; see top banner** |
 | FIX-c netmask/route poison gate (a `/1`-poisoned "public" lease never commits green) | **LANDED this session** (see below) |
 | FIX-b recovery re-lease over Tailscale (LAN-independent rollback) | **LANDED `c35eb4f` + off-LAN gate Mini leg LANDED this session — see UPDATE banner at top; the "DEFERRED" section below is STALE** |
 
@@ -253,10 +310,14 @@ rather than rushed the night before the cutover.
 2. **Recovery re-lease rides the LAN (Rollback/Recovery).** ~~DEFERRED~~ → **LANDED (FIX-b, `c35eb4f`)
    + off-LAN gate Mini leg this session.** The re-lease + box reads + the OOB gate (both legs) are now
    config-first; Bert's tailnet pin routes them over Tailscale, so automated `--rollback` reaches the
-   box over the tailnet from the off-LAN perch. **Still open in this item:** only the
-   `_verify_recovered_double_nat` SINGLE instant read — convert to the bounded settle/poll FIX-a uses
-   (errs SAFE / false-YELLOW today, never false-green). Runbook §8/§9 manual Tailscale recovery remains
-   the belt-and-suspenders independent confirm.
+   box over the tailnet from the off-LAN perch. **And as of FIX a-2 (`6c91a1a`) the recovery re-lease
+   (`dhcp_release`) now RIDES the post-reboot dark window** (retry-until-reachable, bounded fail-closed)
+   — closing the actual root cause of the two failed live fires (the re-lease single-shotting through the
+   window). **Effectively closed:** the `_verify_recovered_double_nat` SINGLE instant read is now largely
+   de-risked too — it runs only AFTER the re-lease landed (box back), so it no longer reads into the dark
+   window; converting it to a full settle/poll is a nice-to-have, not a sharp edge (errs SAFE / never
+   false-green either way). Runbook §8/§9 manual Tailscale recovery remains the belt-and-suspenders
+   independent confirm.
 
 3. ~~**`observe_lease` doesn't inspect the netmask/route (Rollback/Recovery).**~~ **LANDED this session
    as FIX-c** — `intents._observe_lease` now reads the prefix + route table (the new `wan_addr_cidr` /

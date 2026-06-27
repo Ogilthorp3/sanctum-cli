@@ -155,6 +155,25 @@ def test_install_runs_deploy_sequence_and_reports_ok() -> None:
     assert "com.sanctum.singlenat-ota-sentinel" in joined
 
 
+def test_deploy_makes_the_armor_script_executable() -> None:
+    """The deploy MUST ``chmod +x`` the armor script — the armed-check needs ``test -x``.
+
+    Contract derived from the armed-check (_armed_check_argv: ``test -x <dest>``), NOT
+    from the deploy author's assumption: ``scp`` lands the script 0644, and post_main.sh
+    runs it via ``bash`` (no +x needed to FUNCTION), so without an explicit chmod the
+    STRUCTURAL armed-check is flaky — it passed only when the boot-armor run happened to
+    set +x. On 2026-06-27 fires #1/#3 left it 0644 → "hook NOT armed" → refused DMZ.
+    """
+    runner = RecordingRunner()
+    _installer(runner).install()
+    joined = "\n".join(" ".join(argv) for argv in runner.calls)
+    # The exact dest the armed-check tests with ``test -x`` must be chmod'd +x.
+    assert "chmod +x" in joined
+    assert "sanctum-singlenat-armor.sh" in joined
+    # and the chmod targets the armed-check's dest, before the run that depends on it
+    assert "chmod +x /home/pi/.firewalla/config/sanctum-singlenat-armor.sh" in joined
+
+
 def test_install_targets_the_configured_hosts() -> None:
     """The deploy is parameterized on the Firewalla + Mini hosts (no hardcode)."""
     runner = RecordingRunner()
