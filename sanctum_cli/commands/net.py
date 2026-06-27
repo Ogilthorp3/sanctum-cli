@@ -108,8 +108,15 @@ def device_creds(kind: str, net: NetContext) -> Creds:
     per brand.
     """
     service, account = device_keychain_ref(kind)
+    # The device host is the detected default gateway BY DEFAULT, but a device
+    # whose admin endpoint is NOT the local gateway (the Bell/Sagemcom hub is the
+    # Firewalla's WAN-side gateway at 192.168.2.1, not the LAN gateway 10.0.0.1)
+    # needs an explicit ``devices.<kind>.host`` override, or the provider connects
+    # to the wrong box. Override wins; gateway is the fallback.
+    host_override = config.instance_value(f"devices.{kind}.host", None)
+    host = str(host_override) if host_override is not None else (net.gateway_ip or "")
     return Creds(
-        host=net.gateway_ip or "",
+        host=host,
         username=account,
         secret=None,
         key_path=None,

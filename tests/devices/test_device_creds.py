@@ -46,6 +46,28 @@ def test_device_creds_hub_default_tuple(monkeypatch: pytest.MonkeyPatch) -> None
     assert creds.key_path is None
 
 
+def test_device_creds_host_override_beats_gateway(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A configured ``devices.<kind>.host`` wins over the local default gateway.
+
+    The hub is the Firewalla's WAN-side gateway (e.g. the Sagemcom at 192.168.2.1),
+    NOT the local default gateway (which from a LAN client is the Firewalla at
+    10.0.0.1). Without this override the tool targets the wrong host. The override
+    is the explicit fix the live pre-flight required.
+    """
+    _stub_instance(monkeypatch, {"devices.hub.host": "192.168.2.1"})
+    creds = net.device_creds("hub", _net("10.0.0.1"))  # local gateway is the Firewalla
+    assert creds.host == "192.168.2.1"  # the configured hub host, not 10.0.0.1
+
+
+def test_device_creds_host_falls_back_to_gateway_when_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no host override, host stays the detected gateway (unchanged default)."""
+    _stub_instance(monkeypatch, {})
+    creds = net.device_creds("hub", _net("10.0.0.1"))
+    assert creds.host == "10.0.0.1"
+
+
 def test_device_creds_orbi_default_tuple(monkeypatch: pytest.MonkeyPatch) -> None:
     """orbi with NOTHING configured → service=orbi-admin, username/account=admin."""
     _stub_instance(monkeypatch, {})
