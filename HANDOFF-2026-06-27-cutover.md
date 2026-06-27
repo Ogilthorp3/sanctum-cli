@@ -1,6 +1,65 @@
 # Single-NAT cutover — code handoff (2026-06-27, worktree /tmp/sanctum-cli-flip)
 
-> ## ⬆⬆ UPDATE 2026-06-27 (latest) — FIX a-2 LANDED (`6c91a1a`): the ACTIVE box ops now RIDE the hub-reboot dark window. This is the fix for the TWO failed attended live fires. Banners/sections below that call the active re-lease a "single SSH attempt" or warn the rollback re-lease can false-fail in the window are STALE; this banner supersedes them.
+> ## ⬆⬆⬆ UPDATE 2026-06-27 (LATEST — post-fire-#4) — the TWO blocking bugs the 4 attended live fires surfaced are FIXED: (1) the ARMOR now REMOVES Bell's `/1`; (2) the DMZ ROLLBACK now sends the SAH STRING. The "(latest)" banner below is now second-latest.
+>
+> **Four attended live fires, ALL FAILED SAFE.** The haus recovered each time to clean double-NAT
+> (box `192.168.2.10/24`, no `/1`, FW LAN serving, online). **Fire #4 reached the FINISH LINE** — the
+> box pulled the Bell Advanced-DMZ **PUBLIC** lease `74.14.213.2` (single-NAT was momentarily LIVE:
+> armor staged → DMZ engaged → hub rebooted → box rode the dark window via FIX a-2 → grabbed the public
+> lease). It did **NOT** commit for exactly ONE reason: the armor's `/1`-REMOVAL was broken. Two bugs
+> surfaced; **both are now fixed** (this session).
+>
+> **BUG 1 (the real blocker) — armor pinned `/32` but did NOT remove Bell's `/1`. FIXED in the KIT.**
+> After the DMZ lease the box carried BOTH `inet 74.14.213.2/1` (Bell poison: a `/1` netmask swallows
+> `0.0.0.0`–`127.255.255.255` INCLUDING the 10.x LAN) AND `inet 74.14.213.2/32` (the armor pin), plus
+> the `0.0.0.0/1` poison route. The old exit-hook did only `ip addr replace NEWIP/32` — it ADDED a `/32`
+> but left the `/1` address + poison routes. FIX-c's poison-gate CORRECTLY refused to commit and rolled
+> back (**the gate is right; the armor was the bug**). Fixed in
+> `/Users/bert/Documents/Claude_Code/sanctum-singlenat-armor/bin/singlenat-armor-boot.sh` — the generated
+> `/etc/dhcp/dhclient-exit-hooks.d/zz-sanctum-dmz` hook now, on a PUBLIC `BOUND/RENEW/REBIND/REBOOT`
+> lease, IN ORDER: (1) `ip addr del NEWIP/1 dev DEV`; (2) `ip route del 0.0.0.0/1` **and**
+> `ip route del 128.0.0.0/1`; (3) `ip addr replace NEWIP/32 dev DEV`; (4) on-link carrier gw then
+> default. Private/APIPA leases (`192.168/10/169.254/172.16-31`) stay a TOTAL no-op so the double-NAT
+> fallback is never torn down. Independently traced against the fire-#4 lease this session: deletes the
+> `/1` address + both route halves, pins `/32`, **del-`/1` precedes pin-`/32`**; private leases emit ZERO
+> commands. Kit eval **PASS=52 FAIL=0** (was 40; +12 hook assertions; the old `/32`-only hook fails the
+> del-`/1` + del-`0.0.0.0/1` assertions, so the test has teeth). The blanket `supersede subnet-mask
+> 255.255.255.255` is deliberately NOT written (documented in the hook header): it is IP-blind and would
+> force `/32` on a normal double-NAT lease too, breaking the safe fallback — the IP-aware hook is the
+> authoritative defense.
+> **⚠ RE-DEPLOY REQUIRED — the box still has the OLD `/32`-only hook from fire #4.** No manual box step:
+> the kit deploy is idempotent and re-scps the boot-armor, so the NEXT `stage_armor` stage of
+> `sanctum net single-nat --apply` re-installs the FIXED hook. Just re-run the cutover (fire #5).
+>
+> **BUG 2 (secondary) — auto-rollback could not disable DMZ (wrong value TYPE). FIXED in the flip (`ced7f5c`).**
+> The auto-rollback restore sent a non-string (a captured Python `bool` / capitalized `"False"`) for
+> `AdvancedDMZ/Enable`, which the hub rejects with `XMO_INVALID_PARAMETER_TYPE_ERR` (16777311). The
+> ENGAGE set the STRING `"true"` and works; the rollback must match. Fixed at the brand boundary in two
+> places: `sanctum_cli/devices/sagemcom.py` `_sah_value()` normalizes a Python `bool` AND its capitalized
+> repr to the SAH lowercase `"true"`/`"false"` (applied in `_raw_get` so a captured baseline is never
+> poisoned, and in `set` so the wire payload is correctly typed); `sanctum_cli/devices/intents.py`
+> `disengaged_value()` inverts within the leaf's OWN value-space (`true`/`false` → `"false"`,
+> `on`/`off` → `"off"`) and is the SINGLE source shared by `disengaged_baseline_snapshot` (standalone
+> `--rollback`) and `commands/net.py`'s generic flip, so engage/disengage can never drift. **Net: a
+> future AUTO-rollback (and `--rollback`) can now disable DMZ unattended.**
+>
+> **Gate (this session):** kit eval **PASS=52 FAIL=0**; flip `ruff` clean · `mypy` clean (93 files) ·
+> `pytest` **1456 passed, 3 skipped** (was 1451; +5 Bug-2 tests, all confirmed RED before the fix). Both
+> fixes APPROVED by two independent review lenses (armor + adversarial-correctness): **0 must-fix, 0
+> blocking.**
+>
+> **Residual (non-blocking, tracked — none block fire #5):** (a) the hook's `ip route del 0.0.0.0/1` /
+> `128.0.0.0/1` act on the MAIN table only — if firerouter ever mirrors the poison `/1` into a policy
+> table the gate could stay red (non-blocking: the fire-#4 poison is a raw main-table dhclient/kernel
+> artifact grabbed in the dark window before firerouter reprograms policy tables, and deleting the `/1`
+> ADDRESS tears down kernel-connected copies regardless of table; worst case is a safe, visible,
+> ONLINE heal loop, not a dark fallback); (b) the hook hardcodes the `/1` prefix (matches the observed
+> Bell value; a future hardening could derive it from dhclient's `$new_subnet_mask`); (c) the on-link
+> `ip route replace GW … scope link` line is emitted but only the `default via` line is asserted in the
+> kit eval. Both were left for a deliberate follow-up rather than touched the night before an attended
+> cutover (they would invalidate the two-lens approval of the exact reviewed artifact).
+>
+> ## ⬆⬆ UPDATE 2026-06-27 (FIX a-2, second-latest) — FIX a-2 LANDED (`6c91a1a`): the ACTIVE box ops now RIDE the hub-reboot dark window. This is the fix for the TWO failed attended live fires. Banners/sections below that call the active re-lease a "single SSH attempt" or warn the rollback re-lease can false-fail in the window are STALE; this banner supersedes them.
 >
 > **What broke (two attended live fires, both FAILED SAFE):** the haus is on clean double-NAT,
 > DMZ confirmed DISABLED, 10.x LAN intact — the fixes fail-closed correctly. But the cutover kept
