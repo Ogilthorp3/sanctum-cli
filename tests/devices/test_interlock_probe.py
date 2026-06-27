@@ -61,14 +61,22 @@ def test_oob_live_probes_a_caller_supplied_addr() -> None:
 # ── the SSH argv envelope: key-only, root-over-tailnet, hostile-safe ──────────
 
 
-def test_ts_ssh_argv_is_key_only_root_over_tailnet() -> None:
-    """The probe argv is the key-only BatchMode envelope to ``root@<tailnet-addr>``."""
+def test_ts_ssh_argv_is_key_only_pi_over_tailnet() -> None:
+    """The probe argv is the key-only BatchMode envelope to ``pi@<tailnet-addr>``.
+
+    The Firewalla's SSH user is ``pi`` (root login is denied) — LIVE-VERIFIED 2026-06-27
+    against the real box (``ssh pi@…`` succeeds, ``ssh root@…`` is "Permission denied"),
+    and it matches the runner's transport. The expectation is derived from the box's REAL
+    behavior, not the producer's old ``root@`` assumption (which the prod code + this test
+    once shared — CLAUDE.md "don't share assumptions between test and production").
+    """
     argv = interlock._ts_ssh_argv(interlock.TS_FIREWALLA_ADDR, "true")
     assert argv[0] == "ssh"
     assert "BatchMode=yes" in argv
     assert "PreferredAuthentications=publickey" in argv
     assert "StrictHostKeyChecking=accept-new" in argv
-    assert f"root@{interlock.TS_FIREWALLA_ADDR}" in argv
+    assert f"pi@{interlock.TS_FIREWALLA_ADDR}" in argv
+    assert f"root@{interlock.TS_FIREWALLA_ADDR}" not in argv  # root is denied on the box
     assert argv[-1] == "true"  # the round-trip command
 
 
@@ -82,8 +90,8 @@ def test_ts_ssh_argv_hostile_addr_stays_one_argv_element() -> None:
     """
     hostile = "100.68.36.16 ; rm -rf / # café %20"
     argv = interlock._ts_ssh_argv(hostile, "true")
-    assert f"root@{hostile}" in argv  # the whole hostile value is exactly one element
-    assert argv.count(f"root@{hostile}") == 1
+    assert f"pi@{hostile}" in argv  # the whole hostile value is exactly one element
+    assert argv.count(f"pi@{hostile}") == 1
 
 
 # ── fail-closed transport: a spawn failure is a NON-zero sentinel, never 0 ────

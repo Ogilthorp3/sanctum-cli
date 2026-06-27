@@ -9,8 +9,9 @@ the LAN being changed: **Tailscale-on-box** — node ``ts-firewalla``
 
 This module is the *boundary* the prevent-interlock's "OOB channel proven-live"
 precondition (see :func:`sanctum_cli.devices.flip.evaluate_interlock`) is derived
-from. The honest proof is a real root-SSH **round-trip** — ``ssh root@<addr>
-true`` returning exit 0 — NOT a bare ping/TCP-connect (which proves only L3
+from. The honest proof is a real key-SSH **round-trip** — ``ssh pi@<addr>
+true`` returning exit 0 (the box's SSH user is ``pi``; root login is denied) — NOT
+a bare ping/TCP-connect (which proves only L3
 reachability, not a usable recovery channel; CLAUDE.md "Contracts at the
 Boundary"). The transport is injectable (``probe=``) so the gate is fully
 testable offline, with the real subprocess SSH the default.
@@ -62,7 +63,11 @@ def _ts_ssh_argv(addr: str, remote: str) -> list[str]:
         "StrictHostKeyChecking=accept-new",
         "-o",
         f"ConnectTimeout={_SSH_CONNECT_TIMEOUT}",
-        f"root@{addr}",
+        # The Firewalla's SSH user is ``pi`` (root login is denied on the box) — LIVE-VERIFIED
+        # 2026-06-27: ``ssh pi@100.68.36.16 true`` succeeds, ``ssh root@…`` is "Permission denied".
+        # The key is supplied by the operator's ssh-config Host entry (IdentityFile = the box key),
+        # matching the runner's transport (:func:`sanctum_cli.net.system._fw_ssh_argv`, also ``pi``).
+        f"pi@{addr}",
         remote,
     ]
 
@@ -89,7 +94,7 @@ def _run_probe(argv: list[str]) -> int:
 
 
 def _real_tailnet_ssh_probe(addr: str) -> int:
-    """The real OOB proof: a root-SSH round-trip over the tailnet (``ssh root@addr true``).
+    """The real OOB proof: a pi-SSH round-trip over the tailnet (``ssh pi@addr true``).
 
     Exit 0 means the channel is genuinely usable (auth succeeded + a command ran),
     not merely that the address pings — the honest-verify contract.
