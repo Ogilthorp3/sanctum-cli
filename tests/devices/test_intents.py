@@ -210,3 +210,56 @@ def test_single_nat_apply_default_verify_uses_real_site(monkeypatch, tmp_path: P
     assert res.result is not None
     assert res.result.ok is True
     assert p.get(BRIDGE_MODE_PATH) == "on"
+
+
+# ── BUG 2: the pre-cutover baseline must DISENGAGE each leaf in ITS OWN value-
+# space — a boolean true/false leaf → "false", never "on" ─────────────────────
+#
+# The standalone ``sanctum net single-nat --rollback`` reconstructs the pre-cutover
+# baseline via :func:`disengaged_baseline_snapshot` (there is no in-process apply
+# snapshot to restore). The old heuristic, ``"off" if engaged == "on" else "on"``,
+# sent ``"on"`` to Bell's boolean ``AdvancedDMZ/Enable`` leaf (whose engaged value
+# is ``"true"``, not ``"on"``) — and the SAH rejects ``"on"`` with
+# ``XMO_INVALID_PARAMETER_TYPE_ERR``, so ``--rollback`` could not disable DMZ
+# (2026-06-27). The DMZ op here carries ``engaged="true"`` — the REAL live Bell
+# sentinel (``sagemcom._CAPABILITY_OPS``), NOT the on/off model the orchestration
+# fakes share — so this test does not inherit the assumption that hid the bug.
+
+DMZ_ENABLE_PATH = "Device/Services/BellNetworkCfg/AdvancedDMZ/Enable"
+
+
+class _TrueFalseDmzProvider(FakeProvider):
+    """A hub whose DMZ leaf uses the LIVE boolean sentinel 'true'/'false'."""
+
+    def capabilities(self) -> set[Capability]:
+        return {Capability.READ, Capability.SET, Capability.BRIDGE_MODE, Capability.DMZ}
+
+    def capability_op(self, capability: Capability) -> CapabilityOp | None:
+        if capability is Capability.DMZ:
+            # Verified live on the F5697: the leaf reads 'true'/'false', NOT 'on'/'off'.
+            return CapabilityOp(path=DMZ_ENABLE_PATH, engaged="true")
+        if capability is Capability.BRIDGE_MODE:
+            return CapabilityOp(path=BRIDGE_MODE_PATH, engaged="on")
+        return None
+
+
+def test_disengaged_value_inverts_within_the_leaf_value_space() -> None:
+    """A boolean leaf disengages to 'false'; an on/off leaf to 'off' — each in its
+    OWN value-space, never crossed (the type error that broke --rollback)."""
+    from sanctum_cli.devices.intents import disengaged_value
+
+    assert disengaged_value(CapabilityOp(path="x", engaged="true")) == "false"
+    assert disengaged_value(CapabilityOp(path="x", engaged="false")) == "true"
+    assert disengaged_value(CapabilityOp(path="x", engaged="on")) == "off"
+    assert disengaged_value(CapabilityOp(path="x", engaged="off")) == "on"
+
+
+def test_disengaged_baseline_snapshot_uses_false_for_boolean_dmz_leaf() -> None:
+    """The reconstructed pre-cutover baseline disengages the BOOLEAN DMZ leaf to the
+    lowercase STRING 'false' (not 'on'), and the on/off bridge leaf to 'off'."""
+    from sanctum_cli.devices.intents import disengaged_baseline_snapshot
+
+    snap = disengaged_baseline_snapshot(_TrueFalseDmzProvider())
+    assert snap.data[DMZ_ENABLE_PATH] == "false"
+    assert isinstance(snap.data[DMZ_ENABLE_PATH], str)
+    assert snap.data[BRIDGE_MODE_PATH] == "off"  # on/off leaf still → "off"

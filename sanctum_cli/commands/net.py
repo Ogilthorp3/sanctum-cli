@@ -1450,9 +1450,11 @@ def orbi_guest_wifi(
                 _report(exc)
                 raise typer.Exit(code=int(exc.exit_code))
             # The value that ENGAGES the capability is op.engaged ("on"); the
-            # disengaged value is the other state. Derive it so a brand whose
-            # engaged sentinel is not literally "on" still flips correctly.
-            target_value = op.engaged if desired == "on" else ("off" if op.engaged == "on" else "on")
+            # disengaged value is the brand's opposite sentinel, inverted within the
+            # leaf's own value-space (intents.disengaged_value — the SAME single
+            # source the rollback baseline uses, so a boolean true/false leaf flips
+            # to "false" not "on", never the SAH type error).
+            target_value = op.engaged if desired == "on" else intents.disengaged_value(op)
 
             plan = [
                 f"guest-wifi {desired} plan:",

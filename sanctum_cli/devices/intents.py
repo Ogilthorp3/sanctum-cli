@@ -410,6 +410,32 @@ _MANUAL_RECOVERY = (
 _SINGLE_NAT_CAPABILITIES = (Capability.BRIDGE_MODE, Capability.DMZ)
 
 
+# Map a brand's ENGAGED sentinel to its DISENGAGED opposite, WITHIN the leaf's own
+# value-space. A boolean true/false leaf (Bell's ``AdvancedDMZ/Enable``, engaged
+# ``"true"``) MUST disengage to ``"false"`` — NEVER ``"on"``: the SAH boolean leaf
+# rejects ``"on"`` with ``XMO_INVALID_PARAMETER_TYPE_ERR``, which left the
+# 2026-06-27 ``--rollback`` unable to disable DMZ. An on/off leaf (engaged ``"on"``)
+# disengages to ``"off"``. Keyed off the brand's OWN engaged value, so this seam
+# learns no brand vocabulary.
+_DISENGAGED_SENTINEL: dict[str, str] = {
+    "on": "off",
+    "off": "on",
+    "true": "false",
+    "false": "true",
+}
+
+
+def disengaged_value(op: CapabilityOp) -> str:
+    """The value that DISENGAGES ``op``'s capability, in the leaf's own value-space.
+
+    The inverse of ``op.engaged`` WITHOUT crossing value-spaces: an on/off leaf →
+    ``"off"``; a boolean true/false leaf → ``"false"`` (not ``"on"``, which the SAH
+    rejects as a type error). Falls back to ``"off"`` for an unrecognized engaged
+    sentinel — the safe "not engaged" default.
+    """
+    return _DISENGAGED_SENTINEL.get(op.engaged, "off")
+
+
 def disengaged_baseline_snapshot(provider: DeviceProvider) -> Snapshot:
     """Build the captured pre-cutover baseline: every single-NAT leaf disengaged.
 
@@ -432,8 +458,10 @@ def disengaged_baseline_snapshot(provider: DeviceProvider) -> Snapshot:
         op = provider.capability_op(capability)
         if op is None:
             continue
-        # The disengaged value is the opposite of the brand's engaged sentinel.
-        data[op.path] = "off" if op.engaged == "on" else "on"
+        # The disengaged value is the brand's OPPOSITE sentinel, inverted within the
+        # leaf's own value-space (on/off → "off", boolean true/false → "false") so a
+        # boolean leaf is never sent "on" — the SAH type error that broke --rollback.
+        data[op.path] = disengaged_value(op)
     return Snapshot(brand=provider.brand, taken_at="pre-cutover-baseline", data=data)
 
 

@@ -195,6 +195,35 @@ _SAH_REBOOT_INITIATED = frozenset({"XMO_ACTION_CALLBACK_ERR", "XMO_REBOOTING_ERR
 _SAH_REBOOT_OK = _SAH_OK | _SAH_REBOOT_INITIATED
 
 
+def _sah_value(value: object) -> str:
+    """Coerce a value to the SAH wire STRING the hub's ``setValue`` expects.
+
+    The Bell SAH leaves are TYPED: a boolean leaf (e.g. ``AdvancedDMZ/Enable``)
+    accepts ONLY the lowercase strings ``"true"``/``"false"`` and rejects anything
+    else with ``XMO_INVALID_PARAMETER_TYPE_ERR`` (code 16777311) — the exact error
+    that stranded the 2026-06-27 auto-rollback. The installed ``sagemcom_api``
+    DESERIALIZES a boolean leaf to a Python ``bool``, so a snapshot taken via
+    ``str(value)`` captured ``"True"``/``"False"`` (capitalized) and a restore of
+    that baseline was rejected by the hub — DMZ stayed engaged, the household dark.
+    Normalize the Python ``bool`` (and the capitalized repr an older ``str(bool)``
+    snapshot may carry) to the SAH form so the ENGAGE's ``"true"`` and the
+    ROLLBACK's ``"false"`` are the SAME string type. Any other value passes through
+    as its ``str``.
+
+    Owned at the SAH boundary (Contracts at the Boundary): every value crossing into
+    ``set_value_by_xpath`` — a fresh write OR a restored baseline — and every value
+    read back for a baseline is normalized here, so no caller can hand the hub a
+    non-string boolean. ``isinstance(value, bool)`` is checked first because ``bool``
+    is a subclass of ``int`` (``str(True)`` would otherwise give ``"True"``).
+    """
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    text = str(value)
+    if text in ("True", "False"):
+        return text.lower()
+    return text
+
+
 def _reply_error(reply: Any, ok_tokens: frozenset[str] = _SAH_OK) -> str | None:
     """Return the first non-``ok_tokens`` SAH error description in a reply, else ``None``.
 
@@ -744,7 +773,10 @@ class SagemcomHubProvider:
         except Exception as exc:  # normalize any transport error
             msg = f"Sagemcom getValue failed for {path!r}: {exc}"
             raise DeviceError(msg) from exc
-        return None if value is None else str(value)
+        # Coerce a boolean leaf's Python-bool read to the SAH wire string so a
+        # captured baseline is never poisoned with "True"/"False" (which a later
+        # restore would send back and the hub would reject) — see _sah_value.
+        return None if value is None else _sah_value(value)
 
     def get(self, path: str) -> str | None:
         """Read one leaf value by XPath; ``None`` when the path is unknown."""
@@ -760,8 +792,13 @@ class SagemcomHubProvider:
         """
         client = self._require_client()
         before = self._raw_get(path)
+        # Normalize at the boundary: a Python bool or its capitalized repr (a typed
+        # baseline / older str(bool) snapshot) becomes the SAH "true"/"false" the
+        # boolean leaves require — otherwise the hub rejects it with
+        # XMO_INVALID_PARAMETER_TYPE_ERR and an auto-rollback cannot disable DMZ.
+        wire = _sah_value(value)
         try:
-            reply = self._run(client.set_value_by_xpath(path, value))
+            reply = self._run(client.set_value_by_xpath(path, wire))
         except Exception as exc:  # normalize any transport error
             msg = f"Sagemcom setValue failed for {path!r}: {exc}"
             raise DeviceError(msg) from exc
@@ -771,7 +808,7 @@ class SagemcomHubProvider:
             raise DeviceError(
                 msg, fix="the hub did not accept the write; check the leaf/value and retry"
             )
-        return OpResult(ok=True, detail=f"set {path}", before=before, after=value)
+        return OpResult(ok=True, detail=f"set {path}", before=before, after=wire)
 
     def reboot(self) -> OpResult:
         """Reboot the hub via the SAH ``reboot`` action — reboot-initiated = SUCCESS.

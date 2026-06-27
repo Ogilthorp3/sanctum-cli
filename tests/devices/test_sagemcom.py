@@ -30,6 +30,7 @@ import asyncio
 import pytest
 
 from sanctum_cli.devices.base import Capability, Creds, DeviceError
+from sanctum_cli.devices.sagemcom import _ADVANCED_DMZ_XPATH as DMZ_ENABLE_PATH
 
 BRIDGE_PATH = "Device/Services/BellNetworkCfg/SetBridgeMode"
 DMZ_PATH = "Device/Services/BellNetworkCfg/AdvancedDMZ"
@@ -638,3 +639,64 @@ def test_rollback_reports_failure_when_a_restore_write_is_rejected(
     res = p.rollback(snap)
     assert res.ok is False
     assert "XMO_NON_WRITABLE_PARAMETER_ERR" in res.detail
+
+
+# ── SAH boolean-leaf TYPE coercion: a restored baseline must reach the hub as the
+# lowercase STRING the SAH accepts, not a Python bool / its capitalized repr ─────
+#
+# BUG 2 (2026-06-27 auto-rollback): the installed ``sagemcom_api`` deserializes a
+# boolean SAH leaf (e.g. AdvancedDMZ/Enable) to a Python ``bool``. The provider's
+# snapshot captured it via ``str(value)`` → ``"False"`` (capitalized), and the
+# rails' rollback re-sent ``"False"`` — which the hub rejects with
+# ``XMO_INVALID_PARAMETER_TYPE_ERR`` (code 16777311). DMZ stayed engaged, the
+# household dark. The boundary (``_raw_get`` + ``set``) must coerce a Python bool
+# AND its capitalized repr to the SAH ``"true"``/``"false"`` the engage sends.
+# These tests feed the REAL library shape (a Python ``bool`` from the leaf read),
+# NOT the string the provider assumed (Contracts at the Boundary).
+
+
+def test_snapshot_then_rollback_of_boolean_leaf_sends_lowercase_string(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """REGRESSION: a DMZ-off hub whose boolean leaf reads back as Python ``False``
+    must be snapshotted + restored as the lowercase STRING ``"false"`` — never the
+    capitalized ``"False"`` (rejected) nor a bool. Exercises the full
+    snapshot→rollback contract the rails' auto-rollback runs."""
+    fake = FakeSahClient({DMZ_ENABLE_PATH: False})  # real lib: boolean leaf → Python bool  # type: ignore[dict-item]
+    p = _connected_with(monkeypatch, fake)
+    snap = p.snapshot()
+    fake.set_calls.clear()
+    res = p.rollback(snap)
+    assert res.ok is True, res.detail
+    sent = dict(fake.set_calls)
+    # The boolean leaf is restored as the lowercase SAH STRING, not "False"/bool.
+    assert sent[DMZ_ENABLE_PATH] == "false"
+    assert isinstance(sent[DMZ_ENABLE_PATH], str)
+
+
+def test_get_of_boolean_leaf_returns_sah_lowercase_string(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A boolean leaf that reads back as Python ``True`` is surfaced as the SAH
+    string ``"true"`` (not ``"True"``), so a captured baseline is never poisoned."""
+    fake = FakeSahClient({DMZ_ENABLE_PATH: True})  # type: ignore[dict-item]
+    p = _connected_with(monkeypatch, fake)
+    assert p.get(DMZ_ENABLE_PATH) == "true"
+
+
+def test_set_coerces_capitalized_bool_repr_to_sah_lowercase(
+    patched: FakeSahClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Defense at the ``set`` boundary: a baseline carrying the Python-repr
+    ``"False"``/``"True"`` (what an older ``str(bool)`` snapshot stored) is
+    normalized to the SAH lowercase string BEFORE it reaches ``set_value_by_xpath``
+    — so even a pre-fix snapshot restores cleanly. A genuine SAH string is left
+    untouched (no over-coercion / no regression of the engage's ``"true"``)."""
+    p = _connected(monkeypatch, patched)
+    assert p.set(DMZ_ENABLE_PATH, "False").after == "false"
+    assert p.set(DMZ_ENABLE_PATH, "True").after == "true"
+    assert p.set(DMZ_ENABLE_PATH, "true").after == "true"  # engage value untouched
+    # Every payload that reached the transport is a lowercase SAH STRING.
+    for _xpath, value in patched.set_calls:
+        assert isinstance(value, str)
+        assert value in ("false", "true")
