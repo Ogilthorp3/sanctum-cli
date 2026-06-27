@@ -29,6 +29,7 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
+from sanctum_cli import config
 from sanctum_cli.devices import flip
 from sanctum_cli.devices.armor import SinglenatArmorInstaller
 from sanctum_cli.devices.base import Capability, CapabilityOp, DeviceError, OpResult, Snapshot
@@ -286,23 +287,57 @@ _SETTLE_POLL_INTERVAL_S = 15.0
 # coordinates passes a pre-built ``armor=`` installer (and tests always do, so the
 # overnight build never reaches these against live gear).
 _DEFAULT_ARMOR_KIT_DIR = "/Users/bert/Documents/Claude_Code/sanctum-singlenat-armor"
+# The SHIPPED LAN defaults — the general-purpose tool is unchanged for other users.
+# Bert's haus pins the tailnet transport in ~/.sanctum/instance.yaml (FIX-b); these
+# defaults are NEVER his personal tailnet IPs, only the LAN coordinates the kit
+# README documents.
 _DEFAULT_ARMOR_FIREWALLA_HOST = "10.0.0.1"
+_DEFAULT_ARMOR_FIREWALLA_USER = "pi"
 _DEFAULT_ARMOR_MINI_HOST = "bert@10.0.0.10"
 
 
+def _armor_firewalla_host() -> str:
+    """The box (Firewalla) host the armor scp/ssh targets — config-first (FIX-b).
+
+    Reads ``devices.firewalla.host`` from instance.yaml at CALL TIME (so a haus on
+    the off-LAN cutover perch pins its tailnet box IP), falling back to the shipped
+    LAN default. The key is shared with the SSH runner + recovery re-lease so the
+    armor deploy, the box reads, and the unwind all reach the SAME box.
+    """
+    return str(config.instance_value("devices.firewalla.host", _DEFAULT_ARMOR_FIREWALLA_HOST))
+
+
+def _armor_firewalla_user() -> str:
+    """The box SSH user the armor scp/ssh uses — ``devices.firewalla.ssh_user``, else 'pi'."""
+    return str(config.instance_value("devices.firewalla.ssh_user", _DEFAULT_ARMOR_FIREWALLA_USER))
+
+
+def _armor_mini_host() -> str:
+    """The Mini ``user@host`` the armor scp/ssh targets — ``devices.mini.host``, else LAN.
+
+    The tailnet pin (``bert@100.107.112.118``) lets the kit deploy reach the Mini
+    over Tailscale when the operator is off the 10.x LAN.
+    """
+    return str(config.instance_value("devices.mini.host", _DEFAULT_ARMOR_MINI_HOST))
+
+
 def _default_armor_installer() -> ArmorInstaller:
-    """Build the real :class:`SinglenatArmorInstaller` from the README coordinates.
+    """Build the real :class:`SinglenatArmorInstaller` from config-or-default coordinates.
 
     The single seam through which an un-injected :func:`single_nat_dmz` reaches a
-    concrete armor install. Constructed lazily (only on the apply path) so the
-    dry-run makes zero host contact, and so tests that swap
+    concrete armor install. The box + Mini hosts are resolved config-first (FIX-b:
+    ``devices.firewalla.host`` / ``devices.firewalla.ssh_user`` / ``devices.mini.host``)
+    so an off-LAN operator's deploy rides the tailnet, defaulting to the LAN
+    coordinates so the shipped tool is unchanged. Constructed lazily (only on the
+    apply path) so the dry-run makes zero host contact, and so tests that swap
     ``intents.SinglenatArmorInstaller`` for a recording double exercise the wiring
     without ever shelling out.
     """
     return SinglenatArmorInstaller(
         kit_dir=_DEFAULT_ARMOR_KIT_DIR,
-        firewalla_host=_DEFAULT_ARMOR_FIREWALLA_HOST,
-        mini_host=_DEFAULT_ARMOR_MINI_HOST,
+        firewalla_host=_armor_firewalla_host(),
+        firewalla_user=_armor_firewalla_user(),
+        mini_host=_armor_mini_host(),
     )
 
 

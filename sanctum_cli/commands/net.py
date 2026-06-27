@@ -180,11 +180,28 @@ def _firewalla_key_path() -> Path:
     return Path.home() / ".ssh" / "firewalla_ed25519"
 
 
+def _firewalla_host() -> str | None:
+    """Resolve the box (Firewalla) host the SSH transport targets — config-first (FIX-b).
+
+    Reads ``devices.firewalla.host`` from instance.yaml at CALL TIME (so an off-LAN
+    cutover perch pins its tailnet box IP), falling back to the detected default
+    gateway — the shipped general-purpose behavior, which on the LAN resolves to the
+    box's own 10.0.0.x address. Returns ``None`` only when nothing is configured AND
+    no gateway parses (no box → fail-closed at the runner/gate). The SAME resolution
+    backs both :func:`_build_runner` (observe_lease / verify box reads + the recovery
+    re-lease) and :func:`_firewalla_recovery_host` (the gate), so they never diverge.
+    """
+    override = config.instance_value("devices.firewalla.host", None)
+    if override is not None:
+        return str(override)
+    return detect.parse_default_gateway(system.real_runner(("route",))) or None
+
+
 def _build_runner() -> Runner:
-    gw = detect.parse_default_gateway(system.real_runner(("route",)))
+    host = _firewalla_host()
     key_path = _firewalla_key_path()
     fw_key = str(key_path) if key_path.exists() else None
-    return system.make_real_runner(fw_gateway=gw, fw_key=fw_key)
+    return system.make_real_runner(fw_gateway=host, fw_key=fw_key)
 
 
 def _build_http() -> HttpProbe:
@@ -601,13 +618,14 @@ def hub_set(
 # recovery probe says reachable; ``--rollback`` undoes a prior cutover (disable DMZ
 # + re-lease DHCP).
 
-# The default deploy coordinates for the armor kit, mirroring the kit README's
-# deploy section + intents._DEFAULT_ARMOR_* . Held here so the CLI builds the
-# installer through one seam tests can swap for a recording double; the dry-run
-# never reaches it (zero host contact).
+# The armor kit checkout dir, mirroring the kit README's deploy section. Held here
+# so the CLI builds the installer through one seam tests can swap for a recording
+# double; the dry-run never reaches it (zero host contact). The box + Mini HOSTS are
+# NO LONGER hardcoded here (FIX-b) — they resolve config-first through the
+# ``intents._armor_*`` seams (``devices.firewalla.host`` / ``.ssh_user`` /
+# ``devices.mini.host`` → LAN default), so an off-LAN operator's deploy rides the
+# tailnet while the shipped default stays the LAN coordinates.
 _ARMOR_KIT_DIR = "/Users/bert/Documents/Claude_Code/sanctum-singlenat-armor"
-_ARMOR_FIREWALLA_HOST = "10.0.0.1"
-_ARMOR_MINI_HOST = "bert@10.0.0.10"
 
 # The out-of-band recovery host the cutover gate probes: the Mini jump host, which
 # the armor kit reaches on a SEPARATE link from the WAN the flip is changing (the
@@ -624,30 +642,38 @@ _FIREWALLA_SSH_PORT = 22
 
 
 def _firewalla_recovery_host() -> str | None:
-    """Resolve the Firewalla the recovery re-lease will SSH to: the default gateway.
+    """Resolve the Firewalla the recovery re-lease will SSH to (config-first, FIX-b).
 
     The unwind on a failed cutover (and an explicit ``--rollback``) fires the
     ``dhcp_release`` runner tag, which SSHes to the Firewalla — and ``_build_runner``
-    resolves that box as the parsed default gateway. The gate must probe the SAME
-    host so "the recovery re-lease can reach its box" is what it actually verifies.
-    Returns ``None`` when no gateway parses (no recovery host → no recovery path).
+    resolves that box via :func:`_firewalla_host` (``devices.firewalla.host`` override
+    → detected default gateway). The gate MUST probe the SAME host so "the recovery
+    re-lease can reach its box" is what it actually verifies — so it shares
+    :func:`_firewalla_host`. When Bert pins the tailnet box, the gate probes the
+    tailnet box; on a default install it probes the LAN gateway. Returns ``None`` when
+    neither resolves (no recovery host → no recovery path).
     """
-    gw = detect.parse_default_gateway(system.real_runner(("route",)))
-    return gw or None
+    return _firewalla_host()
 
 
 def _build_armor_installer() -> ArmorInstaller:
-    """Build the real single-NAT armor installer from the README coordinates.
+    """Build the real single-NAT armor installer, box + Mini hosts config-first (FIX-b).
 
     The one seam through which the ``net single-nat`` command reaches a concrete
-    armor install (stage ``apply_armor``). Built only on the apply path (never the
-    dry-run / gate-refused paths, which make zero host contact); tests swap this
-    for a recording double so the wiring is exercised without shelling out.
+    armor install (stages ``stage_armor`` + ``apply_armor``). The box + Mini deploy
+    targets resolve config-first via the shared ``intents._armor_*`` seams
+    (``devices.firewalla.host`` / ``devices.firewalla.ssh_user`` / ``devices.mini.host``
+    → LAN default) — one source of truth with :func:`intents._default_armor_installer`
+    — so an off-LAN operator's scp/ssh rides the tailnet while the shipped default
+    stays the LAN coordinates. Built only on the apply path (never the dry-run /
+    gate-refused paths, which make zero host contact); tests swap this for a
+    recording double so the wiring is exercised without shelling out.
     """
     return SinglenatArmorInstaller(
         kit_dir=_ARMOR_KIT_DIR,
-        firewalla_host=_ARMOR_FIREWALLA_HOST,
-        mini_host=_ARMOR_MINI_HOST,
+        firewalla_host=intents._armor_firewalla_host(),
+        firewalla_user=intents._armor_firewalla_user(),
+        mini_host=intents._armor_mini_host(),
     )
 
 

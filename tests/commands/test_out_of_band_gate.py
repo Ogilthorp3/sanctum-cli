@@ -68,14 +68,21 @@ def _patch(
     """Point the gate at the recording socket probe + a fixed Firewalla gateway.
 
     The Firewalla recovery host is resolved the SAME way ``_build_runner`` resolves
-    it for the ``dhcp_release`` op — the parsed default gateway — so the gate and
-    the recovery transport target the identical box. We stub that resolution to a
-    fixed IP and the socket connect to the recorder; no real route/socket is used.
+    it for the ``dhcp_release`` op — :func:`net._firewalla_host` (``devices.firewalla.host``
+    config override → parsed default gateway) — so the gate and the recovery
+    transport target the identical box. We isolate from the machine's real
+    instance.yaml (``SANCTUM_INSTANCE_FILE`` → an absent file, so the config override
+    is unset and the gateway fallback is exercised), stub the gateway parse to a
+    fixed IP, and stub the socket connect to the recorder; no real route/socket is used.
 
     The PRIMARY (FIX-3) Tailscale-on-box check is a real root-SSH round-trip, NOT a
     socket connect, so it is stubbed separately via ``interlock.tailscale_oob_live``
     (defaults to live so the LAN-side assertions below still exercise).
     """
+    # FIX-b: the recovery host now reads config-first; isolate from the real
+    # instance.yaml so this test exercises the gateway-fallback deterministically
+    # regardless of whether the haus has pinned a tailnet box host.
+    monkeypatch.setenv("SANCTUM_INSTANCE_FILE", "/nonexistent/sanctum-test-instance.yaml")
     monkeypatch.setattr(net_cmd.socket, "create_connection", probe.__call__)
     monkeypatch.setattr(
         net_cmd.detect, "parse_default_gateway", lambda _out: gateway
