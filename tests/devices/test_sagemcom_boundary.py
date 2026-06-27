@@ -297,6 +297,44 @@ def test_reboot_fails_closed_on_rejected_reply_through_real_transport(
         p.disconnect()
 
 
+@pytest.mark.parametrize(
+    "token",
+    ["XMO_ACTION_CALLBACK_ERR", "XMO_REBOOTING_ERR"],
+)
+def test_reboot_initiated_token_is_success_through_real_transport(
+    monkeypatch: pytest.MonkeyPatch, token: str
+) -> None:
+    """FIX-1, through the REAL transport: a reboot-initiated token reply is SUCCESS.
+
+    A SAH reboot kills its own connection, so the hub returns
+    XMO_ACTION_CALLBACK_ERR / XMO_REBOOTING_ERR (or drops the connection) rather
+    than a clean XMO_NO_ERR — that is the NORMAL signal the reboot started. The
+    reply rides back through the genuine ``__api_request_async`` verbatim, so this
+    drives the real transport (only ``__post`` mocked) and asserts ``reboot()``
+    returns ``ok=True`` for the token the device actually emits — the contract, not
+    the production code's old XMO_NO_ERR-only assumption (which raised here = the
+    06-26 root cause).
+    """
+    from sanctum_cli.devices.sagemcom import SagemcomHubProvider
+
+    fake = _RealEncodingClient(reboot_reply={"reply": {"error": {"description": token}}})
+    monkeypatch.setattr("sanctum_cli.devices.sagemcom._make_client", lambda creds: fake)
+    monkeypatch.setattr("sanctum_cli.keychain.read", lambda account, service: "pw")
+
+    p = SagemcomHubProvider()
+    try:
+        p.connect(Creds(host="192.168.2.1", username="admin", secret=None, key_path=None))
+        result = p.reboot()
+    finally:
+        p.disconnect()
+
+    # The reboot action really crossed the real transport …
+    action = fake.sent_actions[0]
+    assert action["method"] == "reboot"
+    # … and the reboot-initiated token was read as SUCCESS, not a failed stage.
+    assert result.ok is True
+
+
 # ─── table-row ops through the REAL transport (hostile xpath) ────────────────
 
 

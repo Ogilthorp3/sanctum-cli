@@ -152,6 +152,11 @@ def test_apply_without_injected_armor_uses_default_installer(
         def __init__(self, **kwargs: object) -> None:
             self.kwargs = kwargs
 
+        def stage(self) -> OpResult:
+            # The PRE-DMZ armor-staging stage (FIX-2): deploy the /32 hook while the
+            # LAN is healthy. Recorded separately from install().
+            return OpResult(ok=True, detail="armor staged")
+
         def install(self) -> OpResult:
             installs.append(1)
             return OpResult(ok=True, detail="armor installed")

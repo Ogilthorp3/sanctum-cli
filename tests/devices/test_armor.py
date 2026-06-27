@@ -285,6 +285,79 @@ def test_install_does_not_confirm_when_a_deploy_step_failed() -> None:
     assert confirm.calls == []  # the confirm never ran
 
 
+# ── stage() (FIX-2): PRE-DMZ deploy + STRUCTURAL armed check, fail-closed ─────
+
+
+def test_stage_runs_deploy_then_structural_armed_check_ok() -> None:
+    """stage() deploys the kit AND runs a structural armed check, reporting ok=True.
+
+    FIX-2: the pre-DMZ stage must land the /32 hook (the deploy steps) and then
+    PROVE it is armed structurally — the hook file present + executable + wired into
+    post_main.sh — NOT the HEALTHY egress confirm (single-NAT is not live yet). The
+    armed check is the LAST runner call, an ssh to the Firewalla testing the hook.
+    """
+    runner = RecordingRunner()
+    res = _installer(runner).stage()
+
+    assert isinstance(res, OpResult)
+    assert res.ok is True
+    assert runner.calls, "stage() must run the deploy + armed check, not no-op"
+    # The deploy landed the boot-armor + wired post_main.sh …
+    joined = "\n".join(" ".join(argv) for argv in runner.calls)
+    assert "singlenat-armor-boot.sh" in joined
+    assert "post_main.sh" in joined
+    # … and the LAST call is the structural armed check (test the hook file is wired).
+    armed_argv = runner.calls[-1]
+    armed_joined = " ".join(armed_argv)
+    assert "ssh" in armed_argv
+    assert "10.0.0.1" in armed_joined  # the Firewalla
+    assert "post_main.sh" in armed_joined
+    assert "test -x" in armed_joined  # structural presence/exec check, not egress
+
+
+def test_stage_does_not_run_the_healthy_egress_confirm() -> None:
+    """stage() must NOT run the post-cutover HEALTHY confirm (it cannot pass pre-DMZ).
+
+    The HEALTHY egress confirm (``singlenat-verify.sh`` over the confirm runner)
+    asserts a LIVE single NAT, which does not exist before DMZ engages. stage() must
+    use only the structural armed check, so the confirm runner is never touched.
+    """
+    confirm = RecordingConfirmRunner(stdout=HEALTHY_JSON)
+    res = _installer(RecordingRunner(), confirm).stage()
+    assert res.ok is True
+    assert confirm.calls == []  # the egress confirm never ran during staging
+
+
+def test_stage_fails_closed_when_armed_check_fails() -> None:
+    """A failed structural armed check fails-closed: ok=False, never a green stage.
+
+    If the deploy steps all exit zero but the hook is NOT actually wired (the armed
+    check returns non-zero), stage() must refuse — engaging DMZ over an un-armored
+    box is the 06-26 strand. The armed check is the 8th runner call (after 7 deploy
+    steps), so failing index 7 models a deploy-OK-but-not-armed box.
+    """
+    runner = RecordingRunner(fail_on_index=7)  # the armed check (post-deploy) fails
+    res = _installer(runner).stage()
+    assert res.ok is False
+    assert "armed" in res.detail.lower() or "hook" in res.detail.lower()
+
+
+def test_stage_fails_closed_and_fast_on_nonzero_deploy_step() -> None:
+    """A failed deploy step fails-closed + fast: ok=False, and the armed check never runs."""
+    runner = RecordingRunner(fail_on_index=0)  # the very first scp fails
+    res = _installer(runner).stage()
+    assert res.ok is False
+    assert len(runner.calls) == 1  # short-circuited before any further step or armed check
+
+
+def test_stage_fails_closed_when_a_deploy_step_raises() -> None:
+    """A deploy step whose subprocess RAISES → ok=False (never escapes the seam)."""
+    runner = RecordingRunner(raise_on_index=1)
+    res = _installer(runner).stage()
+    assert res.ok is False
+    assert res.detail
+
+
 # ── default runner: the real seam shells out (constructed without injection) ──
 
 

@@ -53,7 +53,7 @@ class RecordingRebootClient:
       observable through the fake.
     """
 
-    def __init__(self, reply: dict | None = None) -> None:
+    def __init__(self, reply: dict | None = None, raise_exc: BaseException | None = None) -> None:
         import asyncio
 
         self._asyncio = asyncio
@@ -65,6 +65,10 @@ class RecordingRebootClient:
         self._reply = reply if reply is not None else {
             "reply": {"error": {"description": "XMO_NO_ERR"}}
         }
+        # When set, the raw seam RAISES this after recording the call — modelling the
+        # hub tearing down its own connection as it begins to reboot (the EXPECTED,
+        # NORMAL outcome of issuing a reboot, NOT a failure).
+        self._raise_exc = raise_exc
         self._bound_loop = None
 
     def _assert_same_loop(self) -> None:
@@ -98,6 +102,8 @@ class RecordingRebootClient:
         self._assert_same_loop()
         self.reboot_calls += 1
         self.raw_actions.append(actions)
+        if self._raise_exc is not None:
+            raise self._raise_exc
         return self._reply
 
     async def reboot(self) -> str:
@@ -203,3 +209,88 @@ def test_reboot_capability_advertised(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = RecordingRebootClient()
     p = _connected(monkeypatch, fake)
     assert Capability.REBOOT in p.capabilities()
+
+
+# ─── FIX-1: the reboot SUCCESS contract (the 06-26 root cause) ───────────────
+#
+# A SAH reboot kills its own connection as the box restarts, so the request that
+# issued it almost never gets a clean ``XMO_NO_ERR`` back. The hub returns one of
+# the "already in progress / callback died" tokens — XMO_ACTION_CALLBACK_ERR or
+# XMO_REBOOTING_ERR — or the connection simply drops (reset / disconnect / read
+# timeout). ALL of these mean the reboot was INITIATED = SUCCESS. On 2026-06-26
+# the tool read them as FAILURE → tripped a rollback against an already-rebooting
+# hub → rollback could not run → DMZ left engaged un-armored → LAN collapse.
+#
+# These cases are authored from the DEVICE's real reply shapes (the tokens a SAH
+# reboot actually returns), NOT the production code's old assumption that only
+# XMO_NO_ERR is success — so the test cannot share the bug it is meant to catch.
+# They FAIL on the old treat-as-failure behaviour (reboot() raised DeviceError).
+
+
+@pytest.mark.parametrize(
+    "token",
+    ["XMO_ACTION_CALLBACK_ERR", "XMO_REBOOTING_ERR"],
+)
+def test_reboot_initiated_tokens_are_success(
+    monkeypatch: pytest.MonkeyPatch, token: str
+) -> None:
+    """A reboot reply carrying a 'reboot already initiated' token is SUCCESS.
+
+    XMO_ACTION_CALLBACK_ERR (the action callback died with the session) and
+    XMO_REBOOTING_ERR (the box is already rebooting) are the NORMAL signals that
+    the reboot started — they must yield ``ok=True``, never a DeviceError. The old
+    contract ran them through the generic ``_reply_error`` (XMO_NO_ERR only) and
+    raised — the exact misread that stranded the haus on 06-26.
+    """
+    fake = RecordingRebootClient(reply={"reply": {"error": {"description": token}}})
+    p = _connected(monkeypatch, fake)
+    result = p.reboot()
+    assert result.ok is True
+    # It really issued the reboot action through the raw seam (not a no-op).
+    assert fake.reboot_calls == 1
+    assert fake.raw_actions and fake.raw_actions[0][0]["method"] == "reboot"
+
+
+@pytest.mark.parametrize(
+    "drop",
+    [
+        ConnectionResetError("connection reset by peer"),
+        TimeoutError("read timed out after issuing reboot"),
+        OSError("server disconnected"),
+    ],
+)
+def test_reboot_connection_drop_is_success(
+    monkeypatch: pytest.MonkeyPatch, drop: BaseException
+) -> None:
+    """The hub dropping its own connection right after the reboot is SUCCESS.
+
+    Issuing a reboot tears down the session, so the in-flight request frequently
+    dies with a connection reset / disconnect / read timeout. That dropped
+    connection is the EXPECTED success signal (reboot initiated), NOT a failure —
+    reboot() must return ``ok=True``. The old ``except Exception -> raise
+    DeviceError`` turned it into a failed stage and tripped the doomed rollback.
+    """
+    fake = RecordingRebootClient(raise_exc=drop)
+    p = _connected(monkeypatch, fake)
+    result = p.reboot()
+    assert result.ok is True
+    # It DID issue the reboot before the connection dropped.
+    assert fake.reboot_calls == 1
+
+
+def test_reboot_genuine_rejection_still_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A genuine rejection (auth/access) is STILL a failure — the widened success
+    contract must not swallow a reboot the hub actually refused.
+
+    XMO_ACCESS_RESTRICTION_ERR is a real 'not allowed' rejection, distinct from the
+    reboot-initiated tokens; reboot() must keep raising DeviceError on it so a
+    refused reboot never reports green.
+    """
+    fake = RecordingRebootClient(
+        reply={"reply": {"error": {"description": "XMO_ACCESS_RESTRICTION_ERR"}}}
+    )
+    p = _connected(monkeypatch, fake)
+    with pytest.raises(DeviceError):
+        p.reboot()

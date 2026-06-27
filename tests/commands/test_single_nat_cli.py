@@ -147,10 +147,16 @@ class FakeRunner:
 
 
 class FakeArmor:
-    """Mock armor installer: records the install, never touches a host."""
+    """Mock armor installer: records stage + install, never touches a host."""
 
     def __init__(self) -> None:
         self.installed = 0
+        self.staged = 0
+
+    def stage(self) -> OpResult:
+        # Pre-DMZ armor staging (FIX-2): the /32 hook lands before DMZ engages.
+        self.staged += 1
+        return OpResult(ok=True, detail="armor staged")
 
     def install(self) -> OpResult:
         self.installed += 1

@@ -182,17 +182,33 @@ _PRODUCT_CLASS_XPATH = "Device/DeviceInfo/ProductClass"
 # proof the write landed.
 _SAH_OK = frozenset({"XMO_REQUEST_NO_ERR", "XMO_NO_ERR", "Ok"})
 
+# Reboot-ONLY success tokens — the reboot verb's wider success vocabulary (FIX-1).
+# A SAH reboot tears down its own session as the box restarts, so the request that
+# issued it rarely gets a clean XMO_NO_ERR: the hub reports the action callback
+# died with the session (XMO_ACTION_CALLBACK_ERR) or that it is already rebooting
+# (XMO_REBOOTING_ERR). Both mean the reboot was INITIATED = SUCCESS. They are
+# accepted ONLY for the reboot verb (never for set/action) — a setValue returning
+# one of these is still a real failure. On 2026-06-26 reading these as failure
+# tripped a rollback against an already-rebooting hub → DMZ left engaged un-armored.
+_SAH_REBOOT_INITIATED = frozenset({"XMO_ACTION_CALLBACK_ERR", "XMO_REBOOTING_ERR"})
+_SAH_REBOOT_OK = _SAH_OK | _SAH_REBOOT_INITIATED
 
-def _reply_error(reply: Any) -> str | None:
-    """Return the first SAH error description in a setValue reply, else ``None``.
+
+def _reply_error(reply: Any, ok_tokens: frozenset[str] = _SAH_OK) -> str | None:
+    """Return the first non-``ok_tokens`` SAH error description in a reply, else ``None``.
 
     Fail-closed: a reply is clean only when the top-level ``error.description`` is
-    a known success token AND every action's ``error.description`` is too. A
+    an accepted success token AND every action's ``error.description`` is too. A
     missing/garbled envelope, an unmodeled top-level error, or a failed action
     each yield a non-None description so the caller treats the write as failed —
     closing the transport's two swallow surfaces: it RETURNS (does not raise) on
     an unmodeled top-level error, and it never inspects per-action errors unless
     the top level is ``XMO_REQUEST_ACTION_ERR``.
+
+    ``ok_tokens`` defaults to :data:`_SAH_OK` (the set/action success set); the
+    reboot verb passes :data:`_SAH_REBOOT_OK` so the reboot-initiated tokens
+    (XMO_ACTION_CALLBACK_ERR / XMO_REBOOTING_ERR) are treated as success for that
+    verb ONLY — see :meth:`SagemcomHubProvider.reboot`.
     """
     if not isinstance(reply, dict):
         return f"unrecognized reply (not a dict: {type(reply).__name__})"
@@ -203,7 +219,7 @@ def _reply_error(reply: Any) -> str | None:
     top_desc = top.get("description") if isinstance(top, dict) else None
     if top_desc is None:
         return "reply missing top-level error.description"
-    if top_desc not in _SAH_OK:
+    if top_desc not in ok_tokens:
         return str(top_desc)
     actions = inner.get("actions")
     if isinstance(actions, list):
@@ -212,9 +228,40 @@ def _reply_error(reply: Any) -> str | None:
                 continue
             err = action.get("error")
             desc = err.get("description") if isinstance(err, dict) else None
-            if desc is not None and desc not in _SAH_OK:
+            if desc is not None and desc not in ok_tokens:
                 return str(desc)
     return None
+
+
+# Exception types that mean the hub dropped its OWN connection as it began to
+# reboot — the EXPECTED success signal for the reboot verb (FIX-1). ConnectionError
+# (incl. ConnectionResetError), TimeoutError (asyncio.TimeoutError IS TimeoutError
+# on 3.11+), and OSError cover the stdlib + aiohttp families (aiohttp's
+# ServerDisconnectedError / ClientConnectionError / ServerTimeoutError are all
+# OSError subclasses). Matched by base class so the optional aiohttp dep need not
+# be imported here. A genuine rejection (DeviceError, auth) is NOT in this family,
+# so it still fails closed.
+_REBOOT_CONNECTION_DROP = (ConnectionError, TimeoutError, OSError)
+
+
+def _is_reboot_connection_drop(exc: BaseException) -> bool:
+    """True iff ``exc`` looks like the hub dropping its connection to reboot.
+
+    Belt-and-suspenders for transports whose disconnect error is NOT an OSError
+    subclass: match the known aiohttp/asyncio connection-drop class names too, so a
+    ``ServerDisconnectedError`` (were it ever not an OSError) is still read as the
+    reboot's success signal rather than a failure.
+    """
+    if isinstance(exc, _REBOOT_CONNECTION_DROP):
+        return True
+    return type(exc).__name__ in {
+        "ServerDisconnectedError",
+        "ClientConnectionError",
+        "ClientOSError",
+        "ConnectionResetError",
+        "ServerTimeoutError",
+        "TimeoutError",
+    }
 
 
 def _make_client(creds: Creds) -> Any:
@@ -680,38 +727,55 @@ class SagemcomHubProvider:
         return OpResult(ok=True, detail=f"set {path}", before=before, after=value)
 
     def reboot(self) -> OpResult:
-        """Reboot the hub via the SAH ``reboot`` action, fail-closed on rejection.
+        """Reboot the hub via the SAH ``reboot`` action — reboot-initiated = SUCCESS.
 
         The installed ``sagemcom_api`` client models the reboot as the SAH action
         ``{"method": "reboot", "xpath": "Device", "parameters": {"source":
         "GUI"}}``. We drive it on the provider's persistent loop — the same loop
         login bound to, so the client's loop-bound ``aiohttp`` session stays valid —
-        and then inspect the *raw reply envelope* ourselves.
+        and then inspect the *raw reply envelope* ourselves (NOT the convenience
+        ``client.reboot()``, whose lossy ``__get_response_value`` returns ``''`` for
+        both a clean and a rejected reply — see :func:`_reboot_raw`).
 
-        We deliberately do NOT call the convenience ``client.reboot()``: that
-        wrapper returns ``__get_response_value(response)`` — the extracted leaf
-        value, NOT the ``{"reply": {"error": ...}}`` envelope — so it strips away
-        exactly the ``error.description`` the fail-closed check needs (and for the
-        reboot action, with no result ``callbacks``, it returns ``''`` for both a
-        clean AND a rejected reply, making success indistinguishable from failure).
-        Instead we issue the same action through the client's raw request path,
-        which returns the full envelope, and pass it through :func:`_reply_error`.
+        **FIX-1 — the reboot success contract.** Unlike :meth:`set`, a reboot kills
+        its own connection as the box restarts, so the request that issued it rarely
+        gets a clean ``XMO_NO_ERR``. Three outcomes ALL mean "reboot initiated" =
+        SUCCESS, and the contract treats them as such (Contracts at the Boundary —
+        authored from the device's REAL reply shapes, not the old XMO_NO_ERR-only
+        assumption that stranded the haus on 2026-06-26):
 
-        Fail-closed, exactly as :meth:`set` is: the transport RETURNS (does not
-        raise) on an error description it does not model, so "the call did not
-        raise" is NOT proof the hub accepted the reboot. Any non-success
-        ``error.description`` raises :class:`DeviceError`, so a rejected reboot
-        never reports a green outcome.
+        * the connection drops mid-request (reset / server-disconnect / read
+          timeout) — caught here and reported ``ok=True`` (the reboot fired);
+        * the reply carries ``XMO_ACTION_CALLBACK_ERR`` (the action callback died
+          with the session) — accepted via :data:`_SAH_REBOOT_OK`;
+        * the reply carries ``XMO_REBOOTING_ERR`` (the box is already rebooting) —
+          also accepted via :data:`_SAH_REBOOT_OK`.
+
+        Still fail-closed on a GENUINE rejection: a transport error that is NOT a
+        connection-drop, or an ``error.description`` outside :data:`_SAH_REBOOT_OK`
+        (e.g. ``XMO_ACCESS_RESTRICTION_ERR``, an auth failure), raises
+        :class:`DeviceError` — a reboot the hub actually refused never reports green.
+        This contract is shared by the rollback's latch-reboot
+        (:class:`~sanctum_cli.devices.intents._DmzRollbackProvider`), which calls
+        this same ``reboot()`` — so the unwind survives the normal reboot drop too.
         """
         client = self._require_client()
         try:
             reply = self._run(_reboot_raw(client))
         except Exception as exc:  # normalize any transport error
+            # A dropped connection right after issuing the reboot is the NORMAL,
+            # EXPECTED success signal (the hub tore down its own session to reboot),
+            # NOT a failure — report ok=True. Only a non-drop transport error fails.
+            if _is_reboot_connection_drop(exc):
+                return OpResult(
+                    ok=True,
+                    detail="reboot issued (hub dropped the connection — reboot initiated)",
+                )
             msg = f"Sagemcom reboot failed: {exc}"
             raise DeviceError(
                 msg, fix="check the hub is reachable and the session is valid"
             ) from exc
-        err = _reply_error(reply)
+        err = _reply_error(reply, ok_tokens=_SAH_REBOOT_OK)
         if err is not None:
             msg = f"Sagemcom reboot was rejected by the hub: {err}"
             raise DeviceError(

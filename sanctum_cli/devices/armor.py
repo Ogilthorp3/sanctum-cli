@@ -242,6 +242,77 @@ class SinglenatArmorInstaller:
         """
         return ["ssh", self._mini, _MINI_VERIFY_SCRIPT]
 
+    def _armed_check_argv(self) -> list[str]:
+        """The PRE-DMZ structural armed check: is the /32 hook present + wired on the box?
+
+        Distinct from :meth:`_confirm_argv` (the post-cutover HEALTHY egress confirm,
+        which CANNOT pass before single-NAT is live). This is a STRUCTURAL proof the
+        deploy landed: the boot-armor hook file exists + is executable on the
+        Firewalla AND ``post_main.sh`` is wired to run it — so the supersede will
+        fire the instant the post-reboot poison /1 lease arrives. Exit 0 == armed.
+        """
+        fw = f"{self._fw_user}@{self._fw_host}"
+        remote = (
+            f"test -x {_FW_ARMOR_DEST} && grep -q sanctum-singlenat-armor {_FW_POST_MAIN}"
+        )
+        return ["ssh", fw, remote]
+
+    def stage(self) -> OpResult:
+        """PRE-DMZ (FIX-2): deploy the kit + STRUCTURALLY arm it, fail-closed + fail-fast.
+
+        Runs the SAME ordered :meth:`_steps` deploy as :meth:`install` (idempotent —
+        ``grep -q`` guards the post_main wire, ``scp`` overwrites, the boot-armor run
+        is re-entrant) so the ``/32`` DHCP-supersede hook + MTU clamp land on the box
+        WHILE the LAN is still healthy and the box is reachable. It then runs a
+        STRUCTURAL armed check (:meth:`_armed_check_argv`) — the hook file is present +
+        executable + wired into ``post_main.sh`` — NOT the HEALTHY egress confirm,
+        which cannot pass before single-NAT is live.
+
+        This is the stage that closes the 2026-06-26 un-armored window: with the
+        supersede already installed, the instant the post-reboot DMZ lease arrives
+        carrying Bell's poison ``/1`` it is pinned to ``/32`` + on-link gateway,
+        instead of collapsing the ``10.x`` LAN. Fail-closed (any non-zero/raising
+        step → ``ok=False``) and fail-FAST (the first failed step short-circuits) so
+        a half-deployed armor never fans out further calls — and the rails roll the
+        flip back BEFORE Advanced DMZ is ever engaged.
+        """
+        steps = self._steps()
+        for name, argv in steps:
+            try:
+                code = self._runner(argv)
+            except Exception as exc:  # a raising runner must fail-closed, not escape the seam
+                return OpResult(
+                    ok=False,
+                    detail=f"armor stage failed at step {name!r} (raised: {exc})",
+                )
+            if code != 0:
+                return OpResult(
+                    ok=False,
+                    detail=f"armor stage failed at step {name!r} (exit {code})",
+                )
+        # Every deploy step landed. STRUCTURAL armed check (NOT the HEALTHY egress
+        # confirm — single-NAT is not live yet): the /32 hook must be present + wired.
+        try:
+            armed = self._runner(self._armed_check_argv())
+        except Exception as exc:
+            return OpResult(
+                ok=False,
+                detail=f"armor stage armed-check could not run: {exc}",
+            )
+        if armed != 0:
+            return OpResult(
+                ok=False,
+                detail=(
+                    "armor stage: the /32 hook is NOT armed on the box "
+                    "(hook-file / post_main.sh wiring check failed) — refusing to "
+                    "engage DMZ over an un-armored WAN"
+                ),
+            )
+        return OpResult(
+            ok=True,
+            detail=f"armor staged + armed ({len(steps)} deploy steps, /32 hook wired)",
+        )
+
     def _confirm_healthy(self) -> OpResult | None:
         """Run the README confirm gate; return an ``ok=False`` OpResult, or None if HEALTHY.
 

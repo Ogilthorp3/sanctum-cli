@@ -30,12 +30,17 @@ import pytest
 from sanctum_cli.devices import flip
 
 # The canonical, ordered cutover stages the runbook performs. Derived from the
-# attended single-NAT runbook + the armor README (preflight gate → WAN→DHCP →
-# Advanced DMZ → hub reboot → observe the downstream lease → install armor →
-# verify reachability → arm the watchdog), NOT copied from the production tuple.
+# corrected (post-06-26) attended single-NAT runbook + the armor README: preflight
+# gate → WAN→DHCP → **STAGE the /32 armor while the LAN is still healthy** →
+# Advanced DMZ → hub reboot → observe the downstream lease → confirm/install armor →
+# verify reachability → arm the watchdog. The armor MUST be staged BEFORE DMZ
+# engages + the hub reboots (FIX-2) so the box pulls Bell's poison /1 with the /32
+# supersede already in place — never the un-armored window that collapsed the LAN on
+# 06-26. Authored from the runbook order, NOT copied from the production tuple.
 EXPECTED_ORDER = (
     "preflight",
     "wan_dhcp",
+    "stage_armor",
     "enable_dmz",
     "hub_reboot",
     "observe_lease",
@@ -54,6 +59,23 @@ def test_flip_stages_is_the_canonical_ordered_tuple() -> None:
     """FLIP_STAGES is the exact attended-cutover order, as a tuple (immutable)."""
     assert isinstance(flip.FLIP_STAGES, tuple)
     assert flip.FLIP_STAGES == EXPECTED_ORDER
+
+
+def test_flip_stages_armor_before_dmz_engage_and_reboot() -> None:
+    """FIX-2 (the ordering CONTRACT): the /32 armor is STAGED strictly BEFORE the
+    DMZ engages AND before the hub reboots.
+
+    On 2026-06-26 the armor was installed AFTER enable_dmz + hub_reboot, so the box
+    pulled Bell's poison /1 lease un-armored and the LAN collapsed. The corrected
+    machine stages the armor while the LAN is still healthy, so the /32 supersede is
+    already in place the instant the post-reboot DMZ lease arrives. This pins the
+    relative order — not just the field — so a future re-shuffle that re-opens the
+    un-armored window fails here.
+    """
+    stages = flip.FLIP_STAGES
+    assert "stage_armor" in stages, "the flip must have a pre-DMZ armor-staging stage"
+    assert stages.index("stage_armor") < stages.index("enable_dmz")
+    assert stages.index("stage_armor") < stages.index("hub_reboot")
 
 
 # ── next_stage: the happy advance + the rollback fork ─────────────────────────
@@ -204,3 +226,65 @@ def test_gate_ok_refuses_without_out_of_band_path() -> None:
     """No out-of-band reachability → refuse: a flip that drops the WAN with no
     recovery path could strand the household dark with no way back in."""
     assert flip.gate_ok(out_of_band_reachable=False) is False
+
+
+# ── evaluate_interlock: the fail-closed 3-precondition gate (FIX-3) ───────────
+#
+# The 06-26 strand engaged DMZ with NO armor staged and only a LAN-bound recovery
+# channel that died with the LAN. The prevent-interlock refuses to engage DMZ
+# unless, AT THE MOMENT of the op, ALL THREE hold: (a) the out-of-band channel is
+# proven-live, (b) the /32 armor is staged, (c) a rollback baseline is staged. The
+# brain is a pure AND-gate (no I/O); these author the truth table directly.
+
+
+def test_interlocked_stages_includes_enable_dmz() -> None:
+    """The DMZ-engage stage is the one guarded by the prevent-interlock."""
+    assert "enable_dmz" in flip.INTERLOCKED_STAGES
+
+
+def test_evaluate_interlock_engages_only_when_all_three_hold() -> None:
+    """Engage iff OOB-live AND armor-staged AND rollback-staged — the AND-gate."""
+    d = flip.evaluate_interlock(
+        oob_channel_live=True, armor_staged=True, rollback_staged=True
+    )
+    assert d.engage is True
+    assert d.reason  # carries a legible "all proven" reason
+
+
+@pytest.mark.parametrize(
+    ("oob", "armor", "rb"),
+    [
+        (False, True, True),
+        (True, False, True),
+        (True, True, False),
+        (False, False, True),
+        (False, True, False),
+        (True, False, False),
+        (False, False, False),
+    ],
+)
+def test_evaluate_interlock_refuses_when_any_precondition_absent(
+    oob: bool, armor: bool, rb: bool
+) -> None:
+    """Fail-closed: if ANY of the three preconditions is absent, refuse to engage.
+
+    This is the gate that, had it existed on 06-26, would have refused the cutover
+    (no armor staged + only a LAN-bound OOB) instead of engaging DMZ un-armored.
+    """
+    d = flip.evaluate_interlock(
+        oob_channel_live=oob, armor_staged=armor, rollback_staged=rb
+    )
+    assert d.engage is False
+    assert d.reason  # a refusal must say WHY
+
+
+def test_evaluate_interlock_reason_names_each_missing_precondition() -> None:
+    """A refusal with ALL three down names each missing precondition (legible)."""
+    d = flip.evaluate_interlock(
+        oob_channel_live=False, armor_staged=False, rollback_staged=False
+    )
+    assert d.engage is False
+    low = d.reason.lower()
+    assert "out-of-band" in low or "out of band" in low or "tailscale" in low
+    assert "armor" in low
+    assert "rollback" in low

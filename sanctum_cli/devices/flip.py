@@ -21,12 +21,19 @@ The stages, in order (:data:`FLIP_STAGES`):
 1. ``preflight``     — sanity + the gate (see :func:`gate_ok`) before touching anything.
 2. ``wan_dhcp``      — put the hub's WAN into DHCP/PPPoE-passthrough so the
                        downstream router can obtain the public lease.
-3. ``enable_dmz``    — engage Bell Advanced DMZ (the bridge-equivalent single-NAT).
-4. ``hub_reboot``    — reboot the hub so the new WAN/DMZ config takes effect.
-5. ``observe_lease`` — read the downstream router's new WAN lease + classify it.
-6. ``apply_armor``   — install the single-NAT armor kit (self-healing /32 + MTU).
-7. ``verify``        — confirm real-site reachability through the new single NAT.
-8. ``arm``           — bootstrap the watchdog/sentinel so drift self-heals.
+3. ``stage_armor``   — install + verify the self-healing ``/32`` armor on the box
+                       WHILE THE LAN IS STILL HEALTHY (FIX-2), so the supersede is
+                       already in place when the post-DMZ lease arrives. The armor
+                       MUST be staged before DMZ engages — on 2026-06-26 it landed
+                       AFTER the reboot, so the box pulled Bell's poison ``/1``
+                       un-armored and the LAN collapsed.
+4. ``enable_dmz``    — engage Bell Advanced DMZ (the bridge-equivalent single-NAT).
+5. ``hub_reboot``    — reboot the hub so the new WAN/DMZ config takes effect.
+6. ``observe_lease`` — read the downstream router's new WAN lease + classify it.
+7. ``apply_armor``   — post-cutover: confirm the armor came up HEALTHY now single-NAT
+                       is live (the deploy already landed at ``stage_armor``).
+8. ``verify``        — confirm real-site reachability through the new single NAT.
+9. ``arm``           — bootstrap the watchdog/sentinel so drift self-heals.
 
 The contract mirrors the rails (:mod:`sanctum_cli.devices.rails`): any stage
 that fails unwinds the whole flip. :func:`next_stage` returns the next stage on
@@ -36,6 +43,7 @@ done — so the driver loop is a pure fold over (done-so-far, last-outcome).
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -46,9 +54,15 @@ if TYPE_CHECKING:
 FLIP_STAGES: tuple[str, ...] = (
     "preflight",
     "wan_dhcp",
+    # FIX-2: the /32 armor is STAGED (deployed + structurally verified) while the LAN
+    # is still healthy, BEFORE Advanced DMZ engages and the hub reboots — so the box
+    # never pulls Bell's poison /1 lease un-armored (the 06-26 LAN-collapse window).
+    "stage_armor",
     "enable_dmz",
     "hub_reboot",
     "observe_lease",
+    # Post-cutover: the deploy already landed at ``stage_armor``; this confirms the
+    # armor came up HEALTHY now that single-NAT is actually live.
     "apply_armor",
     "verify",
     "arm",
@@ -172,3 +186,70 @@ def gate_ok(out_of_band_reachable: bool) -> bool:
     reachability.
     """
     return out_of_band_reachable
+
+
+# ── the prevent-interlock (FIX-3): a fail-closed gate AT the DMZ-engage moment ─
+#
+# ``gate_ok`` is the cheap START precondition checked once. The interlock is the
+# AUTHORITATIVE gate evaluated AT THE MOMENT DMZ is engaged (the irreversible step
+# that hands the WAN to Bell's DMZ), so it reflects state *right then* — a channel
+# can die between preflight and engage. On 2026-06-26 the cutover engaged DMZ with
+# NO armor staged and only a LAN-bound recovery channel that died with the LAN; the
+# interlock refuses to engage unless all three of those holes are closed.
+
+# The stage(s) whose mutation is guarded by :func:`evaluate_interlock`. ``enable_dmz``
+# is the irreversible "hand the WAN to Bell's DMZ" step — the one that must never
+# fire unless the three preconditions hold at that instant.
+INTERLOCKED_STAGES: frozenset[str] = frozenset({"enable_dmz"})
+
+
+@dataclass(frozen=True)
+class InterlockDecision:
+    """The prevent-interlock's verdict: ``engage`` plus a legible ``reason``.
+
+    ``engage`` is True only when every precondition holds; on a refusal it is False
+    and ``reason`` names each missing precondition so the operator (and the audit
+    log) sees exactly WHY the cutover refused to engage DMZ.
+    """
+
+    engage: bool
+    reason: str
+
+
+def evaluate_interlock(
+    *, oob_channel_live: bool, armor_staged: bool, rollback_staged: bool
+) -> InterlockDecision:
+    """Fail-closed AND-gate: may we engage DMZ *right now*? Pure, no I/O.
+
+    Engage iff ALL THREE hold at the moment of the op:
+
+    * ``oob_channel_live`` — the LAN-INDEPENDENT out-of-band channel (the
+      Tailscale-on-box path) is proven-live, so a cutover that drops the LAN can
+      still be recovered. (06-26: the LAN-bound channel died with the LAN.)
+    * ``armor_staged`` — the self-healing ``/32`` armor is already staged on the
+      box, so Bell's poison ``/1`` lease is superseded the instant it arrives.
+      (06-26: armor was installed AFTER the reboot — too late.)
+    * ``rollback_staged`` — a rollback baseline is captured, so a failed engage can
+      be unwound.
+
+    Any precondition absent → ``engage=False`` with a reason naming what is missing.
+    The brain is pure so every branch is exercised with a hostile fixture; the I/O
+    probes that produce these booleans live at the boundary (the CLI / the
+    :mod:`sanctum_cli.devices.interlock` Tailscale probe / the snapshot rails).
+    """
+    missing: list[str] = []
+    if not oob_channel_live:
+        missing.append("out-of-band channel not proven-live (Tailscale-on-box)")
+    if not armor_staged:
+        missing.append("/32 armor not staged on the box")
+    if not rollback_staged:
+        missing.append("rollback baseline not staged")
+    if missing:
+        return InterlockDecision(
+            engage=False,
+            reason="refused to engage DMZ — " + "; ".join(missing),
+        )
+    return InterlockDecision(
+        engage=True,
+        reason="interlock OK — OOB channel proven-live, /32 armor staged, rollback staged",
+    )

@@ -12,7 +12,7 @@ from rich.markup import escape
 
 from sanctum_cli import config
 from sanctum_cli.devices import firewalla as firewalla_provider
-from sanctum_cli.devices import intents, rails, registry, sagemcom
+from sanctum_cli.devices import intents, interlock, rails, registry, sagemcom
 from sanctum_cli.devices import orbi as orbi_provider
 from sanctum_cli.devices import transport as transport_router
 from sanctum_cli.devices.armor import SinglenatArmorInstaller
@@ -661,26 +661,35 @@ def _tcp_reachable(host: str, port: int) -> bool:
 
 
 def _out_of_band_reachable() -> bool:
-    """Is the cutover's recovery path reachable right now? Two-sided, fail-closed.
+    """Is the cutover's recovery path reachable right now? Fail-closed, Tailscale-first.
 
     The flip's start precondition (:func:`flip.gate_ok`): the cutover briefly drops
-    the WAN, so the recovery path must exist before we touch anything. Recovery is
-    TWO hosts, and BOTH must be reachable:
+    the WAN, so the recovery path must exist before we touch anything. After 06-26,
+    the recovery path is checked in THREE layers, ALL of which must hold:
 
-    * the **Mini jump host** (``_OUT_OF_BAND_HOST``) — the out-of-band link the
-      operator reaches the box over if the cutover strands the hub; and
+    * **PRIMARY — the LAN-INDEPENDENT Tailscale-on-box channel** (FIX-3): a real
+      root-SSH round-trip over the tailnet to ``ts-firewalla`` (see
+      :func:`sanctum_cli.devices.interlock.tailscale_oob_live`). This is the ONLY
+      channel proven to survive a LAN collapse — on 06-26 the LAN-bound channels
+      below were up at gate-check time and then died WITH the LAN, so a gate that
+      trusted only them green-lit a cutover it could not recover. The tailnet path
+      is the safety net that makes the cutover survivable, so it is checked FIRST.
+    * the **Mini jump host** (``_OUT_OF_BAND_HOST``) — the LAN out-of-band link; and
     * the **Firewalla** (:func:`_firewalla_recovery_host`, the default gateway) —
-      the host that actually PERFORMS the recovery re-lease: the rollback fires the
-      ``dhcp_release`` op, which SSHes to the Firewalla to release + re-acquire the
-      WAN lease. A gate that probed only the Mini would green-light a cutover whose
-      rollback can never re-lease the WAN (the household stranded dark on an
-      un-runnable recovery) — the exact fail-to-DARK this gate exists to prevent.
+      the host that actually PERFORMS the recovery re-lease (the rollback's
+      ``dhcp_release`` SSHes it). Retained as secondary belt-and-suspenders.
 
-    Both are probed on the SSH port the recovery transport uses. A failure to
-    connect to EITHER — or a Firewalla recovery host that does not even resolve —
-    means no usable recovery path, and the gate refuses (fail-closed). ``--force``
-    waives the human confirm prompt but NEVER this probe.
+    Any layer failing — the tailnet round-trip not live, either LAN host
+    unreachable, or no Firewalla recovery host resolving — means no usable recovery
+    path, and the gate refuses (fail-closed). ``--force`` waives the human confirm
+    prompt but NEVER this probe. The moment-of-op interlock at the DMZ-engage seam
+    re-runs this same check (passed as ``oob_probe``) so a channel that dies between
+    preflight and engage is caught at the instant it matters.
     """
+    # PRIMARY: the LAN-independent Tailscale-on-box channel (the only one that
+    # survives a LAN collapse). Fail-closed if the root-SSH round-trip is not live.
+    if not interlock.tailscale_oob_live():
+        return False
     if not _tcp_reachable(_OUT_OF_BAND_HOST, _OUT_OF_BAND_PORT):
         return False
     fw_host = _firewalla_recovery_host()
@@ -814,6 +823,11 @@ def net_single_nat(
                 _build_armor_installer() if apply else None,
                 apply=apply,
                 out_of_band_reachable=oob,
+                # FIX-3: the live, moment-of-op recovery re-probe the prevent-interlock
+                # consults at the DMZ-engage seam — the SAME recovery check (Tailscale
+                # round-trip first), re-sampled at the instant DMZ is engaged so a
+                # channel that died since preflight refuses the engage (zero DMZ writes).
+                oob_probe=_out_of_band_reachable if apply else None,
                 # Wire the REAL per-stage probes (honest-verify): the ``verify``
                 # stage runs the SAME ``net.verify.verify`` real-world probe that
                 # net_optimize/the old single_nat used — only a single-NAT

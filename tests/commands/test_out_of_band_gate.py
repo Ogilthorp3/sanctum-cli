@@ -58,19 +58,32 @@ class _SocketProbe:
         return _Conn()
 
 
-def _patch(monkeypatch: pytest.MonkeyPatch, probe: _SocketProbe, *, gateway: str) -> None:
+def _patch(
+    monkeypatch: pytest.MonkeyPatch,
+    probe: _SocketProbe,
+    *,
+    gateway: str,
+    tailscale_live: bool = True,
+) -> None:
     """Point the gate at the recording socket probe + a fixed Firewalla gateway.
 
     The Firewalla recovery host is resolved the SAME way ``_build_runner`` resolves
     it for the ``dhcp_release`` op — the parsed default gateway — so the gate and
     the recovery transport target the identical box. We stub that resolution to a
     fixed IP and the socket connect to the recorder; no real route/socket is used.
+
+    The PRIMARY (FIX-3) Tailscale-on-box check is a real root-SSH round-trip, NOT a
+    socket connect, so it is stubbed separately via ``interlock.tailscale_oob_live``
+    (defaults to live so the LAN-side assertions below still exercise).
     """
     monkeypatch.setattr(net_cmd.socket, "create_connection", probe.__call__)
     monkeypatch.setattr(
         net_cmd.detect, "parse_default_gateway", lambda _out: gateway
     )
     monkeypatch.setattr(net_cmd.system, "real_runner", lambda _tag: "")
+    monkeypatch.setattr(
+        net_cmd.interlock, "tailscale_oob_live", lambda **_kw: tailscale_live
+    )
 
 
 def test_gate_probes_both_the_mini_and_the_firewalla(
@@ -127,3 +140,27 @@ def test_gate_refuses_when_no_firewalla_gateway_resolves(
     probe = _SocketProbe()
     _patch(monkeypatch, probe, gateway="")  # no gateway parsed
     assert net_cmd._out_of_band_reachable() is False
+
+
+def test_gate_refuses_when_tailscale_oob_not_live_even_if_lan_up(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FIX-3: the LAN-independent Tailscale channel is the PRIMARY gate.
+
+    With the Mini + Firewalla both reachable on the LAN but the Tailscale-on-box
+    root-SSH round-trip NOT live, the gate must REFUSE — the LAN-bound hosts are
+    exactly the ones that died with the LAN on 06-26, so without the tailnet safety
+    net there is no channel proven to survive the cutover.
+    """
+    probe = _SocketProbe()  # both LAN hosts reachable
+    _patch(monkeypatch, probe, gateway="10.0.0.1", tailscale_live=False)
+    assert net_cmd._out_of_band_reachable() is False
+
+
+def test_gate_requires_tailscale_then_both_lan_hosts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """All three layers live (Tailscale + Mini + Firewalla) → the gate passes."""
+    probe = _SocketProbe()
+    _patch(monkeypatch, probe, gateway="10.0.0.1", tailscale_live=True)
+    assert net_cmd._out_of_band_reachable() is True

@@ -198,11 +198,25 @@ class ScriptedLeaseRunner:
 
 
 class FakeArmor:
-    """Mock single-NAT armor installer: records the install, never touches disk."""
+    """Mock single-NAT armor installer: records stage + install, never touches disk.
 
-    def __init__(self, *, ok: bool = True) -> None:
+    Two phases (FIX-2): ``stage()`` is the PRE-DMZ deploy + structural armed verify
+    (the /32 hook lands on the box while the LAN is healthy); ``install()`` is the
+    post-cutover HEALTHY confirm. Both are recorded so a test can prove staging
+    happened before DMZ engaged, and that a dry-run fires neither.
+    """
+
+    def __init__(self, *, ok: bool = True, stage_ok: bool = True) -> None:
         self.installed = 0
+        self.staged = 0
         self._ok = ok
+        self._stage_ok = stage_ok
+
+    def stage(self) -> OpResult:
+        self.staged += 1
+        if not self._stage_ok:
+            return OpResult(ok=False, detail="armor stage failed")
+        return OpResult(ok=True, detail="armor staged")
 
     def install(self) -> OpResult:
         self.installed += 1
@@ -232,6 +246,7 @@ def test_dmz_dry_run_makes_zero_device_writes() -> None:
     assert hub.reboot_calls == 0
     assert hub.rollback_calls == 0
     assert armor.installed == 0
+    assert armor.staged == 0  # the armor is NOT even staged on a dry-run
     assert runner.calls == []
     assert hub.get(DMZ_PATH) is None  # untouched (firmware never surfaced the leaf)
 
@@ -310,8 +325,184 @@ def test_dmz_apply_walks_stages_and_commits(tmp_path: Path) -> None:
     assert armor.installed == 1
     # A successful flip never rolls back.
     assert hub.rollback_calls == 0
+    # The armor was STAGED (pre-DMZ) on the apply path.
+    assert armor.staged == 1
     # It drove the runner (WAN→DHCP + observe-lease).
     assert runner.calls
+
+
+def test_dmz_stages_armor_before_engaging_dmz(tmp_path: Path) -> None:
+    """FIX-2 (the ORDERING contract at the orchestrator): the flip records the armor
+    stage BEFORE it engages Advanced DMZ.
+
+    A recording hub + recording armor write into ONE shared event log, so the
+    relative order of ``armor_stage`` and the DMZ-engage ``set`` is observable. The
+    armor MUST be staged first (the /32 hook on the box while the LAN is healthy) so
+    the un-armored poison-/1 window the 06-26 strand fell into is structurally
+    impossible. Tests the CONTRACT (a real ``set`` argv vs a real ``stage`` call),
+    not the FLIP_STAGES field alone — driving the real ``_run_stage`` walk.
+    """
+    from sanctum_cli.devices.intents import single_nat_dmz
+
+    events: list[str] = []
+
+    class OrderHub(FakeHub):
+        def set(self, path: str, value: str) -> OpResult:
+            if path == DMZ_PATH and value == "true":
+                events.append("dmz_engage")
+            return super().set(path, value)
+
+    class OrderArmor(FakeArmor):
+        def stage(self) -> OpResult:
+            events.append("armor_stage")
+            return super().stage()
+
+    hub, runner, armor = OrderHub(), FakeRunner(), OrderArmor()
+    res = single_nat_dmz(
+        hub,
+        runner,
+        armor,
+        apply=True,
+        out_of_band_reachable=True,
+        force=True,
+        stage_verifiers=_all_pass_verifiers(),
+        log_path=tmp_path / "audit.jsonl",
+    )
+    assert res.result is not None
+    assert res.result.ok is True
+    # The armor stage and the DMZ-engage both happened …
+    assert "armor_stage" in events
+    assert "dmz_engage" in events
+    # … and the armor was staged STRICTLY before the DMZ engaged (no un-armored /1).
+    assert events.index("armor_stage") < events.index("dmz_engage")
+
+
+def test_dmz_stage_armor_failure_rolls_back_before_dmz_engaged(tmp_path: Path) -> None:
+    """A failed armor STAGE (pre-DMZ) unwinds the flip WITHOUT ever engaging DMZ.
+
+    Because staging now precedes enable_dmz, a stage that reports ok=False must trip
+    the rails before the DMZ is touched — so the worst case is a clean, still-double-
+    NAT box, never a half-engaged un-armored cutover.
+    """
+    from sanctum_cli.devices.intents import single_nat_dmz
+
+    hub, runner, armor = FakeHub(), FakeRunner(), FakeArmor(stage_ok=False)
+    res = single_nat_dmz(
+        hub,
+        runner,
+        armor,
+        apply=True,
+        out_of_band_reachable=True,
+        force=True,
+        stage_verifiers=_all_pass_verifiers(),
+        log_path=tmp_path / "audit.jsonl",
+    )
+    assert res.result is not None
+    assert res.result.ok is False
+    assert armor.staged == 1  # it tried to stage
+    assert armor.installed == 0  # never reached the post-cutover install
+    # DMZ was NEVER engaged (the stage failed before enable_dmz).
+    assert (DMZ_PATH, "true") not in hub.set_calls
+
+
+# ── FIX-3: the prevent-interlock at the enable_dmz seam (fail-closed) ─────────
+#
+# The authoritative gate fires AT THE MOMENT DMZ is engaged, not just once at the
+# top of flight: a channel can die between preflight and enable_dmz. ``oob_probe``
+# is the live moment-of-op Tailscale re-check (injectable so it is testable
+# offline). When it (or any precondition) is down, the interlock refuses and the
+# DMZ ``set`` is NEVER fired — the flip fails closed, never fail-to-DARK.
+
+
+def test_dmz_interlock_refuses_engage_when_moment_of_op_oob_probe_down(
+    tmp_path: Path,
+) -> None:
+    """FIX-3: a live OOB probe that is DOWN at the moment of engage refuses the DMZ
+    set — even though the top-of-flight ``out_of_band_reachable`` gate passed.
+
+    This is the 06-26 lesson encoded: the LAN was up at gate-check time, then
+    collapsed. The moment-of-op interlock re-probes the LAN-INDEPENDENT channel and
+    refuses to engage DMZ if it is not live RIGHT NOW — so ``set(DMZ, engaged)`` is
+    never called and the household is never stranded behind an un-recoverable WAN.
+    """
+    from sanctum_cli.devices.intents import single_nat_dmz
+
+    hub, runner, armor = FakeHub(), FakeRunner(), FakeArmor()
+    res = single_nat_dmz(
+        hub,
+        runner,
+        armor,
+        apply=True,
+        out_of_band_reachable=True,  # the cheap top-of-flight gate passes …
+        oob_probe=lambda: False,  # … but the live moment-of-op re-probe is DOWN
+        force=True,
+        stage_verifiers=_all_pass_verifiers(),
+        log_path=tmp_path / "audit.jsonl",
+    )
+    assert res.applied is True
+    assert res.result is not None
+    assert res.result.ok is False
+    # The DMZ was NEVER engaged — the interlock refused before the set() fired.
+    assert (DMZ_PATH, "true") not in hub.set_calls
+    # The armor WAS staged (pre-DMZ) before the interlock refused at enable_dmz …
+    assert armor.staged == 1
+    # … but the post-cutover install never ran (we never got past enable_dmz).
+    assert armor.installed == 0
+    # The flip unwound on the still-disengaged baseline (idempotent — WAN intact).
+    assert hub.rollback_calls == 1
+    assert hub.get(DMZ_PATH) == "false"
+
+
+def test_dmz_interlock_is_not_waived_by_force(tmp_path: Path) -> None:
+    """``--force`` waives only the human confirm; it must NEVER waive the interlock.
+
+    With force=True and the live OOB probe down, the flip must STILL refuse to
+    engage DMZ — force is not a bypass for the recovery-path safety gate.
+    """
+    from sanctum_cli.devices.intents import single_nat_dmz
+
+    hub, runner, armor = FakeHub(), FakeRunner(), FakeArmor()
+    res = single_nat_dmz(
+        hub,
+        runner,
+        armor,
+        apply=True,
+        out_of_band_reachable=True,
+        oob_probe=lambda: False,
+        force=True,  # force does NOT waive the interlock
+        stage_verifiers=_all_pass_verifiers(),
+        log_path=tmp_path / "audit.jsonl",
+    )
+    assert res.result is not None
+    assert res.result.ok is False
+    assert (DMZ_PATH, "true") not in hub.set_calls
+
+
+def test_dmz_interlock_engages_when_oob_probe_live(tmp_path: Path) -> None:
+    """The happy moment-of-op path: a live OOB probe lets the interlock engage DMZ.
+
+    Mirror of the refusal test — with the live probe TRUE (and armor staged +
+    rollback staged, both true by construction at enable_dmz), the interlock engages
+    and the cutover commits. Proves the gate is not stuck-closed.
+    """
+    from sanctum_cli.devices.intents import single_nat_dmz
+
+    hub, runner, armor = FakeHub(), FakeRunner(), FakeArmor()
+    res = single_nat_dmz(
+        hub,
+        runner,
+        armor,
+        apply=True,
+        out_of_band_reachable=True,
+        oob_probe=lambda: True,
+        force=True,
+        stage_verifiers=_all_pass_verifiers(),
+        log_path=tmp_path / "audit.jsonl",
+    )
+    assert res.result is not None
+    assert res.result.ok is True
+    assert (DMZ_PATH, "true") in hub.set_calls
+    assert hub.rollback_calls == 0
 
 
 def test_dmz_apply_confirm_declined_makes_zero_writes(tmp_path: Path) -> None:

@@ -224,19 +224,31 @@ class RebootingProvider(Protocol):
 
 @runtime_checkable
 class ArmorInstaller(Protocol):
-    """The single-NAT armor kit installer seam (stage ``apply_armor``).
+    """The single-NAT armor kit installer seam (stages ``stage_armor`` + ``apply_armor``).
 
     The armor kit (``sanctum-singlenat-armor``: the self-healing ``/32`` + MTU
     DHCP hook, the watchdog, the OTA sentinel) is installed onto the Firewalla +
-    the Mini as part of the cutover. The orchestrator drives it through this one
-    method so the install is mockable in tests and never touches real hosts in the
-    overnight build. ``install`` returns an :class:`OpResult`: an ``ok=False``
-    (the install was refused/failed) is treated by the rails exactly like any
-    other failed stage — the whole flip unwinds.
+    the Mini as part of the cutover. The orchestrator drives it through TWO methods
+    so the install is mockable in tests and never touches real hosts in the
+    overnight build:
+
+    * :meth:`stage` — the PRE-DMZ stage (FIX-2): deploy the ``/32`` hook + MTU clamp
+      onto the box and verify it is STRUCTURALLY ARMED (hook present + wired) WHILE
+      the LAN is still healthy, so the supersede is in place the instant the
+      post-DMZ poison ``/1`` lease arrives. Run before ``enable_dmz``.
+    * :meth:`install` — the POST-cutover stage (``apply_armor``): confirm the armor
+      came up HEALTHY now that single-NAT is actually live.
+
+    Each returns an :class:`OpResult`: an ``ok=False`` (refused/failed) is treated
+    by the rails exactly like any other failed stage — the whole flip unwinds.
     """
 
+    def stage(self) -> OpResult:
+        """Deploy + structurally arm the kit pre-DMZ, returning an :class:`OpResult`."""
+        ...
+
     def install(self) -> OpResult:
-        """Install the armor kit, returning an :class:`OpResult` (ok=False on failure)."""
+        """Confirm the armor is HEALTHY post-cutover, returning an :class:`OpResult`."""
         ...
 
 
@@ -293,12 +305,13 @@ def _dmz_plan(op: CapabilityOp) -> list[str]:
         "single-NAT (Bell Advanced DMZ + /32) cutover plan:",
         "  1. preflight: confirm an out-of-band recovery path exists",
         "  2. put the hub WAN into DHCP/PPPoE passthrough",
-        f"  3. enable Advanced DMZ: set {op.path} = {op.engaged}",
-        "  4. reboot the hub so the new WAN/DMZ config takes effect",
-        "  5. observe the downstream router's new WAN lease + classify it",
-        "  6. install the single-NAT armor kit (self-healing /32 + MTU)",
-        "  7. verify real-site reachability through the new single NAT",
-        "  8. arm the watchdog/sentinel so drift self-heals",
+        "  3. STAGE the self-healing /32 armor on the box (while the LAN is healthy)",
+        f"  4. enable Advanced DMZ: set {op.path} = {op.engaged}",
+        "  5. reboot the hub so the new WAN/DMZ config takes effect",
+        "  6. observe the downstream router's new WAN lease + classify it",
+        "  7. confirm the /32 armor came up HEALTHY now single-NAT is live",
+        "  8. verify real-site reachability through the new single NAT",
+        "  9. arm the watchdog/sentinel so drift self-heals",
         "  on any stage failure: roll back — disable DMZ, then re-lease DHCP",
         f"  note: {MTU_NOTE}",
     ]
@@ -541,6 +554,12 @@ def _run_stage(
     """
     if stage == "wan_dhcp":
         runner(_RUNNER_WAN_DHCP)
+    elif stage == "stage_armor":
+        # FIX-2: deploy + structurally arm the /32 armor on the box BEFORE DMZ
+        # engages, while the LAN is still healthy, so the supersede is in place when
+        # the post-reboot poison /1 lease arrives. A failed stage unwinds the flip
+        # before the hub is ever touched (worst case: a clean, still-double-NAT box).
+        _require_ok(armor.stage(), stage)
     elif stage == "enable_dmz":
         _require_ok(provider.set(op.path, op.engaged), stage)
     elif stage == "hub_reboot":
@@ -548,6 +567,8 @@ def _run_stage(
     elif stage == "observe_lease":
         _observe_lease(runner)
     elif stage == "apply_armor":
+        # Post-cutover: confirm the armor (deployed at stage_armor) came up HEALTHY
+        # now single-NAT is actually live.
         _require_ok(armor.install(), stage)
     elif stage == "arm":
         runner(_RUNNER_ARMOR_ARM)
@@ -594,6 +615,43 @@ def _require_ok(result: OpResult | None, stage: str) -> None:
         raise _StageError(msg)
 
 
+def _assert_interlock(
+    provider: DeviceProvider,
+    done: list[str],
+    *,
+    oob_probe: Callable[[], bool] | None,
+    out_of_band_reachable: bool,
+) -> None:
+    """Fail-closed prevent-interlock, evaluated AT the DMZ-engage moment (FIX-3).
+
+    Consults the pure :func:`flip.evaluate_interlock` with the three preconditions
+    sampled RIGHT NOW, immediately before the irreversible ``set(DMZ, engaged)``:
+
+    * **OOB channel proven-live** — ``oob_probe()`` if injected (the live,
+      moment-of-op Tailscale-on-box re-check, the LAN-independent channel that
+      survives a LAN collapse), else the cheap top-of-flight ``out_of_band_reachable``
+      boolean. A channel can die between preflight and engage, so the live re-probe
+      is the authoritative signal.
+    * **armor staged** — ``"stage_armor" in done``: the pre-DMZ armor stage actually
+      completed in THIS walk (FIX-2 puts it before ``enable_dmz``), so the ``/32``
+      supersede is on the box before the poison ``/1`` can land.
+    * **rollback staged** — a non-empty disengaged baseline exists to unwind to.
+
+    Raises :class:`_StageError` (which ``guarded_apply`` catches → rollback) if any
+    precondition is absent, so a refused interlock fires ZERO DMZ writes and the WAN
+    is never dropped. ``--force`` does not reach here — it only waives the human
+    confirm in ``guarded_apply``; the interlock is never waived.
+    """
+    oob_live = oob_probe() if oob_probe is not None else out_of_band_reachable
+    decision = flip.evaluate_interlock(
+        oob_channel_live=oob_live,
+        armor_staged="stage_armor" in done,
+        rollback_staged=bool(disengaged_baseline_snapshot(provider).data),
+    )
+    if not decision.engage:
+        raise _StageError(decision.reason)
+
+
 def _default_stage_verifier() -> bool:
     """Default per-stage probe when the caller injects none: conservatively pass.
 
@@ -613,6 +671,7 @@ def single_nat_dmz(
     *,
     apply: bool = False,
     out_of_band_reachable: bool = True,
+    oob_probe: Callable[[], bool] | None = None,
     stage_verifiers: Mapping[str, Callable[[], bool]] | None = None,
     confirm: Callable[[str], bool] | None = None,
     force: bool = False,
@@ -644,6 +703,15 @@ def single_nat_dmz(
       makes zero writes: the cutover drops the WAN and a misstep could strand the
       household dark with no recovery path (:func:`flip.gate_ok`). Checked before
       any mutation.
+    * ``oob_probe`` is the LIVE, moment-of-op recovery re-check the prevent-interlock
+      (FIX-3) consults AT the ``enable_dmz`` seam — the authoritative gate. When
+      injected (the CLI passes the Tailscale-first ``_out_of_band_reachable``) it is
+      re-sampled immediately before the irreversible DMZ ``set``, so a channel that
+      died between preflight and engage refuses the engage with ZERO DMZ writes. When
+      ``None`` the interlock falls back to the ``out_of_band_reachable`` boolean
+      already proven at the top. The interlock ALSO requires the ``/32`` armor staged
+      (``stage_armor`` completed before ``enable_dmz``, FIX-2) and a rollback baseline
+      captured — fail-closed unless all three hold. ``force`` never waives it.
     * ``apply=True`` (with the gate passed) drives the stages through
       ``guarded_apply``: snapshot → confirm (unless ``force``) → walk the stages →
       on the first failed stage (I/O raised, ``ok=False`` returned, or a stage
@@ -703,6 +771,17 @@ def single_nat_dmz(
             if nxt == flip.ROLLBACK:  # defensive — last_ok is only ever True here
                 msg = "flip machine forked to ROLLBACK"
                 raise _StageError(msg)
+            # FIX-3: the fail-closed prevent-interlock fires AT the DMZ-engage moment
+            # — immediately before the irreversible set() — re-sampling (OOB live,
+            # armor staged, rollback staged) right now. A refusal raises before the
+            # DMZ is ever touched, so guarded_apply unwinds on the disengaged baseline.
+            if nxt in flip.INTERLOCKED_STAGES:
+                _assert_interlock(
+                    pv,
+                    done,
+                    oob_probe=oob_probe,
+                    out_of_band_reachable=out_of_band_reachable,
+                )
             verifier = verifiers.get(nxt, _default_stage_verifier)
             _run_stage(
                 nxt,
