@@ -43,7 +43,7 @@ import pytest
 # collection ERROR. The gate (``pip install -e ".[dev]"``) has it, so it runs.
 pytest.importorskip("sagemcom_api")
 
-from sanctum_cli.devices.base import Creds
+from sanctum_cli.devices.base import Creds, DeviceError
 
 BRIDGE_PATH = "Device/Services/BellNetworkCfg/SetBridgeMode"
 
@@ -333,6 +333,186 @@ def test_reboot_initiated_token_is_success_through_real_transport(
     assert action["method"] == "reboot"
     # … and the reboot-initiated token was read as SUCCESS, not a failed stage.
     assert result.ok is True
+
+
+# ─── reboot through the REAL __post return-vs-raise decision (shape-B) ────────
+#
+# The tests above mock ``__post`` (the recorder RETURNS the reply envelope
+# verbatim) — so they only ever exercise the RETURN path: a reboot-initiated token
+# that the transport RETURNS at the TOP level of the envelope. But the installed
+# ``sagemcom_api`` does NOT always return that token. When it rides at the ACTION
+# level under a top-level ``XMO_REQUEST_ACTION_ERR``, the REAL ``__post`` (NOT
+# ``__get_response``) makes the return-vs-raise decision and RAISES
+# ``UnknownException({"description": "XMO_ACTION_CALLBACK_ERR"})``. A ``reboot()``
+# whose except-clause only caught connection drops would re-raise that as a failed
+# stage = the exact 06-26 cascade (reboot mis-read as failure → rails roll back →
+# rollback's own reboot raises → DMZ left engaged). So these tests fake ONLY the
+# aiohttp *session* (NOT ``__post``), letting the genuine ``__post`` run the
+# classification the bug lives in (CLAUDE.md: don't mock the boundary the bug lives
+# in; a test cannot catch a bug it shares with the production shape-assumption).
+
+
+class _FakeAiohttpResponse:
+    """One ``aiohttp`` response: an async context manager exposing status + json/text.
+
+    Matches what the real ``SagemcomClient._SagemcomClient__post`` consumes —
+    ``async with session.post(...) as response: response.status; await
+    response.json()`` — so the genuine ``__post`` error classification (the
+    return-vs-raise decision) runs against THIS reply unchanged.
+    """
+
+    def __init__(self, payload: dict, status: int = 200) -> None:
+        self._payload = payload
+        self.status = status
+
+    async def __aenter__(self) -> _FakeAiohttpResponse:
+        return self
+
+    async def __aexit__(self, *exc: object) -> bool:
+        return False
+
+    async def json(self) -> dict:
+        return self._payload
+
+    async def text(self) -> str:
+        return json.dumps(self._payload)
+
+
+class _FakeAiohttpSession:
+    """An ``aiohttp.ClientSession`` stand-in whose ``post`` yields a scripted reply."""
+
+    def __init__(self, payload: dict) -> None:
+        self._payload = payload
+
+    def post(self, url: str, data: object = None) -> _FakeAiohttpResponse:
+        return _FakeAiohttpResponse(self._payload)
+
+    async def close(self) -> None:
+        return None
+
+
+class _RealPostClient:
+    """Provider-facing fake whose inner real client runs the genuine ``__post``.
+
+    Unlike :class:`_RealEncodingClient` (which mocks ``__post`` and so can only
+    exercise the RETURN path), this wires a real :class:`SagemcomClient` with a
+    fake aiohttp *session* — so the library's real ``__post`` runs and makes the
+    return-vs-raise decision itself. A reboot reply whose reboot-initiated token
+    rides at the ACTION level therefore RAISES (the shape-B path), exactly as it
+    would against the live Bell hub.
+    """
+
+    def __init__(self, payload: dict) -> None:
+        self._payload = payload
+        self._client: object | None = None
+
+    def _build_inner(self) -> object:
+        from sagemcom_api.client import SagemcomClient
+        from sagemcom_api.enums import EncryptionMethod
+
+        client = SagemcomClient(
+            "192.168.2.1",
+            "admin",
+            "pw",
+            EncryptionMethod.SHA512,
+            session=_FakeAiohttpSession(self._payload),
+            ssl=False,
+        )
+        client._session_id = 0  # test seam into the real client
+        return client
+
+    async def login(self) -> None:
+        self._client = self._build_inner()
+
+    async def logout(self) -> None:
+        return None
+
+    async def close(self) -> None:
+        if self._client is not None:
+            await self._client.close()  # type: ignore[attr-defined]
+
+    async def get_value_by_xpath(self, xpath: str, options: dict | None = None) -> None:
+        # Connect's best-effort _refine_brand reads a product-class leaf; return
+        # nothing so the brand stays generic (this fake only exercises reboot).
+        return None
+
+    async def _SagemcomClient__api_request_async(  # noqa: N802 - mirror the lib's name-mangled raw seam
+        self, actions: list, priority: bool = False
+    ) -> dict:
+        assert self._client is not None
+        raw = self._client._SagemcomClient__api_request_async  # type: ignore[attr-defined]
+        return await raw(actions, priority)
+
+
+def _action_level_reply(token: str) -> dict:
+    """A top-level ``XMO_REQUEST_ACTION_ERR`` with ``token`` at the ACTION level.
+
+    This is the shape the installed ``sagemcom_api.__post`` RAISES on (vs the
+    top-level shape it returns) — the reboot-initiated tokens come back this way
+    when the action callback dies with the rebooting session.
+    """
+    return {
+        "reply": {
+            "error": {"description": "XMO_REQUEST_ACTION_ERR"},
+            "actions": [{"error": {"description": token}}],
+        }
+    }
+
+
+@pytest.mark.parametrize("token", ["XMO_ACTION_CALLBACK_ERR", "XMO_REBOOTING_ERR"])
+def test_reboot_initiated_token_raised_by_real_post_is_success(
+    monkeypatch: pytest.MonkeyPatch, token: str
+) -> None:
+    """FIX-1 shape-B: a reboot-initiated token the REAL ``__post`` RAISES is SUCCESS.
+
+    With only the aiohttp session faked, the genuine ``sagemcom_api`` ``__post``
+    runs its real classification: a reboot-initiated token at the action level under
+    ``XMO_REQUEST_ACTION_ERR`` is ``raise UnknownException({"description": token})``.
+    ``reboot()`` MUST read that raise as the hub tearing down to reboot (ok=True),
+    NOT a failed stage — otherwise the rails roll back on a reboot that actually
+    fired (the 06-26 cascade). This is the hostile-input path the ``__post``-mocking
+    tests can never reach (a test cannot catch a bug it shares).
+    """
+    from sanctum_cli.devices.sagemcom import SagemcomHubProvider
+
+    fake = _RealPostClient(_action_level_reply(token))
+    monkeypatch.setattr("sanctum_cli.devices.sagemcom._make_client", lambda creds: fake)
+    monkeypatch.setattr("sanctum_cli.keychain.read", lambda account, service: "pw")
+
+    p = SagemcomHubProvider()
+    try:
+        p.connect(Creds(host="192.168.2.1", username="admin", secret=None, key_path=None))
+        result = p.reboot()
+    finally:
+        p.disconnect()
+
+    assert result.ok is True
+
+
+def test_reboot_genuine_rejection_raised_by_real_post_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A GENUINE rejection the real ``__post`` raises still fails closed.
+
+    ``XMO_ACCESS_RESTRICTION_ERR`` at the action level makes the real ``__post``
+    raise ``AccessRestrictionException`` — that is the hub REFUSING the reboot, not
+    a reboot-initiated drop — so ``reboot()`` must still raise :class:`DeviceError`
+    (never report a green reboot the hub rejected). Proves the shape-B success-path
+    does not over-broadly swallow every raise into a false green.
+    """
+    from sanctum_cli.devices.sagemcom import SagemcomHubProvider
+
+    fake = _RealPostClient(_action_level_reply("XMO_ACCESS_RESTRICTION_ERR"))
+    monkeypatch.setattr("sanctum_cli.devices.sagemcom._make_client", lambda creds: fake)
+    monkeypatch.setattr("sanctum_cli.keychain.read", lambda account, service: "pw")
+
+    p = SagemcomHubProvider()
+    try:
+        p.connect(Creds(host="192.168.2.1", username="admin", secret=None, key_path=None))
+        with pytest.raises(DeviceError):
+            p.reboot()
+    finally:
+        p.disconnect()
 
 
 # ─── table-row ops through the REAL transport (hostile xpath) ────────────────

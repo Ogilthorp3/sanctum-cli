@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, TypeVar
@@ -262,6 +263,52 @@ def _is_reboot_connection_drop(exc: BaseException) -> bool:
         "ServerTimeoutError",
         "TimeoutError",
     }
+
+
+def _iter_sah_error_descriptions(exc: BaseException) -> Iterator[str]:
+    """Yield every SAH ``error.description`` string a raised exception carries.
+
+    The installed ``sagemcom_api`` raises its typed errors as
+    ``SomeException(action_error)`` where ``action_error`` is the SAH error dict
+    (``{"description": "XMO_..."}``) — so the description we must classify rides in
+    ``exc.args``. We walk the args (and one level of nested list/tuple) and surface
+    any dict ``description`` plus any bare-string arg, so the reboot contract can
+    read the token whether the library passed the dict or (defensively) a string.
+    No token match happens here — the caller decides which descriptions mean what.
+    """
+    for arg in getattr(exc, "args", ()):
+        if isinstance(arg, Mapping):
+            desc = arg.get("description")
+            if isinstance(desc, str):
+                yield desc
+        elif isinstance(arg, str):
+            yield arg
+        elif isinstance(arg, (list, tuple)):
+            for item in arg:
+                if isinstance(item, Mapping):
+                    nested = item.get("description")
+                    if isinstance(nested, str):
+                        yield nested
+
+
+def _reboot_initiated_from_exc(exc: BaseException) -> bool:
+    """True iff a RAISED transport exception carries a reboot-INITIATED SAH token.
+
+    FIX-1 shape-B. The installed ``sagemcom_api`` does not only RETURN the
+    reboot-initiated tokens; when ``XMO_ACTION_CALLBACK_ERR`` / ``XMO_REBOOTING_ERR``
+    ride at the ACTION level under a top-level ``XMO_REQUEST_ACTION_ERR``, ``__post``
+    RAISES ``UnknownException({"description": "XMO_ACTION_CALLBACK_ERR"})`` (verified
+    against the installed client). That raise is the hub tearing down its session to
+    reboot = SUCCESS, NOT a failure — so :meth:`SagemcomHubProvider.reboot` accepts
+    it. A GENUINE typed rejection (``AccessRestrictionException`` /
+    ``AuthenticationException``, whose description is NOT a reboot-initiated token)
+    returns False and still fails closed. Mirrors :data:`_SAH_REBOOT_INITIATED` so
+    the return-path and the raise-path accept EXACTLY the same tokens (Contracts at
+    the Boundary — the two must never drift).
+    """
+    return any(
+        desc in _SAH_REBOOT_INITIATED for desc in _iter_sah_error_descriptions(exc)
+    )
 
 
 def _make_client(creds: Creds) -> Any:
@@ -770,6 +817,22 @@ class SagemcomHubProvider:
                 return OpResult(
                     ok=True,
                     detail="reboot issued (hub dropped the connection — reboot initiated)",
+                )
+            # FIX-1 shape-B: the installed sagemcom_api RAISES (not returns) when a
+            # reboot-initiated token rides at the ACTION level under a top-level
+            # XMO_REQUEST_ACTION_ERR (__post → UnknownException({"description":
+            # "XMO_ACTION_CALLBACK_ERR"})). That raise is the reboot firing, NOT a
+            # rejection, so accept it — otherwise a reboot that succeeded is read as a
+            # failed stage and the rails roll back (the precise 06-26 cascade). A
+            # genuine typed rejection (access-restriction/auth) carries no reboot
+            # token and still falls through to the fail-closed raise below.
+            if _reboot_initiated_from_exc(exc):
+                return OpResult(
+                    ok=True,
+                    detail=(
+                        "reboot issued (hub raised a reboot-initiated SAH token "
+                        "— reboot initiated)"
+                    ),
                 )
             msg = f"Sagemcom reboot failed: {exc}"
             raise DeviceError(
