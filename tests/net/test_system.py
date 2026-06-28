@@ -354,3 +354,74 @@ def test_parse_speedtest_cli_json() -> None:
 def test_parse_speedtest_cli_json_garbage_returns_none() -> None:
     assert system.parse_speedtest_cli_mbps("not json") is None
     assert system.parse_speedtest_cli_mbps("{}") is None
+
+
+# ── FIX-f: firewalla_box_preflight — passwordless-sudo + dhclient over the SSH ─
+#
+# The pre-apply box gate's I/O boundary. It runs ONE key-SSH round-trip (the same
+# _fw_ssh_argv envelope the cutover's box ops use) that echoes SUDO_OK / DHCLIENT_OK
+# for each capability that holds. These author expectations from the marker contract,
+# RUN the real argv construction, and mock ONLY the subprocess edge — fail-closed on
+# any transport failure (the absence of proof reads as not-ready).
+
+
+def test_box_preflight_both_markers_present_is_ready() -> None:
+    """Both markers in stdout → (passwordless_sudo, dhclient_present) == (True, True)."""
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 0, stdout="SUDO_OK\nDHCLIENT_OK\n", stderr="")
+
+    with patch("sanctum_cli.net.system.subprocess.run", side_effect=fake_run):
+        assert system.firewalla_box_preflight("10.0.0.1", "/k") == (True, True)
+
+
+def test_box_preflight_missing_sudo_marker_reads_false() -> None:
+    """Only DHCLIENT_OK (sudo needed a password, so no SUDO_OK) → sudo False."""
+
+    def fake_run(cmd, **kwargs):
+        # sudo -n true printed nothing (it failed); dhclient resolved.
+        return subprocess.CompletedProcess(cmd, 0, stdout="DHCLIENT_OK\n", stderr="")
+
+    with patch("sanctum_cli.net.system.subprocess.run", side_effect=fake_run):
+        assert system.firewalla_box_preflight("10.0.0.1", "/k") == (False, True)
+
+
+def test_box_preflight_missing_dhclient_marker_reads_false() -> None:
+    """Only SUDO_OK (no dhclient on PATH) → dhclient False."""
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 0, stdout="SUDO_OK\n", stderr="")
+
+    with patch("sanctum_cli.net.system.subprocess.run", side_effect=fake_run):
+        assert system.firewalla_box_preflight("10.0.0.1", "/k") == (True, False)
+
+
+def test_box_preflight_runs_over_the_fw_ssh_envelope() -> None:
+    """The probe rides the SAME key-only SSH envelope the cutover's box ops use:
+    publickey-only, accept-new host key, and the two capability probes in the remote."""
+    captured: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        captured.append(list(cmd))
+        return subprocess.CompletedProcess(cmd, 0, stdout="SUDO_OK\nDHCLIENT_OK\n", stderr="")
+
+    with patch("sanctum_cli.net.system.subprocess.run", side_effect=fake_run):
+        system.firewalla_box_preflight("10.0.0.1", "/key", user="pi")
+    argv = captured[0]
+    assert argv[0] == "ssh"
+    assert "BatchMode=yes" in argv
+    assert "pi@10.0.0.1" in argv
+    remote = argv[-1]
+    assert "sudo -n true" in remote
+    assert "dhclient" in remote
+
+
+def test_box_preflight_transport_failure_is_fail_closed() -> None:
+    """A transport failure (cannot spawn / timeout) reads as (False, False) — the
+    absence of proof is not-ready, never a green pass on an unreachable box."""
+
+    def boom(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd, 12)
+
+    with patch("sanctum_cli.net.system.subprocess.run", side_effect=boom):
+        assert system.firewalla_box_preflight("10.0.0.1", "/k") == (False, False)

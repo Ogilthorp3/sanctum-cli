@@ -213,6 +213,15 @@ def _wire(
     monkeypatch.setattr(
         "sanctum_cli.commands.net._out_of_band_reachable", lambda: out_of_band
     )
+    # FIX-f: the pre-apply box gate (passwordless sudo + dhclient over SSH) is a real
+    # external probe; stub it READY so these tests exercise their intended paths. The
+    # gate itself is covered by dedicated tests below.
+    from sanctum_cli.devices import flip as _flip
+
+    monkeypatch.setattr(
+        "sanctum_cli.commands.net._box_preflight_ready",
+        lambda: _flip.PreflightDecision(ok=True, reason="stubbed ready"),
+    )
 
 
 # ── bare command: dry-run, ZERO writes ───────────────────────────────────────
@@ -523,4 +532,121 @@ def test_hub_single_nat_passes_real_runner_cleanly_without_firing_it(
     assert hub.set_calls == []
     assert hub.reboot_calls == 0
     assert hub.rollback_calls == 0
+    assert armor.installed == 0
+
+
+# ── FIX-e: a non-Bell ISP skips the armor + commits a normal public lease ──────
+
+
+class NormalPublicRunner(FakeRunner):
+    """Serves a NORMAL public /24 lease (a non-Bell passthrough — no /1 poison)."""
+
+    def __call__(self, tag: tuple[str, ...]) -> str:
+        if tag == ("wan_addr_cidr",):
+            self.calls.append(tag)
+            return f"2: eth0    inet {self.wan_ip}/24 brd {self.wan_ip} scope global eth0"
+        return super().__call__(tag)
+
+
+def test_single_nat_requires_armor_resolves_per_isp(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: object
+) -> None:
+    """The CLI resolves the /32-armor requirement from the configured ISP playbook:
+    bell (the default) requires it; a pinned non-Bell ISP does not."""
+    from sanctum_cli.commands import net as net_cmd
+
+    monkeypatch.setenv("SANCTUM_INSTANCE_FILE", str(tmp_path / "absent.yaml"))  # type: ignore[operator]
+    assert net_cmd._single_nat_requires_armor() is True  # bell default
+    cfg = tmp_path / "instance.yaml"  # type: ignore[operator]
+    cfg.write_text("net:\n  isp: generic\n", encoding="utf-8")
+    monkeypatch.setenv("SANCTUM_INSTANCE_FILE", str(cfg))
+    assert net_cmd._single_nat_requires_armor() is False  # non-Bell → no armor
+
+
+def test_net_single_nat_non_bell_apply_skips_armor_and_commits(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: object
+) -> None:
+    """`--apply` on a non-Bell ISP (net.isp: generic) commits a /24 public lease and
+    NEVER deploys the /32 armor — the decouple end-to-end through the CLI."""
+    cfg = tmp_path / "instance.yaml"  # type: ignore[operator]
+    cfg.write_text("net:\n  isp: generic\n", encoding="utf-8")
+    monkeypatch.setenv("SANCTUM_INSTANCE_FILE", str(cfg))
+    hub, fw, armor = FakeHub(), NormalPublicRunner(), FakeArmor()
+    _wire(monkeypatch, hub=hub, fw=fw, armor=armor, out_of_band=True)
+    result = runner.invoke(app, ["net", "single-nat", "--apply", "--force"])
+    assert result.exit_code == 0, result.stdout
+    # DMZ still engaged + committed …
+    assert (DMZ_PATH, "on") in hub.set_calls
+    assert hub.rollback_calls == 0
+    # … but the armor was NEITHER staged NOR installed (skipped for the non-Bell ISP).
+    assert armor.installed == 0
+    assert armor.staged == 0
+
+
+# ── FIX-f: the pre-apply box gate (passwordless sudo + dhclient) ───────────────
+
+
+def test_box_preflight_ready_maps_probe_to_decision(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: object
+) -> None:
+    """``_box_preflight_ready`` resolves host+key the runner uses, consults the SSH
+    probe, and maps its (sudo, dhclient) result through the pure gate."""
+    from sanctum_cli.commands import net as net_cmd
+
+    key = tmp_path / "fw_key"  # type: ignore[operator]
+    key.write_text("k", encoding="utf-8")
+    monkeypatch.setattr(net_cmd, "_firewalla_host", lambda: "10.0.0.1")
+    monkeypatch.setattr(net_cmd, "_firewalla_key_path", lambda: key)
+    monkeypatch.setattr(
+        net_cmd.system, "firewalla_box_preflight", lambda *_a, **_k: (True, True)
+    )
+    assert net_cmd._box_preflight_ready().ok is True
+    monkeypatch.setattr(
+        net_cmd.system, "firewalla_box_preflight", lambda *_a, **_k: (True, False)
+    )
+    assert net_cmd._box_preflight_ready().ok is False  # no dhclient → not ready
+
+
+def test_box_preflight_ready_fail_closed_when_no_key(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: object
+) -> None:
+    """No SSH key on disk → the gate is not-ready WITHOUT even probing (fail-closed):
+    we cannot prove the box is capable, so the cutover must refuse."""
+    from sanctum_cli.commands import net as net_cmd
+
+    monkeypatch.setattr(net_cmd, "_firewalla_host", lambda: "10.0.0.1")
+    monkeypatch.setattr(net_cmd, "_firewalla_key_path", lambda: tmp_path / "absent")  # type: ignore[operator]
+    # Even a probe that WOULD say ready must not be reached without a key.
+    monkeypatch.setattr(
+        net_cmd.system, "firewalla_box_preflight", lambda *_a, **_k: (True, True)
+    )
+    assert net_cmd._box_preflight_ready().ok is False
+
+
+def test_net_single_nat_apply_refuses_when_box_preflight_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`--apply` REFUSES (non-zero, zero writes) when the box lacks passwordless sudo
+    or a dhclient — the cutover never touches the hub on a box that can't run the ops."""
+    from sanctum_cli.devices import flip
+
+    hub, fw, armor = FakeHub(), FakeRunner(), FakeArmor()
+    _wire(monkeypatch, hub=hub, fw=fw, armor=armor, out_of_band=True)
+    # Override the _wire ready-stub: the box preflight FAILS.
+    monkeypatch.setattr(
+        "sanctum_cli.commands.net._box_preflight_ready",
+        lambda: flip.PreflightDecision(
+            ok=False,
+            reason="box preflight FAILED — no DHCP client found on the box "
+            "(`dhclient` not on PATH)",
+        ),
+    )
+    result = runner.invoke(app, ["net", "single-nat", "--apply", "--force"])
+    assert result.exit_code != 0, result.stdout
+    # The clear refusal message is reported to stderr (the standard error path).
+    out = (result.stdout + result.stderr).lower()
+    assert "preflight" in out or "dhclient" in out
+    # Refused BEFORE any mutation: zero writes anywhere (hub never even connected).
+    assert hub.set_calls == []
+    assert hub.reboot_calls == 0
     assert armor.installed == 0

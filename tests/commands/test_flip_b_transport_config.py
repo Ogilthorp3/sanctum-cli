@@ -155,6 +155,59 @@ def test_intents_default_armor_installer_is_config_driven(
     assert TS_MINI in joined
 
 
+# ── FIX-d2: the armor KIT-DIR is config-first, shared by both installer seams ──
+
+
+def test_armor_kit_dir_reads_instance_yaml(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``paths.armor_kit_dir`` in instance.yaml is the resolved checkout path."""
+    cfg = tmp_path / "instance.yaml"
+    cfg.write_text(
+        "paths:\n  armor_kit_dir: /opt/operator/sanctum-singlenat-armor\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("SANCTUM_INSTANCE_FILE", str(cfg))
+    assert intents._armor_kit_dir() == "/opt/operator/sanctum-singlenat-armor"
+
+
+def test_armor_kit_dir_falls_back_to_shipped_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No config → the shipped default checkout dir (general-purpose tool unchanged)."""
+    monkeypatch.setenv("SANCTUM_INSTANCE_FILE", str(tmp_path / "absent.yaml"))
+    assert intents._armor_kit_dir() == intents._DEFAULT_ARMOR_KIT_DIR
+
+
+def test_both_installer_seams_scp_from_the_configured_kit_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """BOTH the CLI seam and the intents fallback scp FROM the configured checkout dir.
+
+    The deploy argv (a real ``scp <kit>/bin/...`` invocation, the consumer boundary)
+    must reference the operator's own ``paths.armor_kit_dir`` — proving the single
+    shared resolver feeds both ``net._build_armor_installer`` and
+    ``intents._default_armor_installer`` (they never drift on the checkout path).
+    """
+    custom = "/opt/operator/sanctum-singlenat-armor"
+    cfg = tmp_path / "instance.yaml"
+    cfg.write_text(
+        "instance:\n  name: T\n  slug: t\n"
+        f"paths:\n  armor_kit_dir: {custom}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("SANCTUM_INSTANCE_FILE", str(cfg))
+    for build in (net_cmd._build_armor_installer, intents._default_armor_installer):
+        rec = _ArgvRecordingDeployRunner()
+        installer = build()
+        installer._runner = rec.__call__  # type: ignore[attr-defined]
+        installer.stage()
+        joined = _joined(rec.calls)
+        assert f"{custom}/bin/singlenat-armor-boot.sh" in joined
+        # The hardcoded OneDrive default must NOT leak in when a kit dir is pinned.
+        assert "Documents/Claude_Code/sanctum-singlenat-armor" not in joined
+
+
 # ── (2) observe_lease / verify box reads: the runner SSHes the configured box ──
 
 

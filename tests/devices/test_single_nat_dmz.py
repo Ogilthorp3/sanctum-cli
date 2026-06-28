@@ -1492,3 +1492,122 @@ def test_rollback_release_box_never_returns_reports_not_ok_with_manual_recovery(
     assert hub.get(DMZ_PATH) == "false"  # the dangerous DMZ leaf was still disabled
     low = result.detail.lower()
     assert "recover" in low or "manual" in low or "did not return" in low
+
+
+# ── FIX-e: requires_slash32_armor=False — skip the armor stages + accept any prefix ─
+#
+# For a non-Bell ISP whose passthrough yields a NORMAL public lease (no /1 poison),
+# the cutover must NOT deploy the self-healing /32 armor and the poison gate must
+# accept a public lease of any prefix. These drive the FULL orchestrator with the
+# flag off and assert: zero armor stage/install, a /24 public lease COMMITS, and the
+# enable_dmz interlock passes even though the armor was never staged.
+
+
+class NormalPublicRunner:
+    """Serves a NORMAL public /24 lease (the typical non-Bell passthrough).
+
+    ``lease_observe`` returns a public IP (→ classify "public"); the raw readback
+    carries a /24 (NOT the Bell /32 armor) and a clean route table (no 0.0.0.0/1).
+    The old /32-only poison gate would (wrongly) reject this perfectly healthy lease.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, ...]] = []
+
+    def __call__(self, tag: tuple[str, ...]) -> str:
+        self.calls.append(tag)
+        if tag and tag[0] in ("fw_wan_ip", "lease_observe"):
+            return "24.150.33.7"
+        if tag == ("wan_addr_cidr",):
+            return "2: eth0    inet 24.150.33.7/24 brd 24.150.33.255 scope global eth0"
+        if tag == ("wan_routes",):
+            return "default via 24.150.33.1 dev eth0"
+        return ""
+
+
+def test_dmz_non_bell_skips_armor_and_commits_normal_public_lease(tmp_path: Path) -> None:
+    """requires_slash32_armor=False: a /24 public lease COMMITS, and NEITHER armor
+    stage runs — the cutover skips the /32 armor for an ISP that doesn't need it."""
+    from sanctum_cli.devices.intents import single_nat_dmz
+
+    hub, runner, armor = FakeHub(), NormalPublicRunner(), FakeArmor()
+    res = single_nat_dmz(
+        hub,
+        runner,
+        armor,
+        apply=True,
+        out_of_band_reachable=True,
+        force=True,
+        stage_verifiers=_all_pass_verifiers(),
+        requires_slash32_armor=False,
+        log_path=tmp_path / "audit.jsonl",
+    )
+    assert res.result is not None
+    assert res.result.ok is True  # the /24 lease committed (old /32 gate would reject)
+    # The armor was NEITHER staged NOR installed — both stages skipped.
+    assert armor.staged == 0
+    assert armor.installed == 0
+    # DMZ still engaged + committed; no rollback.
+    assert (DMZ_PATH, "true") in hub.set_calls
+    assert hub.get(DMZ_PATH) == "true"
+    assert hub.rollback_calls == 0
+
+
+def test_dmz_non_bell_interlock_engages_without_armor_staged(tmp_path: Path) -> None:
+    """The enable_dmz interlock must NOT block when armor is skipped (FIX-e): with the
+    flag off the armor-staged precondition is satisfied by construction, so DMZ engages
+    even though stage_armor never ran."""
+    from sanctum_cli.devices.intents import single_nat_dmz
+
+    hub, runner, armor = FakeHub(), NormalPublicRunner(), FakeArmor()
+    res = single_nat_dmz(
+        hub,
+        runner,
+        armor,
+        apply=True,
+        out_of_band_reachable=True,
+        oob_probe=lambda: True,
+        force=True,
+        stage_verifiers=_all_pass_verifiers(),
+        requires_slash32_armor=False,
+        log_path=tmp_path / "audit.jsonl",
+    )
+    assert res.result is not None
+    assert res.result.ok is True
+    assert armor.staged == 0  # the interlock did NOT require a stage that never ran
+    assert (DMZ_PATH, "true") in hub.set_calls
+
+
+def test_dmz_non_bell_dry_run_plan_omits_armor_steps() -> None:
+    """The dry-run plan for a non-armor ISP omits the /32-armor steps (honest plan)."""
+    from sanctum_cli.devices.intents import single_nat_dmz
+
+    res = single_nat_dmz(
+        FakeHub(), NormalPublicRunner(), FakeArmor(),
+        apply=False, requires_slash32_armor=False,
+    )
+    plan_text = "\n".join(res.plan).lower()
+    assert "armor" not in plan_text  # no /32-armor stage lines for this ISP
+    assert "enable advanced dmz" in plan_text  # the DMZ engage step still shows
+
+
+def test_dmz_bell_default_still_runs_armor(tmp_path: Path) -> None:
+    """REGRESSION: the default (requires_slash32_armor=True) still stages + installs the
+    armor and requires the /32 lease — the Bell behavior is untouched."""
+    from sanctum_cli.devices.intents import single_nat_dmz
+
+    hub, runner, armor = FakeHub(), FakeRunner(), FakeArmor()  # FakeRunner serves /32
+    res = single_nat_dmz(
+        hub,
+        runner,
+        armor,
+        apply=True,
+        out_of_band_reachable=True,
+        force=True,
+        stage_verifiers=_all_pass_verifiers(),
+        log_path=tmp_path / "audit.jsonl",
+    )
+    assert res.result is not None
+    assert res.result.ok is True
+    assert armor.staged == 1  # Bell still stages …
+    assert armor.installed == 1  # … and installs the armor

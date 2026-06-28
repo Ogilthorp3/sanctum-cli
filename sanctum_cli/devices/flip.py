@@ -398,18 +398,37 @@ def poison_route_present(route_show: str | None) -> bool:
     )
 
 
-def evaluate_wan_poison(addr_show: str | None, route_show: str | None) -> PoisonVerdict:
+def evaluate_wan_poison(
+    addr_show: str | None,
+    route_show: str | None,
+    *,
+    requires_slash32_armor: bool = True,
+) -> PoisonVerdict:
     """Is a "public" WAN lease SAFE to commit, or is it carrying Bell's /1 poison?
 
-    Committable IFF BOTH hold (the /32 armor is provably in place):
+    ``requires_slash32_armor`` is the per-playbook gate (FIX-e). It is True ONLY for
+    the Bell Advanced-DMZ cutover, whose public lease can still be carrying the /1
+    poison if the ``/32`` armor did not hold; for every other ISP it is False (the
+    passthrough yields a NORMAL public lease — there is no /1 poison to supersede).
+
+    When ``requires_slash32_armor`` is True, committable IFF BOTH hold (the /32 armor
+    is provably in place):
 
     * the WAN is pinned to ``/32`` (the armor's address-supersede is holding), AND
     * no ``0.0.0.0/1`` route is present (the armor's route-supersede is holding).
 
     A ``/1`` (or any non-/32) prefix, a present ``0.0.0.0/1`` route, OR an
     unparseable/empty readback all fail closed — we never commit unless we can PROVE
-    the armor holds. Pure: the I/O that reads ``addr_show``/``route_show`` lives at
-    the boundary (the runner's raw-readback tags).
+    the armor holds.
+
+    When ``requires_slash32_armor`` is False, the ``/32`` requirement is dropped: a
+    healthy public lease of ANY prefix is committable. The Bell /1-poison guards are
+    STILL enforced (a present ``0.0.0.0/1`` route or a ``/1`` netmask still refuses) —
+    they can never legitimately appear off a non-Bell WAN, so checking them costs
+    nothing and keeps the gate fail-closed against a surprise poison signal.
+
+    Pure: the I/O that reads ``addr_show``/``route_show`` lives at the boundary (the
+    runner's raw-readback tags).
     """
     prefixes = parse_wan_prefixes(addr_show)
     failures: list[str] = []
@@ -420,7 +439,7 @@ def evaluate_wan_poison(addr_show: str | None, route_show: str | None) -> Poison
             f"WAN address carries a /{_BELL_POISON_PREFIX} netmask — "
             "Bell's poison, not the armor's /32"
         )
-    if _ARMOR_WAN_PREFIX not in prefixes:
+    if requires_slash32_armor and _ARMOR_WAN_PREFIX not in prefixes:
         failures.append(
             f"WAN not pinned to /{_ARMOR_WAN_PREFIX} — the /32 armor is NOT holding "
             f"(prefixes={prefixes or 'none'})"
@@ -430,9 +449,76 @@ def evaluate_wan_poison(addr_show: str | None, route_show: str | None) -> Poison
             committable=False,
             reason="WAN poison check FAILED — " + "; ".join(failures),
         )
-    return PoisonVerdict(
-        committable=True,
-        reason=f"WAN poison check OK — pinned to /{_ARMOR_WAN_PREFIX}, no {_BELL_POISON_ROUTE} route",
+    if requires_slash32_armor:
+        ok_reason = (
+            f"WAN poison check OK — pinned to /{_ARMOR_WAN_PREFIX}, "
+            f"no {_BELL_POISON_ROUTE} route"
+        )
+    else:
+        ok_reason = (
+            "WAN lease OK — healthy public lease, no Bell /1 poison "
+            "(/32 armor not required for this ISP)"
+        )
+    return PoisonVerdict(committable=True, reason=ok_reason)
+
+
+# ── box preflight (FIX-f): the box must be CAPABLE of the cutover's ops ────────
+#
+# The cutover's ACTIVE box ops (``wan_dhcp`` re-lease, the rollback's ``dhcp_release``)
+# run ``sudo dhclient <wan>`` over the key-SSH transport. Two box-side capabilities
+# the apply path silently ASSUMED — and that a fresh operator's box may not have:
+#   * passwordless sudo — without it ``sudo`` blocks on a password prompt with no TTY,
+#     so the op hangs until the SSH ConnectTimeout and FALSE-FAILS mid-cutover; and
+#   * a real ``dhclient`` — without it the release/renew cannot run at all.
+# :func:`evaluate_box_preflight` is the PURE gate the apply path consults BEFORE any
+# mutation, so a box missing either capability refuses up front (fail-closed, clear
+# message) instead of stranding the WAN. It takes the two captured booleans (the I/O
+# probe lives at the boundary — ``system.firewalla_box_preflight`` over the existing
+# SSH) so every branch is exercised with a hostile fixture.
+
+
+@dataclass(frozen=True)
+class PreflightDecision:
+    """The box-preflight verdict: ``ok`` plus a legible ``reason``.
+
+    ``ok`` is True only when the box can run the cutover's ``sudo dhclient`` ops —
+    passwordless sudo AND a ``dhclient`` present. On a refusal it is False and
+    ``reason`` names each missing capability so the operator (and the audit log) sees
+    exactly WHY the cutover refused before it touched anything.
+    """
+
+    ok: bool
+    reason: str
+
+
+def evaluate_box_preflight(
+    *, passwordless_sudo: bool, dhclient_present: bool
+) -> PreflightDecision:
+    """Fail-closed AND-gate: can the box run the cutover's ``sudo dhclient`` ops? Pure.
+
+    Ready iff BOTH hold:
+
+    * ``passwordless_sudo`` — ``sudo -n true`` over the SSH succeeds, so the
+      release/renew ``sudo`` calls won't block on a TTY-less password prompt.
+    * ``dhclient_present`` — a real DHCP client exists, so the re-lease can run.
+
+    Either absent → ``ok=False`` with a reason naming what is missing. Pure so every
+    branch is exercised with a hostile fixture; the I/O probe that produces these
+    booleans lives at the boundary (:func:`sanctum_cli.net.system.firewalla_box_preflight`).
+    """
+    missing: list[str] = []
+    if not passwordless_sudo:
+        missing.append("passwordless sudo is not available on the box (`sudo -n true` failed)")
+    if not dhclient_present:
+        missing.append("no DHCP client found on the box (`dhclient` not on PATH)")
+    if missing:
+        return PreflightDecision(
+            ok=False,
+            reason="box preflight FAILED — " + "; ".join(missing),
+        )
+    return PreflightDecision(
+        ok=True,
+        reason="box preflight OK — passwordless sudo + dhclient present",
     )
 
 

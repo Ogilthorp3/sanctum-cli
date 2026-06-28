@@ -33,6 +33,11 @@ BUILTINS: dict[str, Playbook] = {
         ),
         mtu=1492,
         alt_playbook="bell-pppoe",
+        # Bell's Advanced DMZ is the ONLY method that hands the WAN a /1-poison public
+        # lease — so it (and only it) needs the self-healing /32 armor + the /32 poison
+        # gate. The PPPoE alternative below gives a clean point-to-point link (no /1),
+        # so it does NOT opt in.
+        requires_slash32_armor=True,
         gotchas=(
             "Plain DMZ alone leaves you double-NAT'd — you MUST tick 'Advanced DMZ' too.",
             "Do not enter PPPoE credentials on the Firewalla; the hub keeps the session.",

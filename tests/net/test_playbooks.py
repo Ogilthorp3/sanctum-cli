@@ -144,3 +144,36 @@ def test_bell_alt_playbook_resolves_to_a_builtin() -> None:
     # The alt_playbook pointer must name a real BUILTINS entry (manifest contract).
     bell = playbooks.BUILTINS["bell"]
     assert bell.alt_playbook in playbooks.BUILTINS
+
+
+# ── FIX-e: the /32-armor requirement is a per-playbook flag (Bell-only) ────────
+
+
+def test_only_bell_playbook_requires_slash32_armor() -> None:
+    """ONLY Bell's Advanced-DMZ method hands the WAN a /1-poison lease, so ONLY it
+    opts into the self-healing /32 armor + the /32 poison gate. Every other playbook
+    — including Bell's own PPPoE passthrough (a clean point-to-point link, no /1) —
+    is False, so its cutover skips the armor and accepts a normal public lease."""
+    assert playbooks.BUILTINS["bell"].requires_slash32_armor is True
+    assert playbooks.BUILTINS["bell-pppoe"].requires_slash32_armor is False
+    assert playbooks.BUILTINS["generic"].requires_slash32_armor is False
+    assert playbooks.BUILTINS["cgnat"].requires_slash32_armor is False
+
+
+def test_requires_slash32_armor_defaults_false() -> None:
+    """A playbook constructed without the flag defaults to NOT requiring the armor —
+    so a new ISP playbook is armor-free unless it explicitly opts in (Bell's trap is
+    the exception, not the rule)."""
+    pb = Playbook(
+        id="x",
+        display_name="X",
+        achieves="single_nat",
+        gateway_ips=(),
+        title_contains=(),
+        admin_url_template="",
+        steps=("s",),
+        gotchas=(),
+        ordering=(),
+        rollback=("r",),
+    )
+    assert pb.requires_slash32_armor is False

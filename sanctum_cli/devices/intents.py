@@ -298,7 +298,11 @@ _BOX_OP_POLL_INTERVAL_S = 15.0
 # inject an ``armor=`` seam. They mirror the kit README's deploy section (the
 # checkout dir + the Firewalla and the Mini jump host); a caller that needs other
 # coordinates passes a pre-built ``armor=`` installer (and tests always do, so the
-# overnight build never reaches these against live gear).
+# overnight build never reaches these against live gear). The kit checkout dir is
+# NO LONGER a hardcode (FIX-d2): it resolves config-first via :func:`_armor_kit_dir`
+# (``paths.armor_kit_dir`` → this default), so a fresh operator whose checkout lives
+# elsewhere points the deploy at their own path. This constant is the shipped
+# fallback only.
 _DEFAULT_ARMOR_KIT_DIR = "/Users/bert/Documents/Claude_Code/sanctum-singlenat-armor"
 # The SHIPPED LAN defaults — the general-purpose tool is unchanged for other users.
 # Bert's haus pins the tailnet transport in ~/.sanctum/instance.yaml (FIX-b); these
@@ -334,6 +338,20 @@ def _armor_mini_host() -> str:
     return str(config.instance_value("devices.mini.host", _DEFAULT_ARMOR_MINI_HOST))
 
 
+def _armor_kit_dir() -> str:
+    """The local armor-kit checkout dir the installer scp's from — config-first (FIX-d2).
+
+    Reads ``paths.armor_kit_dir`` from instance.yaml at CALL TIME, falling back to
+    the shipped :data:`_DEFAULT_ARMOR_KIT_DIR` so the general-purpose tool is
+    unchanged on a fresh box. This is the ONE resolver shared by both
+    :func:`_default_armor_installer` (the un-injected intents fallback) and the CLI's
+    ``net._build_armor_installer``, so the two never drift on the checkout path — a
+    fresh operator whose ``sanctum-singlenat-armor`` lives outside Bert's OneDrive
+    tree points BOTH deploy seams at their own checkout with one config key.
+    """
+    return str(config.instance_value("paths.armor_kit_dir", _DEFAULT_ARMOR_KIT_DIR))
+
+
 def _default_armor_installer() -> ArmorInstaller:
     """Build the real :class:`SinglenatArmorInstaller` from config-or-default coordinates.
 
@@ -347,7 +365,7 @@ def _default_armor_installer() -> ArmorInstaller:
     without ever shelling out.
     """
     return SinglenatArmorInstaller(
-        kit_dir=_DEFAULT_ARMOR_KIT_DIR,
+        kit_dir=_armor_kit_dir(),
         firewalla_host=_armor_firewalla_host(),
         firewalla_user=_armor_firewalla_user(),
         mini_host=_armor_mini_host(),
@@ -363,19 +381,32 @@ class _StageError(Exception):
     """
 
 
-def _dmz_plan(op: CapabilityOp) -> list[str]:
-    """The ordered, human-readable Advanced-DMZ cutover steps (for the dry-run)."""
+def _dmz_plan(op: CapabilityOp, *, requires_slash32_armor: bool = True) -> list[str]:
+    """The ordered, human-readable Advanced-DMZ cutover steps (for the dry-run).
+
+    When ``requires_slash32_armor`` is False (FIX-e: a non-Bell ISP whose passthrough
+    lease carries no /1 poison) the two ``/32``-armor steps are OMITTED — the cutover
+    neither stages nor confirms the armor for an ISP that does not need it — and the
+    surviving steps are renumbered so the plan reads honestly. The numbers are derived
+    from the actual step list rather than hardcoded, so they never skip a digit.
+    """
+    steps = [
+        "preflight: confirm an out-of-band recovery path exists",
+        "put the hub WAN into DHCP/PPPoE passthrough",
+    ]
+    if requires_slash32_armor:
+        steps.append("STAGE the self-healing /32 armor on the box (while the LAN is healthy)")
+    steps.append(f"enable Advanced DMZ: set {op.path} = {op.engaged}")
+    steps.append("reboot the hub so the new WAN/DMZ config takes effect")
+    steps.append("observe the downstream router's new WAN lease + classify it")
+    if requires_slash32_armor:
+        steps.append("confirm the /32 armor came up HEALTHY now single-NAT is live")
+    steps.append("verify real-site reachability through the new single NAT")
+    steps.append("arm the watchdog/sentinel so drift self-heals")
+    numbered = [f"  {i}. {step}" for i, step in enumerate(steps, start=1)]
     return [
         "single-NAT (Bell Advanced DMZ + /32) cutover plan:",
-        "  1. preflight: confirm an out-of-band recovery path exists",
-        "  2. put the hub WAN into DHCP/PPPoE passthrough",
-        "  3. STAGE the self-healing /32 armor on the box (while the LAN is healthy)",
-        f"  4. enable Advanced DMZ: set {op.path} = {op.engaged}",
-        "  5. reboot the hub so the new WAN/DMZ config takes effect",
-        "  6. observe the downstream router's new WAN lease + classify it",
-        "  7. confirm the /32 armor came up HEALTHY now single-NAT is live",
-        "  8. verify real-site reachability through the new single NAT",
-        "  9. arm the watchdog/sentinel so drift self-heals",
+        *numbered,
         "  on any stage failure: roll back — disable DMZ, then re-lease DHCP",
         f"  note: {MTU_NOTE}",
     ]
@@ -670,22 +701,28 @@ def _ride_dark_window(
     raise _StageError(msg) from last_exc
 
 
-def _assert_wan_not_poisoned(runner: Runner) -> None:
+def _assert_wan_not_poisoned(runner: Runner, *, requires_slash32_armor: bool = True) -> None:
     """FIX (c): refuse to commit a "public" lease still carrying Bell's /1 poison.
 
     A ``public`` lease can still be the 2026-06-26 condition — a public IP with a
     ``/1`` netmask + a ``0.0.0.0/1`` on-link route that collapses LAN forwarding —
     if the ``/32`` armor's supersede did not hold. ``lease_observe`` strips the
     prefix, so we read the WAN's raw CIDR + route table (the runner's raw-readback
-    tags) and consult the pure :func:`flip.evaluate_wan_poison`: committable IFF the
-    WAN is pinned to ``/32`` AND no ``0.0.0.0/1`` route is present. A non-committable
+    tags) and consult the pure :func:`flip.evaluate_wan_poison`.
+
+    ``requires_slash32_armor`` (FIX-e) is the per-playbook gate: True for the Bell
+    Advanced-DMZ cutover (committable IFF the WAN is pinned to ``/32`` AND no
+    ``0.0.0.0/1`` route is present); False for every other ISP (a healthy public lease
+    of any prefix commits — there is no /1 poison to supersede). A non-committable
     verdict raises :class:`_StageError` so ``guarded_apply`` unwinds — a poisoned
     public lease can never commit green. The raw reads fail-CLOSED: if they raise
     (LAN-SSH down at the commit moment) the raise propagates and the rails roll back,
     because we cannot PROVE the armor holds.
     """
     verdict = flip.evaluate_wan_poison(
-        runner(_RUNNER_WAN_ADDR_CIDR), runner(_RUNNER_WAN_ROUTES)
+        runner(_RUNNER_WAN_ADDR_CIDR),
+        runner(_RUNNER_WAN_ROUTES),
+        requires_slash32_armor=requires_slash32_armor,
     )
     if not verdict.committable:
         msg = f"observe_lease: {verdict.reason}"
@@ -695,6 +732,7 @@ def _assert_wan_not_poisoned(runner: Runner) -> None:
 def _observe_lease(
     runner: Runner,
     *,
+    requires_slash32_armor: bool = True,
     timeout_s: float | None = None,
     poll_interval_s: float | None = None,
     now: Callable[[], float] = time.monotonic,
@@ -743,9 +781,11 @@ def _observe_lease(
             observed, elapsed_s=now() - start, timeout_s=resolved_timeout
         )
         if decision.action == "settled_ok":
-            # The lease is public — but a public lease can still carry Bell's /1
-            # poison if the /32 armor did not hold. Refuse to commit until proven.
-            _assert_wan_not_poisoned(runner)
+            # The lease is public — but a Bell public lease can still carry the /1
+            # poison if the /32 armor did not hold. Refuse to commit until proven
+            # (FIX-e: the /32 requirement is gated per-playbook; a non-Bell public
+            # lease of any prefix commits, the Bell /1 guards still apply).
+            _assert_wan_not_poisoned(runner, requires_slash32_armor=requires_slash32_armor)
             return
         if decision.action == "hard_fail":
             msg = f"observe_lease: {decision.reason} (observed={observed!r})"
@@ -770,6 +810,7 @@ def _run_stage(
     runner: Runner,
     armor: ArmorInstaller,
     verifier: Callable[[], bool],
+    requires_slash32_armor: bool = True,
 ) -> None:
     """Fire one flip stage's real I/O, then its verify probe; raise on any failure.
 
@@ -798,7 +839,7 @@ def _run_stage(
     elif stage == "hub_reboot":
         _require_ok(_reboot(provider), stage)
     elif stage == "observe_lease":
-        _observe_lease(runner)
+        _observe_lease(runner, requires_slash32_armor=requires_slash32_armor)
     elif stage == "apply_armor":
         # Post-cutover: confirm the armor (deployed at stage_armor) came up HEALTHY
         # now single-NAT is actually live.
@@ -854,6 +895,7 @@ def _assert_interlock(
     *,
     oob_probe: Callable[[], bool] | None,
     out_of_band_reachable: bool,
+    requires_slash32_armor: bool = True,
 ) -> None:
     """Fail-closed prevent-interlock, evaluated AT the DMZ-engage moment (FIX-3).
 
@@ -867,7 +909,10 @@ def _assert_interlock(
       is the authoritative signal.
     * **armor staged** — ``"stage_armor" in done``: the pre-DMZ armor stage actually
       completed in THIS walk (FIX-2 puts it before ``enable_dmz``), so the ``/32``
-      supersede is on the box before the poison ``/1`` can land.
+      supersede is on the box before the poison ``/1`` can land. When
+      ``requires_slash32_armor`` is False (FIX-e: a non-Bell ISP whose lease carries
+      no /1 poison) the armor stages are skipped, so this precondition is satisfied
+      by construction — there is no poison ``/1`` to supersede.
     * **rollback staged** — a non-empty disengaged baseline exists to unwind to.
 
     Raises :class:`_StageError` (which ``guarded_apply`` catches → rollback) if any
@@ -876,9 +921,10 @@ def _assert_interlock(
     confirm in ``guarded_apply``; the interlock is never waived.
     """
     oob_live = oob_probe() if oob_probe is not None else out_of_band_reachable
+    armor_staged = (not requires_slash32_armor) or ("stage_armor" in done)
     decision = flip.evaluate_interlock(
         oob_channel_live=oob_live,
-        armor_staged="stage_armor" in done,
+        armor_staged=armor_staged,
         rollback_staged=bool(disengaged_baseline_snapshot(provider).data),
     )
     if not decision.engage:
@@ -910,6 +956,7 @@ def single_nat_dmz(
     force: bool = False,
     rollback: bool = True,
     log_path: Path | None = None,
+    requires_slash32_armor: bool = True,
 ) -> IntentResult:
     """Run the full Bell Advanced-DMZ + /32 single-NAT cutover, guarded + dry-run.
 
@@ -956,10 +1003,18 @@ def single_nat_dmz(
     real reachability/lease probes. A stage with no entry uses
     :func:`_default_stage_verifier`.
 
+    ``requires_slash32_armor`` (FIX-e) decouples the ``/32`` armor from the cutover so
+    it is no longer Bell-only-hardcoded. True (the default) is the Bell Advanced-DMZ
+    behavior: the ``stage_armor`` + ``apply_armor`` stages run and the poison gate
+    requires the WAN pinned to ``/32``. False (resolved by the CLI from the matched
+    playbook's ``requires_slash32_armor`` flag, set only for Bell) SKIPS both armor
+    stages and accepts a healthy public lease of ANY prefix — for an ISP whose
+    passthrough yields a normal public lease with no Bell ``/1`` poison.
+
     Raises :class:`DeviceError` if the provider does not support Advanced DMZ.
     """
     op = _resolve_dmz_op(provider)
-    plan = _dmz_plan(op)
+    plan = _dmz_plan(op, requires_slash32_armor=requires_slash32_armor)
     if not apply:
         # Dry-run: describe, do not mutate. No provider.set / reboot / runner /
         # armor.install is reached on this branch — the overnight-build guardrail.
@@ -989,6 +1044,16 @@ def single_nat_dmz(
 
     verifiers = stage_verifiers or {}
 
+    # FIX-e: a non-Bell ISP's passthrough yields a NORMAL public lease (no Bell /1
+    # poison), so the self-healing /32 armor is unnecessary — skip the deploy
+    # (``stage_armor``) and the post-cutover confirm (``apply_armor``) entirely. The
+    # poison gate (above) is relaxed to accept any public prefix for the same flag.
+    skipped_stages = (
+        frozenset()
+        if requires_slash32_armor
+        else frozenset({"stage_armor", "apply_armor"})
+    )
+
     def change(pv: DeviceProvider) -> None:
         # Walk the pure stage machine, firing each stage's I/O + verify. A
         # _StageError (or any provider/transport raise) propagates to
@@ -1004,6 +1069,12 @@ def single_nat_dmz(
             if nxt == flip.ROLLBACK:  # defensive — last_ok is only ever True here
                 msg = "flip machine forked to ROLLBACK"
                 raise _StageError(msg)
+            if nxt in skipped_stages:
+                # This ISP needs no /32 armor — record the stage satisfied and advance
+                # (the pure next_stage yields the first stage NOT in ``done``, so the
+                # skipped stage must be marked done to move on) WITHOUT any host contact.
+                done.append(nxt)
+                continue
             # FIX-3: the fail-closed prevent-interlock fires AT the DMZ-engage moment
             # — immediately before the irreversible set() — re-sampling (OOB live,
             # armor staged, rollback staged) right now. A refusal raises before the
@@ -1014,6 +1085,7 @@ def single_nat_dmz(
                     done,
                     oob_probe=oob_probe,
                     out_of_band_reachable=out_of_band_reachable,
+                    requires_slash32_armor=requires_slash32_armor,
                 )
             verifier = verifiers.get(nxt, _default_stage_verifier)
             _run_stage(
@@ -1023,6 +1095,7 @@ def single_nat_dmz(
                 runner=runner,
                 armor=resolved_armor,
                 verifier=verifier,
+                requires_slash32_armor=requires_slash32_armor,
             )
             done.append(nxt)
 

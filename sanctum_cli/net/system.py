@@ -121,6 +121,39 @@ def _fw_ssh_argv(gateway: str, key: str, remote: str, *, user: str = "pi") -> li
     ]
 
 
+def firewalla_box_preflight(gateway: str, key: str, user: str = "pi") -> tuple[bool, bool]:
+    """SSH the box (key-only, read-only) and probe (passwordless_sudo, dhclient_present).
+
+    The pre-apply box gate's I/O boundary (FIX-f). Runs over the SAME key-SSH envelope
+    (:func:`_fw_ssh_argv`) the cutover's box ops use, so it checks the exact transport
+    the ``sudo dhclient`` re-lease will run on. The remote prints a distinct marker for
+    each capability that holds:
+
+    * ``sudo -n true`` succeeds → ``SUDO_OK`` (passwordless sudo is configured), and
+    * ``command -v dhclient`` resolves → ``DHCLIENT_OK`` (a real DHCP client exists).
+
+    Returns ``(passwordless_sudo, dhclient_present)`` parsed from those markers.
+    Fail-closed: ANY transport failure (cannot spawn / timeout) returns
+    ``(False, False)`` — the absence of proof is treated as not-ready, so a box we
+    could not reach refuses the cutover rather than green-lighting it. The whole probe
+    is one ``;``-joined remote so a failing ``sudo`` (or absent ``dhclient``) never
+    short-circuits the other check.
+    """
+    remote = (
+        "sudo -n true 2>/dev/null && echo SUDO_OK; "
+        "command -v dhclient >/dev/null 2>&1 && echo DHCLIENT_OK"
+    )
+    argv = _fw_ssh_argv(gateway, key, remote, user=user)
+    try:
+        proc = subprocess.run(
+            argv, capture_output=True, text=True, errors="replace", timeout=12, check=False
+        )
+    except (subprocess.TimeoutExpired, OSError, ValueError):
+        return (False, False)
+    out = proc.stdout
+    return ("SUDO_OK" in out, "DHCLIENT_OK" in out)
+
+
 def firewalla_wan_via_ssh(gateway: str, key: str, user: str = "pi") -> tuple[str, str]:
     """SSH to the Firewalla (key-only, read-only) and return (wan_ip, wan_mac).
 

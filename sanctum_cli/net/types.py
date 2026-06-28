@@ -49,9 +49,16 @@ class Playbook:
     # prechecks   — things to confirm BEFORE touching the box (e.g. LAN subnet)
     # mtu         — WAN MTU this ISP's path requires (None = leave default)
     # alt_playbook — id of an alternative method reached via this playbook
+    # requires_slash32_armor — True ONLY for the Bell Advanced-DMZ cutover, which
+    #   hands the WAN a /1-poison public lease that needs the self-healing /32 armor
+    #   (stage_armor + apply_armor) and the /32 poison gate. Every other ISP's
+    #   passthrough yields a NORMAL public lease, so the armor stages are skipped and
+    #   the poison gate accepts a healthy public lease of any prefix. Default False —
+    #   only Bell's DMZ method opts in.
     prechecks: tuple[str, ...] = ()
     mtu: int | None = None
     alt_playbook: str | None = None
+    requires_slash32_armor: bool = False
 
 
 @dataclass(frozen=True)

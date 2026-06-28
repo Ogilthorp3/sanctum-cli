@@ -439,3 +439,93 @@ def test_evaluate_wan_poison_unparseable_readback_refuses(addr: str | None) -> N
     (fail-closed: we never commit unless we can prove the armor is holding)."""
     v = flip.evaluate_wan_poison(addr, "default via 10.0.0.1 dev eth0")
     assert v.committable is False
+
+
+# ── FIX-e: requires_slash32_armor=False accepts a normal public lease (non-Bell) ─
+#
+# Bell's Advanced DMZ is the only method whose public lease can hide the /1 poison, so
+# the /32 requirement is gated per-playbook. For every other ISP a healthy public lease
+# of ANY prefix is committable — but the Bell /1-poison guards stay enforced (they can
+# never legitimately appear off a non-Bell WAN; checking them costs nothing).
+
+
+def test_evaluate_wan_poison_non_bell_accepts_normal_public_prefix() -> None:
+    """A normal public /24 lease (the typical non-Bell passthrough) is committable
+    when the playbook does NOT require the /32 armor — the old /32-only gate would
+    have (wrongly) rejected this perfectly healthy lease."""
+    addr = "2: eth0    inet 24.150.33.7/24 brd 24.150.33.255 scope global eth0"
+    routes = "default via 24.150.33.1 dev eth0"
+    # The default (Bell) gate rejects a non-/32 lease …
+    assert flip.evaluate_wan_poison(addr, routes).committable is False
+    # … but with the per-playbook flag off, the same healthy public lease commits.
+    v = flip.evaluate_wan_poison(addr, routes, requires_slash32_armor=False)
+    assert v.committable is True
+    assert "/32 armor not required" in v.reason
+
+
+@pytest.mark.parametrize("prefix", [16, 24, 30])
+def test_evaluate_wan_poison_non_bell_accepts_any_prefix(prefix: int) -> None:
+    """ANY public prefix is accepted for a non-armor ISP (not just /32)."""
+    addr = f"2: eth0    inet 198.51.100.5/{prefix} scope global eth0"
+    v = flip.evaluate_wan_poison(addr, "default via 198.51.100.1 dev eth0",
+                                 requires_slash32_armor=False)
+    assert v.committable is True
+
+
+def test_evaluate_wan_poison_non_bell_still_refuses_poison_route() -> None:
+    """Even with the /32 requirement OFF, a surprise 0.0.0.0/1 poison route STILL
+    refuses — the relaxed gate never opens the door to the Bell /1 collapse."""
+    addr = "2: eth0    inet 24.150.33.7/24 scope global eth0"
+    routes = "default via 10.111.0.1 dev eth0\n0.0.0.0/1 via 10.111.0.1 dev eth0"
+    v = flip.evaluate_wan_poison(addr, routes, requires_slash32_armor=False)
+    assert v.committable is False
+    assert "0.0.0.0/1" in v.reason
+
+
+def test_evaluate_wan_poison_non_bell_still_refuses_slash1_netmask() -> None:
+    """A /1 netmask STILL refuses even with the requirement off — it is the poison
+    itself, never a legitimate non-Bell lease."""
+    addr = "2: eth0    inet 24.150.33.7/1 scope global eth0"
+    v = flip.evaluate_wan_poison(addr, "default via 10.0.0.1 dev eth0",
+                                 requires_slash32_armor=False)
+    assert v.committable is False
+
+
+def test_evaluate_wan_poison_bell_default_unchanged_requires_slash32() -> None:
+    """REGRESSION: the default (requires_slash32_armor=True) still demands /32 — a
+    non-/32 Bell lease is refused exactly as before (the FIX-c behavior is intact)."""
+    addr = "2: eth0    inet 24.150.33.7/24 scope global eth0"
+    assert flip.evaluate_wan_poison(addr, "default via 10.0.0.1 dev eth0").committable is False
+
+
+# ── FIX-f: the pure box-preflight gate (passwordless sudo + dhclient) ──────────
+
+
+def test_evaluate_box_preflight_ready_when_both_present() -> None:
+    """Passwordless sudo AND a dhclient → ready (the box can run the re-lease ops)."""
+    d = flip.evaluate_box_preflight(passwordless_sudo=True, dhclient_present=True)
+    assert d.ok is True
+
+
+def test_evaluate_box_preflight_refuses_without_passwordless_sudo() -> None:
+    """No passwordless sudo → refuse (the sudo dhclient op would hang on a TTY-less
+    password prompt and false-fail mid-cutover). The reason names the missing piece."""
+    d = flip.evaluate_box_preflight(passwordless_sudo=False, dhclient_present=True)
+    assert d.ok is False
+    assert "sudo" in d.reason.lower()
+
+
+def test_evaluate_box_preflight_refuses_without_dhclient() -> None:
+    """No dhclient → refuse (the re-lease cannot run at all)."""
+    d = flip.evaluate_box_preflight(passwordless_sudo=True, dhclient_present=False)
+    assert d.ok is False
+    assert "dhclient" in d.reason.lower()
+
+
+def test_evaluate_box_preflight_names_both_when_both_missing() -> None:
+    """Both missing → refuse, and the reason names BOTH so the operator fixes both."""
+    d = flip.evaluate_box_preflight(passwordless_sudo=False, dhclient_present=False)
+    assert d.ok is False
+    low = d.reason.lower()
+    assert "sudo" in low
+    assert "dhclient" in low

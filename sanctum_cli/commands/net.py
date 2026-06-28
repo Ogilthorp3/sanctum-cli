@@ -12,7 +12,7 @@ from rich.markup import escape
 
 from sanctum_cli import config
 from sanctum_cli.devices import firewalla as firewalla_provider
-from sanctum_cli.devices import intents, interlock, rails, registry, sagemcom
+from sanctum_cli.devices import flip, intents, interlock, rails, registry, sagemcom
 from sanctum_cli.devices import orbi as orbi_provider
 from sanctum_cli.devices import transport as transport_router
 from sanctum_cli.devices.armor import SinglenatArmorInstaller
@@ -618,14 +618,14 @@ def hub_set(
 # recovery probe says reachable; ``--rollback`` undoes a prior cutover (disable DMZ
 # + re-lease DHCP).
 
-# The armor kit checkout dir, mirroring the kit README's deploy section. Held here
-# so the CLI builds the installer through one seam tests can swap for a recording
-# double; the dry-run never reaches it (zero host contact). The box + Mini HOSTS are
-# NO LONGER hardcoded here (FIX-b) — they resolve config-first through the
-# ``intents._armor_*`` seams (``devices.firewalla.host`` / ``.ssh_user`` /
-# ``devices.mini.host`` → LAN default), so an off-LAN operator's deploy rides the
-# tailnet while the shipped default stays the LAN coordinates.
-_ARMOR_KIT_DIR = "/Users/bert/Documents/Claude_Code/sanctum-singlenat-armor"
+# The armor kit checkout dir is NO LONGER hardcoded here (FIX-d2) — it resolves
+# config-first through the SHARED ``intents._armor_kit_dir`` seam
+# (``paths.armor_kit_dir`` → the shipped default), the SAME resolver
+# ``intents._default_armor_installer`` uses, so the CLI installer and the intents
+# fallback never drift on the checkout path. The box + Mini HOSTS likewise resolve
+# config-first through the ``intents._armor_*`` seams (``devices.firewalla.host`` /
+# ``.ssh_user`` / ``devices.mini.host`` → LAN default), so an off-LAN operator's
+# deploy rides the tailnet while the shipped default stays the LAN coordinates.
 
 # The SHIPPED-default out-of-band recovery host the cutover gate probes: the Mini
 # jump host, which the armor kit reaches on a SEPARATE link from the WAN the flip is
@@ -697,10 +697,60 @@ def _build_armor_installer() -> ArmorInstaller:
     recording double so the wiring is exercised without shelling out.
     """
     return SinglenatArmorInstaller(
-        kit_dir=_ARMOR_KIT_DIR,
+        kit_dir=intents._armor_kit_dir(),
         firewalla_host=intents._armor_firewalla_host(),
         firewalla_user=intents._armor_firewalla_user(),
         mini_host=intents._armor_mini_host(),
+    )
+
+
+def _single_nat_requires_armor() -> bool:
+    """Does this network's single-NAT playbook need the Bell /32-armor stages? (FIX-e)
+
+    ``net single-nat`` is the Bell Advanced-DMZ surface, so it follows the **bell**
+    playbook by default — which DOES hand the WAN a ``/1``-poison lease and needs the
+    self-healing ``/32`` armor (``stage_armor`` + ``apply_armor``) plus the ``/32``
+    poison gate. An instance.yaml ``net.isp`` pin selects a different ISP's playbook;
+    for a non-Bell passthrough that yields a normal public lease, the matched
+    playbook's ``requires_slash32_armor`` is False, so the orchestrator SKIPS the
+    armor stages and the poison gate accepts a healthy public lease of any prefix.
+
+    Defaults to the **bell** playbook — the SAFE default: an unset/unknown ``net.isp``
+    never skips the armor on what could be a real Bell ``/1`` lease (fail-safe, not
+    fail-open).
+    """
+    isp = str(config.instance_value("net.isp", "bell"))
+    playbook = playbooks.BUILTINS.get(isp, playbooks.BUILTINS["bell"])
+    return playbook.requires_slash32_armor
+
+
+def _box_preflight_ready() -> flip.PreflightDecision:
+    """Pre-apply box gate (FIX-f): passwordless sudo + a real ``dhclient`` on the box.
+
+    The cutover's box ops (``wan_dhcp`` / ``dhcp_release``) run ``sudo dhclient`` over
+    the SAME key-SSH transport the runner uses. If passwordless sudo is not configured
+    the op hangs on a (TTY-less) password prompt and false-fails mid-cutover; if
+    ``dhclient`` is absent the re-lease cannot run at all. Both are probed over the
+    EXISTING SSH (``sudo -n true`` + ``command -v dhclient``) BEFORE any mutation and
+    consulted through the pure :func:`flip.evaluate_box_preflight`, so a misconfigured
+    box refuses up front with a clear message rather than stranding the WAN.
+
+    Fail-closed: an unresolved box host / missing SSH key, or an unreachable box, reads
+    as not-ready (the probe returns ``(False, False)``). The box host + user + key are
+    resolved the SAME way the runner's box ops resolve them (:func:`_firewalla_host`,
+    :func:`intents._armor_firewalla_user`, :func:`_firewalla_key_path`), so the gate
+    checks the box the cutover will actually drive.
+    """
+    host = _firewalla_host()
+    key_path = _firewalla_key_path()
+    key = str(key_path) if key_path.exists() else None
+    if host is None or key is None:
+        return flip.evaluate_box_preflight(passwordless_sudo=False, dhclient_present=False)
+    sudo_ok, dhclient_ok = system.firewalla_box_preflight(
+        host, key, user=intents._armor_firewalla_user()
+    )
+    return flip.evaluate_box_preflight(
+        passwordless_sudo=sudo_ok, dhclient_present=dhclient_ok
     )
 
 
@@ -862,6 +912,30 @@ def net_single_nat(
         _net_single_nat_rollback(force=force)
         return
 
+    # FIX-e: resolve whether THIS network's single-NAT playbook needs the Bell /32
+    # armor (and the /32 poison gate). Bell's Advanced DMZ does; other ISPs' passthrough
+    # yields a normal public lease, so the armor stages are skipped and any public
+    # prefix is accepted. Default is the bell playbook (safe).
+    requires_armor = _single_nat_requires_armor()
+
+    # FIX-f: the pre-apply box precondition — the cutover's box ops run `sudo dhclient`
+    # over the existing SSH, so passwordless sudo + a real DHCP client MUST be present
+    # before we touch anything. Fail-closed with a clear message; zero writes (the gate
+    # runs before the hub is even connected).
+    if apply:
+        preflight = _box_preflight_ready()
+        if not preflight.ok:
+            exc = DeviceError(
+                preflight.reason,
+                fix=(
+                    "on the box (the Firewalla SSH user): grant passwordless sudo "
+                    "(a sudoers NOPASSWD rule) AND install a DHCP client (`dhclient`), "
+                    "then re-run with --apply."
+                ),
+            )
+            _report(exc)
+            raise typer.Exit(code=int(exc.exit_code))
+
     # The Firewalla-key-bound runner (the same one net_optimize/net_check use) is
     # what resolves the ("fw_wan_ip",)/("lease_observe",)/("dhcp_release",) tags
     # over the SSH seam; the orchestrator drives the Firewalla through it.
@@ -875,7 +949,10 @@ def net_single_nat(
             result = intents.single_nat_dmz(
                 provider,
                 runner,
-                _build_armor_installer() if apply else None,
+                # The armor installer is only needed when the playbook requires the
+                # /32 armor; for a non-Bell ISP the armor stages are skipped, so pass
+                # None (the orchestrator never reaches the install).
+                _build_armor_installer() if (apply and requires_armor) else None,
                 apply=apply,
                 out_of_band_reachable=oob,
                 # FIX-3: the live, moment-of-op recovery re-probe the prevent-interlock
@@ -894,6 +971,8 @@ def net_single_nat(
                 # True) and a dead-WAN cutover would COMMIT — fail-to-DARK.
                 stage_verifiers=_dmz_stage_verifiers(runner) if apply else None,
                 force=force,
+                # FIX-e: gate the /32-armor + poison-/32 requirement on the playbook.
+                requires_slash32_armor=requires_armor,
                 confirm=lambda plan: typer.confirm(f"{plan}\nAre you at the box (not remote)?"),
             )
     except SanctumError as exc:
