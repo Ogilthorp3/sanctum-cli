@@ -52,10 +52,55 @@ def test_oob_live_false_on_any_nonzero_exit(code: int) -> None:
 
 
 def test_oob_live_probes_a_caller_supplied_addr() -> None:
-    """The probed address is overridable (the real CLI uses the default constant)."""
+    """The probed address is overridable (the real CLI uses the resolved default)."""
     probe = _RecordingProbe(0)
     interlock.tailscale_oob_live(addr="100.68.0.9", probe=probe)
     assert probe.addrs == ["100.68.0.9"]
+
+
+# ── FIX-d1: the tailnet recovery address is config-first, not hardcoded ────────
+
+
+def test_firewalla_ts_addr_reads_instance_yaml(
+    tmp_path: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``devices.firewalla.ts_addr`` in instance.yaml is the resolved tailnet node.
+
+    A haus pins its OWN Tailscale-on-box node — the recovery channel is per-haus, so
+    the address must come from config, never a baked-in constant.
+    """
+    cfg = tmp_path / "instance.yaml"  # type: ignore[operator]
+    cfg.write_text(
+        "devices:\n  firewalla:\n    ts_addr: 100.99.1.2\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("SANCTUM_INSTANCE_FILE", str(cfg))
+    assert interlock.firewalla_ts_addr() == "100.99.1.2"
+
+
+def test_firewalla_ts_addr_falls_back_to_shipped_default(
+    tmp_path: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No config → the shipped :data:`TS_FIREWALLA_ADDR` default (tool unchanged)."""
+    monkeypatch.setenv("SANCTUM_INSTANCE_FILE", str(tmp_path / "absent.yaml"))  # type: ignore[operator]
+    assert interlock.firewalla_ts_addr() == interlock.TS_FIREWALLA_ADDR
+
+
+def test_oob_live_probes_the_config_resolved_addr(
+    tmp_path: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no explicit ``addr``, the probe targets the CONFIG-resolved tailnet node.
+
+    Proves the OOB probe threads the config-first address (``devices.firewalla.ts_addr``)
+    through to the real round-trip target, not the module constant.
+    """
+    cfg = tmp_path / "instance.yaml"  # type: ignore[operator]
+    cfg.write_text(
+        "devices:\n  firewalla:\n    ts_addr: 100.99.7.7\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("SANCTUM_INSTANCE_FILE", str(cfg))
+    probe = _RecordingProbe(0)
+    assert interlock.tailscale_oob_live(probe=probe) is True
+    assert probe.addrs == ["100.99.7.7"]
 
 
 # ── the SSH argv envelope: key-only, root-over-tailnet, hostile-safe ──────────

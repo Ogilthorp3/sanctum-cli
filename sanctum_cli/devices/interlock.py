@@ -28,10 +28,16 @@ from __future__ import annotations
 import subprocess
 from collections.abc import Callable
 
-# The Tailscale node for the Firewalla (``ts-firewalla``, tag:sanctum-host). Root
-# SSH over the tailnet to this address is the LAN-INDEPENDENT recovery channel —
-# proven to survive a LAN collapse (the Mini root-SSH'd it over Tailscale while on
-# a different network). This is the channel the interlock's OOB precondition probes.
+from sanctum_cli import config
+
+# The SHIPPED-default Tailscale node for the Firewalla (``ts-firewalla``,
+# tag:sanctum-host). Root SSH over the tailnet to this address is the
+# LAN-INDEPENDENT recovery channel — proven to survive a LAN collapse (the Mini
+# root-SSH'd it over Tailscale while on a different network). This is the channel
+# the interlock's OOB precondition probes. It is NO LONGER hardcoded as the only
+# value (FIX-d1): a haus pins its own tailnet node in instance.yaml
+# (``devices.firewalla.ts_addr``); this constant is the fallback the general-purpose
+# tool ships with so a fresh box still has a usable default.
 TS_FIREWALLA_ADDR = "100.68.36.16"
 
 # Bounded so a dead tailnet fails FAST (fail-closed) rather than hanging the 2 a.m.
@@ -102,15 +108,32 @@ def _real_tailnet_ssh_probe(addr: str) -> int:
     return _run_probe(_ts_ssh_argv(addr, "true"))
 
 
+def firewalla_ts_addr() -> str:
+    """Resolve the Tailscale-on-box recovery address — config-first (FIX-d1).
+
+    Reads ``devices.firewalla.ts_addr`` from instance.yaml at CALL TIME so a haus
+    pins its OWN tailnet node IP (the LAN-independent recovery channel is per-haus),
+    falling back to the shipped :data:`TS_FIREWALLA_ADDR` default so the
+    general-purpose tool is unchanged on a fresh box. Read at call time (not bound
+    as a default-arg at import) so a config edit takes effect without a re-import,
+    matching the other FIX-b/-d config-first resolvers.
+    """
+    return str(config.instance_value("devices.firewalla.ts_addr", TS_FIREWALLA_ADDR))
+
+
 def tailscale_oob_live(
-    *, addr: str = TS_FIREWALLA_ADDR, probe: TailnetProbe | None = None
+    *, addr: str | None = None, probe: TailnetProbe | None = None
 ) -> bool:
     """Is the LAN-independent Tailscale-on-box OOB channel live RIGHT NOW?
 
     The canonical proof is a root-SSH round-trip to ``addr`` over the tailnet
-    returning exit 0. ``probe`` is injectable (tests pass a recording double mapping
-    an address to a scripted exit code) so this gate is exercised offline; the real
+    returning exit 0. ``addr`` is resolved config-first via :func:`firewalla_ts_addr`
+    (``devices.firewalla.ts_addr`` → the shipped default) when not supplied
+    explicitly, so the probed node is the haus's own tailnet box rather than a
+    hardcode. ``probe`` is injectable (tests pass a recording double mapping an
+    address to a scripted exit code) so this gate is exercised offline; the real
     default is :func:`_real_tailnet_ssh_probe`. Returns True ONLY on exit 0 — any
     non-zero / timeout / spawn-failure reads as not-live (fail-closed).
     """
-    return (probe or _real_tailnet_ssh_probe)(addr) == 0
+    resolved_addr = addr if addr is not None else firewalla_ts_addr()
+    return (probe or _real_tailnet_ssh_probe)(resolved_addr) == 0
