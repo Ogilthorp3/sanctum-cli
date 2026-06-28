@@ -92,3 +92,46 @@ def test_onboard_operator_skips_photos_warning(
     assert result.exit_code == 0
     # The photos panel mentions iCloud — operator path should not.
     assert "Photos scope notice" not in result.stdout
+
+
+def test_network_gear_check_skips_on_assume_yes() -> None:
+    """--yes path must not prompt for or print the network-gear chapter."""
+    from sanctum_cli.commands import onboard
+
+    with patch("sanctum_cli.commands.onboard.Confirm.ask") as ask:
+        onboard._network_gear_check(assume_yes=True)
+    ask.assert_not_called()
+
+
+def test_network_gear_check_prints_ap_dns_trap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With a downstream AP, the chapter teaches the empty-DNS trap + DHCP fix."""
+    import io
+
+    from rich.console import Console
+
+    from sanctum_cli.commands import onboard
+
+    buf = io.StringIO()
+    monkeypatch.setattr(onboard, "console", Console(file=buf, width=100))
+    with patch("sanctum_cli.commands.onboard.Confirm.ask", return_value=True):
+        onboard._network_gear_check(assume_yes=False)
+    out = buf.getvalue()
+    assert "AP" in out  # AP / bridge mode
+    assert "DNS" in out  # the empty-DNS trap
+    assert "magenta" in out.lower()
+    assert "DHCP" in out  # the recommended fix
+
+
+def test_network_gear_check_silent_when_no_ap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No downstream AP -> no panel, clean pass-through."""
+    import io
+
+    from rich.console import Console
+
+    from sanctum_cli.commands import onboard
+
+    buf = io.StringIO()
+    monkeypatch.setattr(onboard, "console", Console(file=buf, width=100))
+    with patch("sanctum_cli.commands.onboard.Confirm.ask", return_value=False):
+        onboard._network_gear_check(assume_yes=False)
+    assert buf.getvalue().strip() == ""

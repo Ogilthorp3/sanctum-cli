@@ -6,10 +6,12 @@ The 30-second-to-working-backup demo. Composes existing primitives:
      understands what is and isn't covered.
   2. Pre-flight estimate — does the recipe fit the chosen backend's free
      tier?
-  3. Cloud setup wizard (R2 by default) if not already configured.
-  4. First real backup with the recipe.
-  5. Restore canary against ``~/.zshrc`` to prove the round-trip.
-  6. Done — print next-step status.
+  3. Network gear — if a Wi-Fi router sits behind the Firewalla, teach the
+     AP-mode DNS trap (single-NAT's one downstream gotcha).
+  4. Cloud setup wizard (R2 by default) if not already configured.
+  5. First real backup with the recipe.
+  6. Restore canary against ``~/.zshrc`` to prove the round-trip.
+  7. Done — print next-step status.
 
 For the lambda-family audience: this is the only command they should
 need to run. Existing operators can use the underlying primitives
@@ -18,9 +20,8 @@ need to run. Existing operators can use the underlying primitives
 
 from __future__ import annotations
 
-from typing import Annotated
-
 import os
+from typing import Annotated
 
 import typer
 from rich.align import Align
@@ -82,6 +83,25 @@ PHOTOS_SCOPE_NOTICE = (
 )
 
 
+NETWORK_GEAR_NOTICE = (
+    "[bold]Wi-Fi behind the Firewalla — one trap to dodge[/]\n\n"
+    "For the Firewalla to be the [bold]single[/] NAT, your Wi-Fi router or mesh "
+    "has to run in [bold]AP / bridge mode[/] — it bridges Wi-Fi onto the "
+    "Firewalla's LAN instead of doing a second NAT.\n\n"
+    "[yellow]The trap that bites everyone:[/] an AP with a gateway set but an "
+    "[bold]empty DNS field[/] has no internet — it routes packets but can't "
+    "resolve a name. The router glows [magenta]magenta[/] and its phone app says "
+    "it's offline, so you blame AP mode. It isn't AP mode.\n\n"
+    "[green]The fix:[/] set the AP's management IP to [bold]DHCP[/] so it "
+    "inherits BOTH gateway and DNS from the Firewalla, then add a Firewalla "
+    "reservation so it keeps the same address. Pinning a static IP instead? Set "
+    "the DNS server explicitly to the Firewalla's LAN address too — not just the "
+    "gateway.\n\n"
+    "Once the AP has internet, the Netgear/Orbi app reconnects through the cloud. "
+    "Full guide: sanctum.run/getting-started/single-nat-setup"
+)
+
+
 def onboard_command(
     recipe: Annotated[
         str,
@@ -126,7 +146,11 @@ def onboard_command(
         console.print("[dim]aborted by user[/]")
         raise typer.Exit(code=0)
 
-    # Step 2 — cloud setup if needed
+    # Step 2 — network gear (single-NAT AP-mode DNS trap; guidance only)
+    console.print("\n[bold]Step 2.[/] Network gear")
+    _network_gear_check(assume_yes=yes)
+
+    # Step 3 — cloud setup if needed
     cb = cfg.cli.cloud_backup
     needs_setup = (
         cb is None
@@ -134,30 +158,30 @@ def onboard_command(
         or (rcp.target == "secondary" and cb.secondary is None)
     )
     if needs_setup:
-        console.print(f"\n[bold]Step 2.[/] Cloud setup ({backend})")
+        console.print(f"\n[bold]Step 3.[/] Cloud setup ({backend})")
         _dispatch_cloud_setup(backend, no_open=no_open)
         # Reload config after cloud setup writes to instance.yaml
         cfg = config.load()
     else:
         console.print(
-            f"\n[bold]Step 2.[/] Cloud target already configured "
+            f"\n[bold]Step 3.[/] Cloud target already configured "
             f"({rcp.target}) — skipping setup."
         )
 
-    # Step 3 — dry-run for transparency
-    console.print("\n[bold]Step 3.[/] Dry-run (no bytes written)")
+    # Step 4 — dry-run for transparency
+    console.print("\n[bold]Step 4.[/] Dry-run (no bytes written)")
     backup_cmd.backup_run(recipe=recipe, script=None, dry_run=True)
 
     if not yes and not Confirm.ask("\nrun the real backup now?", default=True):
         console.print("[dim]stopped before live run; rerun with --yes when ready[/]")
         raise typer.Exit(code=0)
 
-    # Step 4 — first real backup
-    console.print("\n[bold]Step 4.[/] First backup")
+    # Step 5 — first real backup
+    console.print("\n[bold]Step 5.[/] First backup")
     backup_cmd.backup_run(recipe=recipe, script=None, dry_run=False)
 
-    # Step 5 — canary
-    console.print("\n[bold]Step 5.[/] Restore canary")
+    # Step 6 — canary
+    console.print("\n[bold]Step 6.[/] Restore canary")
     _run_canary()
 
     console.print()
@@ -196,6 +220,24 @@ def onboard_command(
             padding=(1, 2),
         )
     )
+
+
+def _network_gear_check(*, assume_yes: bool) -> None:
+    """Teach the single-NAT AP-mode DNS trap. Guidance only — writes nothing.
+
+    Skipped under ``--yes`` (non-interactive) and when the operator has no
+    downstream Wi-Fi router behind the Firewalla. The trap is real and silent:
+    an AP with a gateway but no DNS shows a magenta light and an "offline" app,
+    which reads as "AP mode broke it" when the fix is simply DHCP.
+    """
+    if assume_yes:
+        return
+    if not Confirm.ask(
+        "\nDo you run a Wi-Fi router or mesh (Orbi / Netgear / eero) behind the Firewalla?",
+        default=False,
+    ):
+        return
+    console.print(Panel.fit(NETWORK_GEAR_NOTICE, border_style="yellow"))
 
 
 def _dispatch_cloud_setup(backend: str, *, no_open: bool) -> None:

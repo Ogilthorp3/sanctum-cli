@@ -84,6 +84,12 @@ def net_optimize(
     v, reason = verify.verify(runner=runner)
     if v is Verdict.VERIFIED:
         console.print(f"[green]✓ {escape(reason)}[/]")
+        console.print(
+            "\n[dim]Downstream Wi-Fi: if an Orbi/AP sits behind the Firewalla, set its "
+            "management IP to DHCP so it inherits a gateway AND DNS. An AP with a gateway "
+            "but empty DNS goes magenta with no internet — the single-NAT trap. "
+            "Guide: sanctum.run/getting-started/single-nat-setup[/]"
+        )
     elif v is Verdict.APIPA_ROLLBACK:
         console.print(f"[red]✗ {escape(reason)}[/]")
         console.print("Roll back:")
