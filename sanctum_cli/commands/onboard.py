@@ -529,6 +529,7 @@ def _run_first_hello(name: str) -> None:
     FAIL-SOFT by contract: a missing script, an unreachable Force Flow, or a
     finicky TTS must NEVER turn a completed onboarding into a failure.
     """
+    import contextlib
     import subprocess
 
     script = Path.home() / ".sanctum" / "bin" / "sanctum-first-hello.py"
@@ -538,11 +539,9 @@ def _run_first_hello(name: str) -> None:
     env = dict(os.environ)
     if name:
         env["SANCTUM_USER_NAME"] = name  # Yoda greets THIS name
-    try:
+    # The haus's first words must never break its first run.
+    with contextlib.suppress(Exception):
         subprocess.run([str(script), "--voice"], env=env, timeout=180, check=False)
-    except Exception:
-        # The haus's first words must never break its first run.
-        pass
 
 
 def _dispatch_cloud_setup(backend: str, *, no_open: bool) -> None:
