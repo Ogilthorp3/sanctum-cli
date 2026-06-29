@@ -494,6 +494,56 @@ def onboard_command(
         )
     )
 
+    # The First Hello — the closing beat. After "Your Sanctum is alive", the haus
+    # speaks for the first time. Interactive runs only (scripted --yes stays silent).
+    if not yes:
+        _run_first_hello(_preferred_name(who))
+
+
+def _preferred_name(fallback: str) -> str:
+    """The name the user asked to be called by, for SANCTUM_USER_NAME.
+
+    The identity gate writes it to ``notifications.owner_name`` in instance.yaml
+    ("Bert", not "Bertrand"); prefer that over the macOS login name. Falls back to
+    the supplied login name when the gate was skipped (``--yes``, a non-family
+    recipe, or already-configured).
+    """
+    try:
+        data = yaml.safe_load(config.instance_path().read_text(encoding="utf-8")) or {}
+        notif = data.get("notifications") if isinstance(data, dict) else None
+        owner = notif.get("owner_name") if isinstance(notif, dict) else None
+        if isinstance(owner, str) and owner.strip():
+            return owner.strip()
+    except (OSError, yaml.YAMLError):
+        pass
+    return fallback
+
+
+def _run_first_hello(name: str) -> None:
+    """The First Hello — the haus's first words, the closing beat of onboarding.
+
+    Delegates to ~/.sanctum/bin/sanctum-first-hello.py so the Signal/voice logic
+    lives in one place. Yoda greets the new operator on Signal (guaranteed) and
+    out loud (best-effort), proving he already noticed their network.
+
+    FAIL-SOFT by contract: a missing script, an unreachable Force Flow, or a
+    finicky TTS must NEVER turn a completed onboarding into a failure.
+    """
+    import subprocess
+
+    script = Path.home() / ".sanctum" / "bin" / "sanctum-first-hello.py"
+    if not script.is_file():
+        return  # not installed on this haus — silently skip
+    console.print("\n[dim]One moment -- the haus wants to say hello...[/]")
+    env = dict(os.environ)
+    if name:
+        env["SANCTUM_USER_NAME"] = name  # Yoda greets THIS name
+    try:
+        subprocess.run([str(script), "--voice"], env=env, timeout=180, check=False)
+    except Exception:
+        # The haus's first words must never break its first run.
+        pass
+
 
 def _dispatch_cloud_setup(backend: str, *, no_open: bool) -> None:
     if backend == "r2":
