@@ -297,6 +297,9 @@ def _invoke_family_onboard_interactive(input_text: str) -> tuple[int, str]:
         # don't consume their stdin.
         patch("sanctum_cli.commands.onboard._run_firewalla_pairing"),
         patch("sanctum_cli.commands.onboard._run_ai_providers"),
+        # HA Green is a later interactive gate (own tests); mock it so a real TCP
+        # probe to 10.0.0.3 never runs and it never consumes this gate's stdin.
+        patch("sanctum_cli.commands.onboard._run_ha_green"),
     ):
         result = runner.invoke(app, ["onboard", "--recipe", "family"], input=input_text)
     return result.exit_code, " ".join(result.stdout.split())

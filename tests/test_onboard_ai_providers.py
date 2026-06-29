@@ -271,6 +271,9 @@ def _invoke_family_onboard_interactive(input_text: str) -> tuple[int, str]:
         patch("sanctum_cli.commands.onboard._run_family_setup"),
         patch("sanctum_cli.commands.onboard._run_firewalla_pairing"),
         patch("sanctum_cli.commands.onboard._run_network_gear"),
+        # HA Green is a later interactive gate (own tests); mock it so a real TCP
+        # probe to 10.0.0.3 never runs and it never consumes this chapter's stdin.
+        patch("sanctum_cli.commands.onboard._run_ha_green"),
         # The masked key prompt (Prompt.ask(password=True)) routes to getpass, which
         # emits GetPassWarning under CliRunner's non-TTY stdin; pyproject turns
         # warnings into errors, so suppress only that benign one here (production has
