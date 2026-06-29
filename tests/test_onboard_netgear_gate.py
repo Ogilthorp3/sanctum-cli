@@ -354,6 +354,9 @@ def test_paired_gate_writes_hostile_password_verbatim_to_keychain_seam(
         patch("sanctum_cli.commands.onboard._run_family_setup"),
         patch("sanctum_cli.commands.onboard._run_firewalla_pairing"),
         patch("sanctum_cli.commands.onboard._run_ai_providers"),
+        # HA Green runs AFTER network-gear (own tests); mock it so a real TCP probe
+        # to 10.0.0.3 never runs and it never consumes this gate's stdin.
+        patch("sanctum_cli.commands.onboard._run_ha_green"),
         # Prompt.ask(password=True) routes to getpass, which warns on a non-TTY
         # CliRunner; pyproject filterwarnings=error would crash the prompt. The
         # warning is a test-environment artifact (a real TTY never fires it), and

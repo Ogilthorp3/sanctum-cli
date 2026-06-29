@@ -106,6 +106,7 @@ RECIPE_GATES: dict[str, tuple[str, ...]] = {
         "firewalla-pairing",
         "firewalla-compat",
         "network-gear",
+        "ha-green",
     ),
     # The Apple arc is UNIVERSAL — the recipe only chooses the backup scope, so the
     # "You" (identity) and "Your AI" chapters run on every recipe. operator/code are
@@ -160,7 +161,7 @@ _ARC_CHAPTERS: tuple[tuple[str, str], ...] = (
 _CHAPTER_GATES: dict[str, tuple[str, ...]] = {
     "You": ("identity-setup", "family-setup"),
     "Your AI": ("ai-providers",),
-    "Your Network": ("firewalla-pairing", "firewalla-compat", "network-gear"),
+    "Your Network": ("firewalla-pairing", "firewalla-compat", "network-gear", "ha-green"),
 }
 
 #: Human label shown per gate inside the per-step header (calm, lowercase-free).
@@ -171,6 +172,7 @@ _GATE_LABELS: dict[str, str] = {
     "firewalla-pairing": "Firewalla pairing",
     "firewalla-compat": "Firewalla compatibility",
     "network-gear": "Network gear",
+    "ha-green": "HA Green (Home Assistant)",
 }
 
 
@@ -197,6 +199,8 @@ def _run_gate(gate: str, *, yes: bool) -> bool:
         return _run_firewalla_compat()
     if gate == "network-gear":
         return _run_network_gear(yes=yes)
+    if gate == "ha-green":
+        return _run_ha_green(yes=yes)
     return False
 
 
@@ -446,8 +450,7 @@ def onboard_command(
         # Honest finish: never claim "verified" over a recap that shows a failed
         # backup canary. The Sanctum is alive (mlx_local floor), but say what's true.
         console.print(
-            "[yellow]Your Sanctum is alive — your backup canary needs attention "
-            "(see above).[/]"
+            "[yellow]Your Sanctum is alive — your backup canary needs attention (see above).[/]"
         )
     else:
         console.print(green_check("Setup verified — your Sanctum is alive"))
@@ -640,9 +643,7 @@ def set_instance_identity(
         backup = target.parent / (target.name + ".bak")
         backup.write_text(target.read_text(encoding="utf-8"), encoding="utf-8")
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(
-        yaml.safe_dump(data, sort_keys=False, allow_unicode=True), encoding="utf-8"
-    )
+    target.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True), encoding="utf-8")
 
 
 def _prompt_phone(name: str) -> str | None:
@@ -839,9 +840,7 @@ def _run_family_setup(*, yes: bool) -> bool:
         return True
     skeleton: dict[str, Any] = {"family": members, "shared_devices": {}, "screens": {}}
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        yaml.safe_dump(skeleton, sort_keys=False, allow_unicode=True), encoding="utf-8"
-    )
+    path.write_text(yaml.safe_dump(skeleton, sort_keys=False, allow_unicode=True), encoding="utf-8")
     console.print(f"  [green]✓[/] wrote {len(members)} member(s) to new {path}")
     return True
 
@@ -945,7 +944,9 @@ def _provider_health(kind: str, cfg: config.Config) -> HealthSnapshot:
         provider = make_provider(kind, cfg.cli.providers)
         return provider.health()
     except Exception as exc:  # build or health failure → fail-closed snapshot
-        return HealthSnapshot(ok=False, latency_ms=None, quota_remaining=None, detail=str(exc)[:160])
+        return HealthSnapshot(
+            ok=False, latency_ms=None, quota_remaining=None, detail=str(exc)[:160]
+        )
 
 
 def set_provider_config(
@@ -1069,7 +1070,10 @@ def _run_gemini() -> dict[str, Any] | None:
     REVOKES the Keychain entry and returns None. An empty key skips Gemini.
     """
     key = Prompt.ask(
-        "  Google AI / Gemini API key (enter to skip)", password=True, default="", show_default=False
+        "  Google AI / Gemini API key (enter to skip)",
+        password=True,
+        default="",
+        show_default=False,
     ).strip()
     if not key:
         console.print(
@@ -1171,9 +1175,7 @@ def _run_ai_providers(*, yes: bool) -> bool:
     # Default to Claude when it configured, else Gemini — the verified provider the
     # user most likely wants first; mlx_local stays the floor regardless.
     default_provider = "claude" if claude_cfg is not None else "gemini"
-    set_provider_config(
-        claude=claude_cfg, gemini=gemini_cfg, default_provider=default_provider
-    )
+    set_provider_config(claude=claude_cfg, gemini=gemini_cfg, default_provider=default_provider)
     summary = " · ".join(
         bit
         for bit in (
@@ -1301,7 +1303,11 @@ def set_firewalla_bridge(
 
     # Token → secrets file, fail-closed perms (600). Created before write so the
     # token never lands on disk world-readable even briefly.
-    tf = Path(token_file) if token_file else (Path.home() / ".sanctum/secrets/firewalla-bridge-token")
+    tf = (
+        Path(token_file)
+        if token_file
+        else (Path.home() / ".sanctum/secrets/firewalla-bridge-token")
+    )
     tf.parent.mkdir(parents=True, exist_ok=True)
     tf.touch(mode=0o600, exist_ok=True)
     tf.chmod(0o600)
@@ -1401,6 +1407,202 @@ def _run_firewalla_compat() -> bool:
         console.print(f"  [red]✗[/] {exc.message}")
         if exc.fix:
             console.print(f"  [dim]fix: {exc.fix}[/]")
+    return False
+
+
+# ── HA Green (Home Assistant appliance) gate ─────────────────────────
+# The haus runs a Home Assistant Green at a static LAN IP (10.0.0.3, MAC
+# 20:F8:3B:02:3A:C8). It is a Bearer-(owner-)token REST box exactly like the
+# Firewalla bridge, so this gate MIRRORS _run_firewalla_pairing: detect on the LAN
+# → verify with the owner token (GET /api/ → "API running.") → record the verified
+# pairing + the token (0600 secrets file) → report the Tailscale remote-access
+# node. HONEST-VERIFY: every ✓ derives from a REAL successful check (a TCP connect,
+# the running marker, the tailnet listing), never from "the step ran". A box that
+# is unreachable / not verified persists NOTHING (a false "detected" hides a dead
+# appliance until the first missed automation). Interactive (--yes skips); the
+# token prompt is masked. Every device call is a module-level seam in
+# sanctum_cli.devices.ha_green the tests monkeypatch, so no live HA / Tailscale is
+# touched in the suite.
+
+#: The Green's known LAN MAC (a Firewalla DHCP reservation) — recorded in the
+#: persisted services block for the audit trail. A fixed haus fact, not prompted.
+_HA_GREEN_MAC = "20:F8:3B:02:3A:C8"
+
+
+def set_ha_green(
+    *,
+    token: str | None,
+    host: str,
+    port: int,
+    device_mac: str,
+    tailnet_node: str,
+    path: Path | None = None,
+    token_file: Path | None = None,
+) -> None:
+    """Persist a VERIFIED HA Green pairing — mirrors :func:`set_firewalla_bridge`.
+
+    Writes ``services.ha_green`` (enabled + host + port + device_mac + tailnet_node)
+    into instance.yaml via raw read-modify-write (sibling blocks preserved, a
+    ``<file>.bak`` written first), and — when a ``token`` is given — the owner token
+    into the mode-600 secrets file (``~/.sanctum/secrets/ha-token`` by default, the
+    SAME path the provider reads), NEVER into instance.yaml. A ``None`` token means
+    "the token already on disk verified" — only the reference block is (re)written.
+    Callers must only invoke this AFTER :func:`ha_green.api_running` returns True.
+    """
+    target = Path(path) if path else config.instance_path()
+    data: dict[str, Any] = {}
+    if target.exists():
+        loaded = yaml.safe_load(target.read_text(encoding="utf-8"))
+        if isinstance(loaded, dict):
+            data = loaded
+    services = data.get("services")
+    if not isinstance(services, dict):
+        services = data["services"] = {}
+    services["ha_green"] = {
+        "enabled": True,
+        "host": host,
+        "port": port,
+        "device_mac": device_mac,
+        "tailnet_node": tailnet_node,
+    }
+    if target.exists():
+        backup = target.parent / (target.name + ".bak")
+        backup.write_text(target.read_text(encoding="utf-8"), encoding="utf-8")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True), encoding="utf-8")
+
+    if token is None:
+        return
+    # Token → secrets file, fail-closed perms (600). Created before write so the
+    # token never lands on disk world-readable even briefly (mirrors the Firewalla
+    # bridge-token persistence exactly).
+    from sanctum_cli.devices import ha_green
+
+    tf = Path(token_file) if token_file else ha_green._HA_TOKEN_FILE
+    tf.parent.mkdir(parents=True, exist_ok=True)
+    tf.touch(mode=0o600, exist_ok=True)
+    tf.chmod(0o600)
+    tf.write_text(token.strip() + "\n", encoding="utf-8")
+
+
+def _report_ha_remote_access(node_present: bool) -> None:
+    """Print the honest Tailscale remote-access row for the HA Green chapter.
+
+    True ONLY from a real ``tailscale status`` listing of the ``homeassistant``
+    node — never from "we tried". A missing node is a calm note (remote access is
+    additive; LAN reach is what the chapter actually verified), with the fix.
+    """
+    from sanctum_cli.devices import ha_green
+
+    if node_present:
+        console.print(
+            f"  [green]✓[/] remote access ready — Tailscale node "
+            f"[bold]{ha_green._TAILNET_NODE}.{ha_green._TAILNET_SUFFIX}[/] is joined"
+        )
+    else:
+        console.print(
+            f"  [yellow]remote access not joined[/] — the Tailscale node "
+            f"[bold]{ha_green._TAILNET_NODE}[/] isn't in the tailnet yet "
+            "(enable the Home Assistant Tailscale add-on to reach it off-LAN)"
+        )
+
+
+def _persist_ha_green(*, token: str | None) -> None:
+    """Record the verified HA Green pairing (services block + optional token)."""
+    from sanctum_cli.devices import ha_green
+
+    host, port = ha_green._url_host_port()
+    set_ha_green(
+        token=token,
+        host=host,
+        port=port,
+        device_mac=_HA_GREEN_MAC,
+        tailnet_node=ha_green._TAILNET_NODE,
+    )
+
+
+def _run_ha_green(*, yes: bool) -> bool:
+    """HA Green detection + verification gate — fail-closed, mirrors firewalla-pairing.
+
+    Returns True ONLY when the Green was genuinely VERIFIED (GET /api/ → "API
+    running." with the owner token) AND the pairing was recorded; returns False
+    when ``--yes`` skips, the Green is not on the LAN, the operator declines, or
+    every token attempt is rejected — so the recap reads "skipped" rather than a
+    false "paired" (design spec §2/§11; HONEST-VERIFY). Flow:
+
+    1. detect on the LAN (a real TCP connect to 10.0.0.3:8123);
+    2. if the token already on disk verifies (``api_running``) → record + report
+       remote access, no prompt (a re-run on a configured haus is idempotent);
+    3. else offer to capture the long-lived OWNER token (masked), verify the
+       just-entered token against ``GET /api/``, and persist ONLY on the running
+       marker — a rejected token writes nothing (3 attempts).
+
+    Interactive by design, so ``--yes`` SKIPS it; a Green that isn't on the LAN is
+    silently skipped (haus-aware). Non-blocking: the backup already succeeded, so a
+    miss never fails the run.
+    """
+    if yes:
+        console.print(
+            "  [yellow]skipped[/] — interactive step; run `sanctum onboard` without "
+            "--yes to verify your HA Green"
+        )
+        return False
+
+    from sanctum_cli.devices import ha_green
+
+    host, port = ha_green._url_host_port()
+    if not ha_green.lan_reachable():
+        console.print(
+            f"  [dim]no HA Green detected at {host}:{port} — nothing to verify "
+            "(re-run `sanctum onboard` after powering it on)[/]"
+        )
+        return False
+
+    console.print(f"  [bold]HA Green[/] detected on the LAN ({host}:{port})")
+
+    # Already verified by the token on disk → record + report, no prompt.
+    if ha_green.api_running():
+        version = ha_green.ha_version()
+        _persist_ha_green(token=None)
+        console.print(
+            f"  [green]✓[/] HA Core verified — API running"
+            f"{f' (version {version})' if version else ''}"
+        )
+        _report_ha_remote_access(ha_green.tailscale_node_present())
+        return True
+
+    # Reachable but not verified → offer to capture the owner token.
+    if not Confirm.ask(
+        "  HA Green is up but not verified — pair it with the owner token now?", default=True
+    ):
+        console.print("  [dim]skipped — HA Green stays unverified until you add the owner token[/]")
+        return False
+
+    for attempt in range(3):
+        token = Prompt.ask("  Home Assistant long-lived OWNER token", password=True).strip()
+        if not token:
+            console.print("  [dim]no token entered — HA Green skipped[/]")
+            return False
+        if ha_green.api_running(token=token):
+            version = ha_green.ha_version(token=token)
+            _persist_ha_green(token=token)
+            console.print(
+                f"  [green]✓[/] HA Green verified + recorded — API running"
+                f"{f' (version {version})' if version else ''}"
+            )
+            _report_ha_remote_access(ha_green.tailscale_node_present())
+            return True
+        console.print(
+            "  [red]✗[/] not verified — GET /api/ did not return the running marker "
+            "(wrong token, or use the long-lived OWNER token)"
+        )
+        if attempt < 2:
+            console.print("  [dim]check the token and try again[/]")
+
+    console.print(
+        "  [yellow]HA Green NOT verified[/] — nothing written. Re-run `sanctum onboard` "
+        "(or `sanctum net ha-green status`) after fixing the token."
+    )
     return False
 
 

@@ -12,10 +12,11 @@ from rich.markup import escape
 
 from sanctum_cli import config
 from sanctum_cli.devices import firewalla as firewalla_provider
+from sanctum_cli.devices import ha_green as ha_green_provider
 from sanctum_cli.devices import intents, rails, registry, sagemcom
 from sanctum_cli.devices import orbi as orbi_provider
 from sanctum_cli.devices.base import Capability, Creds, DeviceError, NetContext, OpResult
-from sanctum_cli.errors import SanctumError
+from sanctum_cli.errors import ExitCode, SanctumError
 from sanctum_cli.net import detect, playbooks, render, safety, speedtest, system, verify
 from sanctum_cli.net.types import SpeedReport, Verdict
 
@@ -39,6 +40,7 @@ def _report(exc: SanctumError) -> None:
     err_console.print(f"[bold red]error:[/] {exc.message}")
     if exc.fix:
         err_console.print(f"[dim]fix:[/] {exc.fix}")
+
 
 _SNAP_ROOT = Path.home() / ".sanctum" / "net-optimize"
 
@@ -475,9 +477,7 @@ def hub_get(
 def hub_set(
     path: Annotated[str, typer.Argument(help="Provider-specific path (e.g. an XPath).")],
     value: Annotated[str, typer.Argument(help="New value to write.")],
-    force: Annotated[
-        bool, typer.Option("--force", help="Skip the confirmation prompt.")
-    ] = False,
+    force: Annotated[bool, typer.Option("--force", help="Skip the confirmation prompt.")] = False,
     no_rollback: Annotated[
         bool,
         typer.Option("--no-rollback", help="Leave a failed change in place for inspection."),
@@ -797,9 +797,7 @@ def firewalla_pause(
 # capability_op (snapshot → confirm → set → verify → rollback). The overnight
 # build never mutates live gear (we have no live Orbi creds yet either).
 
-orbi_app = typer.Typer(
-    help="Drive the NETGEAR Orbi mesh router through the device-provider rails."
-)
+orbi_app = typer.Typer(help="Drive the NETGEAR Orbi mesh router through the device-provider rails.")
 net_app.add_typer(orbi_app, name="orbi")
 
 # Provider-path leaves the orbi read commands surface. These mirror the provider's
@@ -931,7 +929,9 @@ def orbi_guest_wifi(
     state: Annotated[str, typer.Argument(help="Desired guest-wifi state: on | off.")],
     apply: Annotated[
         bool,
-        typer.Option("--apply", help="Actually fire the change (guarded by snapshot→verify→rollback)."),
+        typer.Option(
+            "--apply", help="Actually fire the change (guarded by snapshot→verify→rollback)."
+        ),
     ] = False,
     force: Annotated[
         bool, typer.Option("--force", help="Skip the confirmation prompt (with --apply).")
@@ -962,7 +962,9 @@ def orbi_guest_wifi(
             # The value that ENGAGES the capability is op.engaged ("on"); the
             # disengaged value is the other state. Derive it so a brand whose
             # engaged sentinel is not literally "on" still flips correctly.
-            target_value = op.engaged if desired == "on" else ("off" if op.engaged == "on" else "on")
+            target_value = (
+                op.engaged if desired == "on" else ("off" if op.engaged == "on" else "on")
+            )
 
             plan = [
                 f"guest-wifi {desired} plan:",
@@ -976,9 +978,7 @@ def orbi_guest_wifi(
             if not apply:
                 # Dry-run: describe, do not mutate. The hard guardrail — no
                 # provider.set / guarded_apply is reached on this branch.
-                console.print(
-                    "\n[dim]dry-run: no changes made. Re-run with --apply to fire.[/]"
-                )
+                console.print("\n[dim]dry-run: no changes made. Re-run with --apply to fire.[/]")
                 return
 
             def change(pv: DeviceProvider) -> OpResult:
@@ -1025,3 +1025,149 @@ def orbi_guest_wifi(
     else:
         console.print(f"\n[yellow]{escape(result.detail)}[/]")
         raise typer.Exit(code=1)
+
+
+# ─── ha-green (Home Assistant appliance provider surface) ────────────
+#
+# Mirrors the firewalla sub-app: a `ha-green` Typer sub-app under net_app,
+# resolved via registry.resolve("ha-green", net) and connected through the same
+# DeviceProvider rails. The HA Green is the haus Home Assistant appliance — a
+# Bearer-(owner-)token REST box exactly like the Firewalla bridge, so it onboards
+# and reports the SAME way. The surface is READ-ONLY (HA mutations ride the
+# ha-green-toolkit's WebSocket path), so there is no set/pause command — only the
+# honest health `status`. Importing sanctum_cli.devices.ha_green self-registers
+# HaGreenProvider under kind="ha-green" (see the module footer); referenced here so
+# the import is never pruned as unused.
+_ha_green_registered = ha_green_provider
+
+ha_green_app = typer.Typer(
+    help="Read the HA Green (Home Assistant appliance) through the device-provider rails."
+)
+net_app.add_typer(ha_green_app, name="ha-green")
+
+# The Green's REST read paths the status summary surfaces (the provider's own
+# vocabulary). ``/api/`` is the running-marker oracle; ``/api/config`` carries the
+# Core version. The bearer owner token is self-resolved by the provider at connect
+# time (env / on-disk secret), so the CLI never carries it; the username is a
+# label only.
+_HA_API_PATH = "/api/"
+_HA_CONFIG_PATH = "/api/config"
+_HA_USERNAME = "owner"
+
+
+def _ha_green_netcontext() -> NetContext:
+    """Build the NetContext the registry fingerprints the HA Green over.
+
+    Parses the default gateway from the real ``route`` probe (read-only) and
+    threads the real runner so a provider's ``detect()`` can probe without owning
+    its own subprocess plumbing. Monkeypatched in tests so no shell-out occurs.
+    """
+    gw = detect.parse_default_gateway(system.real_runner(("route",)))
+    return NetContext(gateway_ip=gw, runner=system.real_runner)
+
+
+def _ha_green_creds(net: NetContext) -> Creds:
+    """Assemble Creds for the resolved HA Green.
+
+    The host is the Green's LAN IP (the gateway is unused — HA is not the gateway,
+    so fall back to the provider's documented LAN reservation); the username is a
+    label. The secret is left ``None`` on purpose — the provider reads the owner
+    token from the env / on-disk secret at connect time (credentials never flow
+    through the CLI layer), exactly like the Firewalla bearer token.
+    """
+    return Creds(
+        host=net.gateway_ip or "",
+        username=_HA_USERNAME,
+        secret=None,
+        key_path=None,
+    )
+
+
+def _resolve_ha_green() -> DeviceProvider:
+    """Resolve + connect the HA Green provider for the local network.
+
+    Detection is read-only; ``connect`` resolves the owner token. Any transport /
+    auth failure on a later strict read raises a ``SanctumError`` (DeviceError)
+    which the command wrappers map to a clean exit code.
+
+    NOTE: the caller MUST release the provider via ``disconnect()`` — use
+    :func:`_connected_ha_green` (a context manager) instead of calling this
+    directly so teardown is guaranteed.
+
+    An optional instance.yaml ``devices.ha-green.brand`` pins the provider
+    explicitly, bypassing ``detect()`` — the escape hatch for a Green whose
+    read-only probe is stubbed (without it a stubbed probe degrades the real Green
+    to the read-only fallback).
+    """
+    net = _ha_green_netcontext()
+    pinned = config.instance_value("devices.ha-green.brand", None)
+    brand_pin = str(pinned) if pinned is not None else None
+    provider = registry.resolve("ha-green", net, brand_pin=brand_pin)
+    provider.connect(_ha_green_creds(net))
+    return provider
+
+
+@contextmanager
+def _connected_ha_green() -> Iterator[DeviceProvider]:
+    """Yield a connected HA Green provider, guaranteeing ``disconnect()`` on exit.
+
+    Closes the lifecycle gap behind every ``sanctum net ha-green ...`` command:
+    ``disconnect`` is part of the ``DeviceProvider`` Protocol and is idempotent +
+    safe even if ``connect`` failed, so the ``finally`` can always call it.
+    """
+    provider = _resolve_ha_green()
+    try:
+        yield provider
+    finally:
+        provider.disconnect()
+
+
+@ha_green_app.command(
+    "status",
+    help="Read-only HA Green health: LAN reachable, HA API up + version, Tailscale node.",
+)
+def ha_green_status() -> None:
+    """Honest health report for the haus Home Assistant Green.
+
+    Every ✓/✗ derives from a REAL check, never from "the command ran" (HONEST-VERIFY):
+
+    * LAN — a TCP connect to the Green's host:port (``lan_reachable``);
+    * HA API — ``GET /api/`` returning the ``"API running."`` marker AND the owner
+      token authenticating (``api_running``), plus the Core ``version`` when up;
+    * Tailscale — the tailnet listing the ``homeassistant`` node
+      (``tailscale_node_present``).
+
+    Exits ``LOCAL_ERROR`` when the Core API is NOT up — so the command is a
+    scriptable health gate that fails honestly on a down/unreachable Green rather
+    than printing a dash and exiting 0.
+    """
+    try:
+        with _connected_ha_green() as provider:
+            api_up = ha_green_provider.api_running()
+            version = ha_green_provider.ha_version() if api_up else None
+            lan_up = ha_green_provider.lan_reachable()
+            tailnet_up = ha_green_provider.tailscale_node_present()
+            brand, kind = provider.brand, provider.kind
+    except SanctumError as exc:
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code)) from exc
+
+    host, port = ha_green_provider._url_host_port()
+    lan_mark = "[green]reachable ✓[/]" if lan_up else "[red]unreachable ✗[/]"
+    api_mark = f"[green]up ✓[/] (version {escape(version or '?')})" if api_up else "[red]down ✗[/]"
+    tail_mark = (
+        f"[green]joined ✓[/] ({escape(ha_green_provider._TAILNET_NODE)}."
+        f"{escape(ha_green_provider._TAILNET_SUFFIX)})"
+        if tailnet_up
+        else "[yellow]not joined ✗[/]"
+    )
+
+    console.print(f"[bold]ha-green:[/] {escape(brand)} ({escape(kind)})")
+    console.print(f"[bold]LAN ({escape(host)}:{port}):[/] {lan_mark}")
+    console.print(f"[bold]HA API:[/] {api_mark}")
+    console.print(f"[bold]Tailscale '{escape(ha_green_provider._TAILNET_NODE)}':[/] {tail_mark}")
+
+    if not api_up:
+        # Honest unhealthy signal: never report a green status over a Core that did
+        # not answer the running marker (a down box / missing token / wrong body).
+        raise typer.Exit(code=int(ExitCode.LOCAL_ERROR))

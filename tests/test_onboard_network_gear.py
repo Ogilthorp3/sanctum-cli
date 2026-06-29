@@ -236,6 +236,9 @@ def _invoke_family_onboard_interactive(input_text: str) -> tuple[int, str]:
         patch("sanctum_cli.commands.onboard._run_family_setup"),
         patch("sanctum_cli.commands.onboard._run_firewalla_pairing"),
         patch("sanctum_cli.commands.onboard._run_ai_providers"),
+        # HA Green runs AFTER network-gear (own tests); mock it so a real TCP probe
+        # to 10.0.0.3 never runs and it never consumes this gate's stdin.
+        patch("sanctum_cli.commands.onboard._run_ha_green"),
         # The masked admin-password prompt (Prompt.ask(password=True)) routes to
         # getpass, which emits GetPassWarning when stdin is not a real TTY (every
         # CliRunner). The pyproject `filterwarnings=["error"]` would turn that
