@@ -6,7 +6,17 @@ Ported from /tmp/link-build/test_link_diagnose.py to the dataclass API
 
 from __future__ import annotations
 
-from sanctum_cli.net.link import Sample, classify, parse_log
+import plistlib
+
+from sanctum_cli.net.link import (
+    Sample,
+    analyze_mac,
+    classify,
+    is_locally_administered,
+    parse_log,
+    probe_wifi,
+    render_mac_stability_profile,
+)
 
 
 def _s(
@@ -130,3 +140,101 @@ def test_no_gateway_line_is_excluded_not_false_radio() -> None:
     # DEGRADED, IS kept — see test_total_loss_window_classifies_radio.)
     line = "2026-06-29T22:30:00 ssid=Net rtt=NA loss=NA% load=[2.0 2.0 2.0] NO_GATEWAY"
     assert parse_log(line) == []
+
+
+# ─── MAC stability (P2 — Optimize client) ────────────────────────────
+
+# The reference incident's two MACs: the live randomized address the AP saw
+# (rotation churn) and the burned-in hardware MAC that fixed the link.
+RANDOMIZED_MAC = "de:48:45:83:ae:0a"
+HARDWARE_MAC = "84:2f:57:02:be:ee"
+
+
+def test_analyze_mac_randomized_when_current_differs_from_hardware() -> None:
+    a = analyze_mac(RANDOMIZED_MAC, HARDWARE_MAC)
+    assert a.randomized is True
+    assert a.current == RANDOMIZED_MAC
+    assert a.hardware == HARDWARE_MAC
+    # The remedy must name the fix that proved it (Private Wi-Fi Address Off).
+    assert "Private Wi-Fi Address" in a.remedy
+
+
+def test_analyze_mac_stable_when_current_equals_hardware() -> None:
+    a = analyze_mac(HARDWARE_MAC, HARDWARE_MAC)
+    assert a.randomized is False
+    assert a.risk == "none — the node is on its stable hardware MAC."
+
+
+def test_analyze_mac_equality_is_case_insensitive() -> None:
+    # The two system reads can differ in case; a case-only diff is NOT randomized.
+    assert analyze_mac(HARDWARE_MAC.upper(), HARDWARE_MAC.lower()).randomized is False
+
+
+def test_is_locally_administered_bit() -> None:
+    # 0xde = 1101 1110 → LAA bit (bit 1) set → randomized/private.
+    assert is_locally_administered(RANDOMIZED_MAC) is True
+    # 0x84 = 1000 0100 → LAA bit clear → universally-administered hardware MAC.
+    assert is_locally_administered(HARDWARE_MAC) is False
+    # Malformed first octet cannot be proven locally-administered.
+    assert is_locally_administered("") is False
+    assert is_locally_administered("zz:00:00:00:00:00") is False
+
+
+def test_render_profile_round_trips_via_plistlib() -> None:
+    ssid = "Sanctum-Closet-5G"
+    xml = render_mac_stability_profile(ssid, HARDWARE_MAC)
+    # Real artifact through the real consumer (Contracts at the Boundary): the
+    # rendered bytes MUST parse as a plist, not just "look like" one.
+    parsed = plistlib.loads(xml.encode("utf-8"))
+    assert parsed["PayloadType"] == "Configuration"
+    payload = parsed["PayloadContent"][0]
+    assert payload["PayloadType"] == "com.apple.wifi.managed"
+    # The headline contract: MAC randomization disabled for this SSID.
+    assert payload["SSID_STR"] == ssid
+    assert payload["MACAddressRandomization"] is False
+
+
+def test_render_profile_contains_ssid_and_randomization_key() -> None:
+    ssid = "Sanctum-Closet-5G"
+    xml = render_mac_stability_profile(ssid, HARDWARE_MAC)
+    assert ssid in xml
+    assert "MACAddressRandomization" in xml
+    assert "<false/>" in xml
+
+
+def test_render_profile_is_deterministic() -> None:
+    # Same inputs → byte-identical output (UUIDs derived from a hash, sorted keys),
+    # so re-applying never churns the installed profile's identity.
+    a = render_mac_stability_profile("NetA", HARDWARE_MAC)
+    b = render_mac_stability_profile("NetA", HARDWARE_MAC)
+    assert a == b
+    # Different inputs → different identity (no UUID collision across networks).
+    assert render_mac_stability_profile("NetB", HARDWARE_MAC) != a
+
+
+def test_probe_wifi_with_fake_runner() -> None:
+    # Fake the four system reads from REAL macOS command output shapes (derived
+    # from `networksetup`/`ifconfig`/`ipconfig` on a live Mac — a different source
+    # than the parser), so the probe's parsing contract is exercised end to end.
+    outputs: dict[tuple[str, ...], str] = {
+        ("networksetup", "-listallhardwareports"): (
+            "Hardware Port: Ethernet\nDevice: en4\nEthernet Address: 00:11:22:33:44:55\n\n"
+            "Hardware Port: Wi-Fi\nDevice: en0\nEthernet Address: 84:2f:57:02:be:ee\n"
+        ),
+        ("ifconfig", "en0"): f"\tether {RANDOMIZED_MAC}\n",
+        ("networksetup", "-getmacaddress", "en0"): (
+            f"Ethernet Address: {HARDWARE_MAC} (Device: en0)\n"
+        ),
+        ("ipconfig", "getsummary", "en0"): "  BSSID : aa:bb:cc:dd:ee:ff\n  SSID : ClosetNet\n",
+    }
+
+    def fake_run(argv: list[str]) -> str:
+        return outputs[tuple(argv)]
+
+    probe = probe_wifi(run=fake_run)
+    assert probe.iface == "en0"
+    assert probe.current_mac == RANDOMIZED_MAC
+    assert probe.hardware_mac == HARDWARE_MAC
+    assert probe.ssid == "ClosetNet"
+    # And the pure analysis over the probe is the rotation verdict.
+    assert analyze_mac(probe.current_mac, probe.hardware_mac).randomized is True

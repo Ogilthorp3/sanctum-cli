@@ -212,3 +212,148 @@ def link_install() -> None:
         f"[dim]Run [bold]sanctum link status[/] once samples accumulate "
         f"(~{link.SENTINEL_INTERVAL_S}s cadence).[/]"
     )
+
+
+def _render_mac_audit(probe: link.WifiProbe, audit: link.MacAudit) -> None:
+    """Print the MAC-stability hardening report — the headline ✓/⚠ check.
+
+    honest-verify: the verdict is derived from a REAL probe read. When the live
+    MAC could not be read at all (both empty), we do NOT claim stable — we print a
+    ⚠ that says we could not verify, because a false ✓ here is exactly the silent
+    regression this tool exists to catch.
+    """
+    if not probe.current_mac or not probe.hardware_mac:
+        console.print(
+            "[yellow]⚠[/] MAC stability: [yellow]UNVERIFIED[/] — could not read the "
+            f"Wi-Fi MAC on [bold]{escape(probe.iface)}[/]"
+        )
+        console.print(
+            "  [dim]Is this node on Wi-Fi? Connect to the network, then re-run.[/]"
+        )
+        return
+    if audit.randomized:
+        console.print(
+            f"[red]⚠[/] MAC stability: [red]RANDOMIZED[/] on [bold]{escape(probe.iface)}[/]"
+        )
+        console.print(
+            f"  live MAC [red]{escape(audit.current)}[/] ≠ hardware MAC "
+            f"[bold]{escape(audit.hardware)}[/] → Private Wi-Fi Address is ON"
+        )
+        console.print(f"  [dim]risk:[/] {escape(audit.risk)}")
+    else:
+        console.print(
+            f"[green]✓[/] MAC stability: [green]STABLE[/] on [bold]{escape(probe.iface)}[/]"
+        )
+        console.print(
+            f"  live MAC = hardware MAC [bold]{escape(audit.hardware)}[/] → "
+            "Private Wi-Fi Address is Off"
+        )
+    console.print(f"  → {escape(audit.remedy)}")
+
+
+def _write_profile(probe: link.WifiProbe, profile_out: Path) -> None:
+    """Render the stability profile to ``profile_out`` (0644) and guide install.
+
+    Never touches the radio: it GENERATES the .mobileconfig and tells the operator
+    how to install it (open the file / approve in System Settings). Modern macOS
+    requires user approval for a configuration profile, so we deliberately do NOT
+    shell out to ``profiles install``.
+    """
+    if not probe.ssid:
+        err = LocalError(
+            "cannot render a MAC-stability profile: this node is not associated "
+            "to a Wi-Fi network (no SSID).",
+            fix="connect the node to its Wi-Fi network, then re-run with --apply.",
+        )
+        _report(err)
+        raise typer.Exit(code=int(err.exit_code))
+    if not probe.hardware_mac:
+        err = LocalError(
+            "cannot render a MAC-stability profile: could not read this node's "
+            "hardware MAC.",
+            fix="confirm the node has a Wi-Fi interface, then re-run.",
+        )
+        _report(err)
+        raise typer.Exit(code=int(err.exit_code))
+
+    profile_xml = link.render_mac_stability_profile(probe.ssid, probe.hardware_mac)
+    try:
+        profile_out.parent.mkdir(parents=True, exist_ok=True)
+        profile_out.write_text(profile_xml, encoding="utf-8")
+        profile_out.chmod(0o644)
+    except OSError as exc:
+        err = LocalError(
+            f"failed to write profile {profile_out}: {exc}",
+            fix="check the path + permissions, or pass --profile-out <file>.",
+        )
+        _report(err)
+        raise typer.Exit(code=int(err.exit_code)) from exc
+
+    console.print(
+        f"[green]✓[/] wrote stability profile {escape(str(profile_out))} [dim](0644)[/]"
+    )
+    console.print(
+        f"  [dim]scoped to SSID[/] [bold]{escape(probe.ssid)}[/] "
+        f"[dim]· pins MAC[/] [bold]{escape(probe.hardware_mac)}[/]"
+    )
+    console.print("\n[bold]To enforce a stable MAC[/] (macOS requires your approval):")
+    console.print(f"  1. [bold]open {escape(str(profile_out))}[/]")
+    console.print(
+        "  2. System Settings ▸ Privacy & Security ▸ Profiles → approve "
+        "[bold]Wi-Fi MAC Stability[/]"
+    )
+    console.print(
+        "  3. Confirm Wi-Fi ▸ [your network] ▸ Details… shows "
+        "[bold]Private Wi-Fi Address: Off[/] for this fixed-infra node."
+    )
+    console.print(
+        "[dim]The tool generates + guides + verifies; it never toggles the radio — "
+        "this node's only link is the one being changed.[/]"
+    )
+
+
+@link_app.command(
+    "optimize",
+    help="Audit the node's Wi-Fi MAC stability (and, with --apply, enforce it).",
+)
+def link_optimize(
+    apply: Annotated[
+        bool,
+        typer.Option(
+            "--apply",
+            help="Render an enforcement profile (read-only audit without it).",
+        ),
+    ] = False,
+    profile_out: Annotated[
+        Path | None,
+        typer.Option(
+            "--profile-out",
+            help="Where --apply writes the .mobileconfig "
+            "(default: ~/.sanctum/wifi-mac-stability.mobileconfig).",
+        ),
+    ] = None,
+) -> None:
+    """Audit Wi-Fi MAC stability; with ``--apply`` render an enforcement profile.
+
+    Default is a read-only AUDIT: probe the live Wi-Fi identity, classify it with
+    the pure ``analyze_mac``, and print a hardening report whose headline is MAC
+    stability. With ``--apply`` it ALSO renders a ``.mobileconfig`` that disables
+    MAC randomization and prints apple-like guidance to install it. It NEVER
+    mutates the live Wi-Fi association — the node's only link — it generates,
+    guides, and verifies.
+    """
+    probe = link.probe_wifi()
+    audit = link.analyze_mac(probe.current_mac, probe.hardware_mac)
+
+    console.print("[bold]Wi-Fi link hardening — MAC stability[/]")
+    _render_mac_audit(probe, audit)
+
+    if apply:
+        out = profile_out if profile_out is not None else link.default_profile_path()
+        console.print()
+        _write_profile(probe, out)
+    elif audit.randomized:
+        console.print(
+            "\n[dim]Re-run with [bold]--apply[/] to render an enforcement profile "
+            "that pins this node to its stable MAC.[/]"
+        )

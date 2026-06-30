@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import os
+import plistlib
 from typing import TYPE_CHECKING
 
 from typer.testing import CliRunner
 
 from sanctum_cli.cli import app
+from sanctum_cli.net import link
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -15,6 +17,28 @@ if TYPE_CHECKING:
     import pytest
 
 runner = CliRunner()
+
+# The reference incident's two MACs (randomized live address vs hardware MAC).
+RANDOMIZED_MAC = "de:48:45:83:ae:0a"
+HARDWARE_MAC = "84:2f:57:02:be:ee"
+
+
+def _randomized_probe() -> link.WifiProbe:
+    return link.WifiProbe(
+        iface="en0",
+        current_mac=RANDOMIZED_MAC,
+        hardware_mac=HARDWARE_MAC,
+        ssid="ClosetNet",
+    )
+
+
+def _stable_probe() -> link.WifiProbe:
+    return link.WifiProbe(
+        iface="en0",
+        current_mac=HARDWARE_MAC,
+        hardware_mac=HARDWARE_MAC,
+        ssid="ClosetNet",
+    )
 
 # A LOAD-bound sentinel window (latency tracks load, zero loss).
 LOAD_LOG = """\
@@ -128,3 +152,73 @@ def test_install_reports_when_launchctl_fails_but_still_exits_zero(
     assert result.exit_code == 0, result.stdout
     assert (tmp_path / "bin" / "s.sh").exists()
     assert "not confirmed" in result.stdout.lower() or "manually" in result.stdout.lower()
+
+
+# ─── optimize (P2 — Optimize client) ─────────────────────────────────
+
+
+def test_optimize_audit_reports_randomized_and_exits_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default optimize is a read-only audit: probe → analyze → verdict, exit 0."""
+    monkeypatch.setattr("sanctum_cli.net.link.probe_wifi", _randomized_probe)
+    result = runner.invoke(app, ["link", "optimize"])
+    assert result.exit_code == 0, result.stdout
+    assert "MAC stability" in result.stdout
+    assert "RANDOMIZED" in result.stdout
+    # The verdict must surface BOTH MACs (honest-verify: derived from a real read).
+    assert HARDWARE_MAC in result.stdout
+    assert RANDOMIZED_MAC in result.stdout
+    # No profile written without --apply.
+    assert "wrote stability profile" not in result.stdout
+
+
+def test_optimize_audit_reports_stable_for_hardware_mac(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("sanctum_cli.net.link.probe_wifi", _stable_probe)
+    result = runner.invoke(app, ["link", "optimize"])
+    assert result.exit_code == 0, result.stdout
+    assert "STABLE" in result.stdout
+    assert "RANDOMIZED" not in result.stdout
+
+
+def test_optimize_apply_writes_valid_mobileconfig(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--apply --profile-out writes a real .mobileconfig that parses as a plist.
+
+    Real artifact through the real boundary: the file is read back and fed to
+    plistlib, not just checked for existence.
+    """
+    monkeypatch.setattr("sanctum_cli.net.link.probe_wifi", _randomized_probe)
+    out = tmp_path / "sub" / "wifi-mac-stability.mobileconfig"
+    result = runner.invoke(
+        app, ["link", "optimize", "--apply", "--profile-out", str(out)]
+    )
+    assert result.exit_code == 0, result.stdout
+    assert out.exists()
+    assert oct(out.stat().st_mode & 0o777) == "0o644"
+
+    parsed = plistlib.loads(out.read_bytes())
+    assert parsed["PayloadType"] == "Configuration"
+    payload = parsed["PayloadContent"][0]
+    assert payload["SSID_STR"] == "ClosetNet"
+    assert payload["MACAddressRandomization"] is False
+
+    # Apple-like guidance (open + approve), and the honest no-toggle note.
+    assert "Private Wi-Fi Address: Off" in result.stdout
+    assert "never toggles the radio" in result.stdout
+
+
+def test_optimize_apply_default_profile_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no --profile-out, --apply writes to the default sanctum path."""
+    monkeypatch.setattr("sanctum_cli.net.link.probe_wifi", _randomized_probe)
+    out = tmp_path / "wifi-mac-stability.mobileconfig"
+    monkeypatch.setattr("sanctum_cli.net.link.default_profile_path", lambda: out)
+    result = runner.invoke(app, ["link", "optimize", "--apply"])
+    assert result.exit_code == 0, result.stdout
+    assert out.exists()
+    assert plistlib.loads(out.read_bytes())["PayloadType"] == "Configuration"

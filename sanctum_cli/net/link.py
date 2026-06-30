@@ -16,7 +16,11 @@ runtime (no hardcoded haus IP/iface), so the same bytes work on any user's LAN.
 from __future__ import annotations
 
 import math
+import plistlib
 import re
+import subprocess
+import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -355,3 +359,229 @@ def render_plist(*, script: Path | None = None, err_log: Path | None = None) -> 
         interval=SENTINEL_INTERVAL_S,
         err_log=err_log,
     )
+
+
+# ─── MAC stability (P2 — Optimize client: audit + enforce a stable MAC) ──
+#
+# Real incident: a closet Mac server's Wi-Fi was unstable for weeks because its
+# "Private Wi-Fi Address" was set to Rotating (macOS re-defaulted it on a network
+# re-join after a LAN renumber). A rotating Wi-Fi MAC makes the node periodically
+# re-associate under a NEW MAC → the AP re-auths + re-DHCPs it every rotation →
+# latency jitter + band-flapping. Pinning the node to its stable hardware MAC
+# (Private Address Off) took the link from p50 35 ms / 90 %-degraded to p50 7.8 ms
+# HEALTHY. This module AUDITS that on any node (:func:`analyze_mac`) and renders a
+# configuration profile that ENFORCES a stable MAC so it can never silently revert
+# (:func:`render_mac_stability_profile`). The system reads sit behind an injected
+# runner (:func:`probe_wifi`) so the analysis is unit-testable without a radio.
+
+CommandRunner = Callable[[list[str]], str]
+"""A thin subprocess seam (argv → stdout) so :func:`probe_wifi` is testable."""
+
+# A MAC: six 1-2 hex-digit octets, colon-separated. macOS zero-pads, but the
+# pattern tolerates unpadded octets so a parse never silently drops a real MAC.
+_MAC_PAT = r"((?:[0-9a-fA-F]{1,2}:){5}[0-9a-fA-F]{1,2})"
+_ETHER_RE = re.compile(r"\bether\s+" + _MAC_PAT)
+_GETMAC_RE = re.compile(r"Ethernet Address:\s*" + _MAC_PAT)
+_SSID_RE = re.compile(r"^\s*SSID\s*:\s*(.+?)\s*$", re.MULTILINE)
+
+
+@dataclass(frozen=True)
+class MacAudit:
+    """Verdict on a node's live Wi-Fi MAC: randomized (rotation risk) vs stable.
+
+    Pure result of :func:`analyze_mac`. ``randomized`` is True when the live MAC
+    differs from the burned-in hardware MAC (a private/rotating address); on a
+    fixed-infra node that is the rotation-churn risk the optimizer exists to kill.
+    """
+
+    randomized: bool
+    current: str
+    hardware: str
+    risk: str
+    remedy: str
+
+
+@dataclass(frozen=True)
+class WifiProbe:
+    """The thin impure read of the node's live Wi-Fi identity.
+
+    ``current_mac`` is the live association MAC (``ifconfig <iface> ether`` — what
+    the AP actually sees); ``hardware_mac`` is the burned-in address
+    (``networksetup -getmacaddress``). They differ exactly when MAC randomization
+    is on. ``ssid`` (live association, no scan) names the network the enforcement
+    profile is scoped to; it is None when the node is not currently associated.
+    """
+
+    iface: str
+    current_mac: str
+    hardware_mac: str
+    ssid: str | None
+
+
+def is_locally_administered(mac: str) -> bool:
+    """True if the MAC's locally-administered bit is set (a randomized address).
+
+    macOS private/randomized Wi-Fi addresses are locally-administered: the
+    second-least-significant bit of the first octet is 1. A burned-in hardware MAC
+    is universally-administered (that bit is 0). A malformed/empty MAC returns
+    False — it cannot be proven locally-administered.
+    """
+    first = mac.split(":", 1)[0]
+    try:
+        octet = int(first, 16)
+    except ValueError:
+        return False
+    return bool(octet & 0b10)
+
+
+_MAC_RISK_RANDOMIZED = (
+    "rotating/private Wi-Fi MAC — on a network re-join macOS can re-associate "
+    "under a NEW MAC, so the AP re-auths + re-DHCPs the node every rotation: "
+    "latency jitter and band-flapping on a fixed-infra node whose only link is "
+    "this radio."
+)
+_MAC_REMEDY_RANDOMIZED = (
+    "Pin the node to its hardware MAC: set Private Wi-Fi Address to Off for this "
+    "network (System Settings ▸ Wi-Fi ▸ [network] ▸ Details…), or install the "
+    "stability profile so macOS keeps it on the stable MAC and cannot silently "
+    "flip it back to Rotating."
+)
+_MAC_RISK_STABLE = "none — the node is on its stable hardware MAC."
+_MAC_REMEDY_STABLE = (
+    "Keep Private Wi-Fi Address Off for this fixed-infra node so macOS cannot "
+    "silently revert it to Rotating on a future network re-join."
+)
+
+
+def analyze_mac(current_mac: str, hardware_mac: str) -> MacAudit:
+    """PURE: is the live Wi-Fi MAC randomized (differs from hardware) or stable?
+
+    A randomized/private MAC differs from the burned-in hardware MAC (and carries
+    the locally-administered bit). On a fixed-infra node — a closet server whose
+    only link is Wi-Fi — a rotating MAC triggers periodic AP re-auth/re-DHCP
+    (latency jitter + band-flapping), so it must be pinned to the hardware MAC.
+    Equality is the definition; case is normalized because the two system reads
+    can differ in case.
+    """
+    randomized = current_mac.lower() != hardware_mac.lower()
+    return MacAudit(
+        randomized=randomized,
+        current=current_mac,
+        hardware=hardware_mac,
+        risk=_MAC_RISK_RANDOMIZED if randomized else _MAC_RISK_STABLE,
+        remedy=_MAC_REMEDY_RANDOMIZED if randomized else _MAC_REMEDY_STABLE,
+    )
+
+
+# Fixed namespace for deterministic, content-derived profile UUIDs (NO Date.now /
+# os.urandom): the same (ssid, hardware_mac) always renders identical bytes, so
+# re-running optimize never churns the installed profile's identity.
+_PROFILE_NS = uuid.UUID("5f4d4f3a-7e2b-5c1d-9a8b-1c2d3e4f5a6b")
+
+
+def _slug(text: str) -> str:
+    """Lowercase, reverse-DNS-safe slug for a PayloadIdentifier segment."""
+    cleaned = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+    return cleaned or "sanctum"
+
+
+def render_mac_stability_profile(ssid: str, hardware_mac: str, org: str = "Sanctum") -> str:
+    """PURE: a ``.mobileconfig`` (plist XML) that DISABLES Wi-Fi MAC randomization.
+
+    The payload is ``com.apple.wifi.managed`` for ``ssid`` with
+    ``MACAddressRandomization`` set to ``False`` — Apple's key for "Private Wi-Fi
+    Address: Off" — so macOS keeps the node on its stable hardware MAC and cannot
+    silently flip it to Rotating. PayloadUUID / PayloadIdentifier are derived
+    deterministically from ``ssid`` + ``hardware_mac`` via ``uuid5`` (no Date.now /
+    random), so identical inputs render byte-identical output and re-applying never
+    rotates the profile's identity. ``plistlib.dumps`` defaults to ``sort_keys``,
+    so key order is stable too. Round-trips through :func:`plistlib.loads`.
+    """
+    seed = f"{ssid}\x00{hardware_mac.lower()}"
+    inner_uuid = str(uuid.uuid5(_PROFILE_NS, f"wifi:{seed}")).upper()
+    outer_uuid = str(uuid.uuid5(_PROFILE_NS, f"profile:{seed}")).upper()
+    org_slug = _slug(org)
+
+    wifi_payload: dict[str, object] = {
+        "PayloadType": "com.apple.wifi.managed",
+        "PayloadVersion": 1,
+        "PayloadIdentifier": f"{org_slug}.wifi-mac-stability.{inner_uuid}",
+        "PayloadUUID": inner_uuid,
+        "PayloadDisplayName": f"Wi-Fi ({ssid}) — stable MAC",
+        "SSID_STR": ssid,
+        "HIDDEN_NETWORK": False,
+        "AutoJoin": True,
+        # The headline: false == "Private Wi-Fi Address: Off" for this network.
+        "MACAddressRandomization": False,
+    }
+    profile: dict[str, object] = {
+        "PayloadType": "Configuration",
+        "PayloadVersion": 1,
+        "PayloadIdentifier": f"{org_slug}.wifi-mac-stability.profile.{outer_uuid}",
+        "PayloadUUID": outer_uuid,
+        "PayloadDisplayName": f"{org} Wi-Fi MAC Stability ({ssid})",
+        "PayloadDescription": (
+            "Disables Private/Rotating Wi-Fi Address for this network so a "
+            "fixed-infra node stays on its stable hardware MAC."
+        ),
+        "PayloadOrganization": org,
+        "PayloadScope": "System",
+        "PayloadContent": [wifi_payload],
+    }
+    return plistlib.dumps(profile, fmt=plistlib.FMT_XML).decode("utf-8")
+
+
+def default_profile_path() -> Path:
+    """Default ``--profile-out`` for the rendered stability ``.mobileconfig``."""
+    return Path.home() / ".sanctum" / "wifi-mac-stability.mobileconfig"
+
+
+def _real_run(argv: list[str], timeout: int = 8) -> str:
+    """Default :data:`CommandRunner`: run ``argv``, return stdout, never raise."""
+    try:
+        proc = subprocess.run(
+            argv, capture_output=True, text=True, errors="replace", timeout=timeout, check=False
+        )
+    except (subprocess.SubprocessError, OSError, ValueError):
+        return ""
+    return proc.stdout
+
+
+def _parse_wifi_iface(ports_text: str) -> str | None:
+    """The BSD device (e.g. ``en0``) of the 'Wi-Fi' hardware port, or None.
+
+    Parses ``networksetup -listallhardwareports`` — the Device line that follows a
+    ``Hardware Port: Wi-Fi`` header.
+    """
+    port_name: str | None = None
+    for line in ports_text.splitlines():
+        s = line.strip()
+        if s.startswith("Hardware Port:"):
+            port_name = s.split(":", 1)[1].strip()
+        elif s.startswith("Device:") and port_name is not None and "wi-fi" in port_name.lower():
+            return s.split(":", 1)[1].strip() or None
+    return None
+
+
+def _first_match(pattern: re.Pattern[str], text: str) -> str | None:
+    m = pattern.search(text)
+    return m.group(1) if m else None
+
+
+def probe_wifi(run: CommandRunner | None = None) -> WifiProbe:
+    """Read the node's live Wi-Fi identity behind an injected runner.
+
+    The impure boundary is kept thin — four system reads, no analysis: the Wi-Fi
+    interface (``networksetup -listallhardwareports``), the live association MAC
+    (``ifconfig <iface> ether``), the burned-in hardware MAC
+    (``networksetup -getmacaddress <iface>``), and the live SSID
+    (``ipconfig getsummary <iface>`` — no scan, so it never self-induces jitter).
+    The verdict is the pure :func:`analyze_mac` over the result. ``run`` defaults
+    to a real subprocess seam; tests inject a fake to drive it without a radio.
+    """
+    runner = run if run is not None else _real_run
+    iface = _parse_wifi_iface(runner(["networksetup", "-listallhardwareports"])) or "en0"
+    current = _first_match(_ETHER_RE, runner(["ifconfig", iface])) or ""
+    hardware = _first_match(_GETMAC_RE, runner(["networksetup", "-getmacaddress", iface])) or ""
+    ssid = _first_match(_SSID_RE, runner(["ipconfig", "getsummary", iface]))
+    return WifiProbe(iface=iface, current_mac=current, hardware_mac=hardware, ssid=ssid)
