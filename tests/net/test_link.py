@@ -238,3 +238,29 @@ def test_probe_wifi_with_fake_runner() -> None:
     assert probe.ssid == "ClosetNet"
     # And the pure analysis over the probe is the rotation verdict.
     assert analyze_mac(probe.current_mac, probe.hardware_mac).randomized is True
+
+
+def test_probe_wifi_unverified_when_iface_not_found() -> None:
+    # No "Wi-Fi" hardware port -> probe must NOT silently fall back to en0
+    # (Ethernet on a Mac mini, which reads a false-STABLE); it returns an
+    # UNVERIFIED probe (empty iface + MACs) so the audit reports UNVERIFIED.
+    def fake_run(argv: list[str]) -> str:
+        if argv == ["networksetup", "-listallhardwareports"]:
+            return "Hardware Port: Ethernet\nDevice: en4\nEthernet Address: 00:11:22:33:44:55\n"
+        raise AssertionError(f"must not read an interface when Wi-Fi is absent: {argv}")
+
+    probe = probe_wifi(run=fake_run)
+    assert probe.iface == ""
+    assert probe.current_mac == ""
+    assert probe.hardware_mac == ""
+
+
+def test_render_profile_carries_encryption_type() -> None:
+    # The managed Wi-Fi payload must carry EncryptionType so it is not a
+    # credential-less duplicate that disrupts the existing association.
+    parsed = plistlib.loads(render_mac_stability_profile("NetA", HARDWARE_MAC).encode())
+    assert parsed["PayloadContent"][0]["EncryptionType"] == "WPA3"
+    parsed2 = plistlib.loads(
+        render_mac_stability_profile("NetA", HARDWARE_MAC, encryption_type="WPA2").encode()
+    )
+    assert parsed2["PayloadContent"][0]["EncryptionType"] == "WPA2"

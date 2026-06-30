@@ -296,7 +296,15 @@ def _write_profile(probe: link.WifiProbe, profile_out: Path) -> None:
         f"  [dim]scoped to SSID[/] [bold]{escape(probe.ssid)}[/] "
         f"[dim]· pins MAC[/] [bold]{escape(probe.hardware_mac)}[/]"
     )
-    console.print("\n[bold]To enforce a stable MAC[/] (macOS requires your approval):")
+    console.print(
+        "\n[bold]Recommended (zero-risk):[/] System Settings ▸ Wi-Fi ▸ "
+        f"[bold]{escape(probe.ssid)}[/] ▸ Details… ▸ [bold]Private Wi-Fi Address ▸ "
+        "Off[/]. This is what fixed the reference node and it can't drop your link."
+    )
+    console.print(
+        "\n[bold]Durable enforce (advanced):[/] install the profile so macOS can't "
+        "silently flip it back to Rotating:"
+    )
     console.print(f"  1. [bold]open {escape(str(profile_out))}[/]")
     console.print(
         "  2. System Settings ▸ Privacy & Security ▸ Profiles → approve "
@@ -304,11 +312,15 @@ def _write_profile(probe: link.WifiProbe, profile_out: Path) -> None:
     )
     console.print(
         "  3. Confirm Wi-Fi ▸ [your network] ▸ Details… shows "
-        "[bold]Private Wi-Fi Address: Off[/] for this fixed-infra node."
+        "[bold]Private Wi-Fi Address: Off[/]."
     )
     console.print(
-        "[dim]The tool generates + guides + verifies; it never toggles the radio — "
-        "this node's only link is the one being changed.[/]"
+        "[yellow]⚠ on a sole-link node:[/] this is a managed Wi-Fi payload — macOS "
+        "may re-prompt for the password and briefly re-associate on approval. Do it "
+        "[bold]attended[/] and confirm the connection survives before trusting it."
+    )
+    console.print(
+        "[dim]The tool generates + guides + verifies; it never toggles the radio.[/]"
     )
 
 

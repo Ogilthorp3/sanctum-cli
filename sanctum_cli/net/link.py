@@ -435,10 +435,12 @@ def is_locally_administered(mac: str) -> bool:
 
 
 _MAC_RISK_RANDOMIZED = (
-    "rotating/private Wi-Fi MAC — on a network re-join macOS can re-associate "
-    "under a NEW MAC, so the AP re-auths + re-DHCPs the node every rotation: "
-    "latency jitter and band-flapping on a fixed-infra node whose only link is "
-    "this radio."
+    "private Wi-Fi MAC (differs from the hardware MAC). If it is Rotating — macOS's "
+    "default after a network re-join — the node re-associates under a NEW MAC each "
+    "rotation, so the AP re-auths + re-DHCPs it: latency jitter and band-flapping on "
+    "a fixed-infra node whose only link is this radio. A Fixed private MAC is steady "
+    "but still not the hardware MAC; a fixed-infra node should pin to hardware either "
+    "way."
 )
 _MAC_REMEDY_RANDOMIZED = (
     "Pin the node to its hardware MAC: set Private Wi-Fi Address to Off for this "
@@ -485,7 +487,9 @@ def _slug(text: str) -> str:
     return cleaned or "sanctum"
 
 
-def render_mac_stability_profile(ssid: str, hardware_mac: str, org: str = "Sanctum") -> str:
+def render_mac_stability_profile(
+    ssid: str, hardware_mac: str, org: str = "Sanctum", encryption_type: str = "WPA3"
+) -> str:
     """PURE: a ``.mobileconfig`` (plist XML) that DISABLES Wi-Fi MAC randomization.
 
     The payload is ``com.apple.wifi.managed`` for ``ssid`` with
@@ -510,6 +514,10 @@ def render_mac_stability_profile(ssid: str, hardware_mac: str, org: str = "Sanct
         "PayloadDisplayName": f"Wi-Fi ({ssid}) — stable MAC",
         "SSID_STR": ssid,
         "HIDDEN_NETWORK": False,
+        # EncryptionType matches the saved network so the managed entry is not a
+        # credential-less duplicate that disrupts the association (default WPA3;
+        # pass encryption_type="WPA2"/"Any" for other networks).
+        "EncryptionType": encryption_type,
         "AutoJoin": True,
         # The headline: false == "Private Wi-Fi Address: Off" for this network.
         "MACAddressRandomization": False,
@@ -522,7 +530,11 @@ def render_mac_stability_profile(ssid: str, hardware_mac: str, org: str = "Sanct
         "PayloadDisplayName": f"{org} Wi-Fi MAC Stability ({ssid})",
         "PayloadDescription": (
             "Disables Private/Rotating Wi-Fi Address for this network so a "
-            "fixed-infra node stays on its stable hardware MAC."
+            "fixed-infra node stays on its stable hardware MAC. ADVANCED: this is a "
+            "managed Wi-Fi payload — on approval macOS may re-prompt for the network "
+            "password and briefly re-associate. Verify the connection survives "
+            "before relying on it on a sole-link node; the zero-risk path is System "
+            "Settings > Wi-Fi > Private Address > Off."
         ),
         "PayloadOrganization": org,
         "PayloadScope": "System",
@@ -580,7 +592,13 @@ def probe_wifi(run: CommandRunner | None = None) -> WifiProbe:
     to a real subprocess seam; tests inject a fake to drive it without a radio.
     """
     runner = run if run is not None else _real_run
-    iface = _parse_wifi_iface(runner(["networksetup", "-listallhardwareports"])) or "en0"
+    iface = _parse_wifi_iface(runner(["networksetup", "-listallhardwareports"]))
+    if not iface:
+        # Could NOT identify the Wi-Fi interface -> do NOT silently read en0 (on a
+        # Mac mini that is *Ethernet*, whose MAC == its hardware MAC, yielding a
+        # false "STABLE"). Return an UNVERIFIED probe (empty MACs) so the audit
+        # honestly reports UNVERIFIED rather than a ✓ for the wrong radio.
+        return WifiProbe(iface="", current_mac="", hardware_mac="", ssid=None)
     current = _first_match(_ETHER_RE, runner(["ifconfig", iface])) or ""
     hardware = _first_match(_GETMAC_RE, runner(["networksetup", "-getmacaddress", iface])) or ""
     ssid = _first_match(_SSID_RE, runner(["ipconfig", "getsummary", iface]))
