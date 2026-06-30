@@ -9,17 +9,20 @@ from __future__ import annotations
 from sanctum_cli.net.link import Sample, classify, parse_log
 
 
-def _s(avg: float, load: float, loss: float = 0.0, degraded: bool | None = None) -> Sample:
-    flag = (avg > 20 or loss > 0) if degraded is None else degraded
-    return Sample(
-        min=3.0,
-        avg=avg,
-        max=avg * 3,
-        std=avg,
-        loss=loss,
-        load=load,
-        degraded=flag,
-    )
+def _s(
+    avg: float,
+    load: float,
+    loss: float = 0.0,
+    degraded: bool | None = None,
+    mx: float | None = None,
+) -> Sample:
+    mx = avg * 3 if mx is None else mx
+    # Mirror the bash sentinel's degraded rule EXACTLY (net/link.py SENTINEL_SCRIPT:
+    # avg>20 OR max>100 OR any loss). Re-inventing it here as `avg>20 or loss>0`
+    # let a real low-avg / high-max single-spike window read as "ok" in the tests
+    # while the producer flags it — a shared-assumption drift.
+    flag = (avg > 20 or mx > 100 or loss > 0) if degraded is None else degraded
+    return Sample(min=3.0, avg=avg, max=mx, std=avg, loss=loss, load=load, degraded=flag)
 
 
 def test_no_data() -> None:
@@ -89,3 +92,41 @@ def test_reference_mini_dataset_is_load_bound() -> None:
 2026-06-29T21:25:35 ssid=x rtt=4.748/107.547/520.332/138.349 loss=0.0% load=[6.48 4.39 3.89] DEGRADED
 """
     assert classify(parse_log(raw)).verdict == "LOAD"
+
+
+def test_total_loss_window_classifies_radio_not_dropped() -> None:
+    # BOUNDARY (Contracts-at-the-Boundary): on 100% loss macOS ping prints no
+    # round-trip line, so the sampler emits `rtt=NA loss=100.0%`. The parser MUST
+    # keep that loss signal (not silently drop the line) -> RADIO, never NO_DATA.
+    # Fixture is the sampler's literal printf output, not a hand-built Sample.
+    line = (
+        "2026-06-29T22:30:00 ssid=Net rtt=NA loss=100.0% "
+        "load=[5.00 5.00 5.00] DEGRADED"
+    )
+    got = parse_log(line)
+    assert len(got) == 1
+    assert got[0].loss == 100.0
+    assert got[0].degraded is True
+    assert classify(got).verdict == "RADIO"
+
+
+def test_mixed_good_and_dead_windows_not_false_healthy() -> None:
+    # A flapping link (good samples + total-loss samples) must NOT read HEALTHY.
+    raw = "\n".join(
+        [
+            "2026-06-29T22:00:00 ssid=x rtt=4.0/6.0/9.0/2.0 loss=0.0% load=[2.0 2.0 2.0] ok",
+            "2026-06-29T22:03:00 ssid=x rtt=NA loss=100.0% load=[2.1 2.0 2.0] DEGRADED",
+            "2026-06-29T22:06:00 ssid=x rtt=4.0/6.0/9.0/2.0 loss=0.0% load=[2.0 2.0 2.0] ok",
+            "2026-06-29T22:09:00 ssid=x rtt=NA loss=100.0% load=[2.1 2.0 2.0] DEGRADED",
+        ]
+    )
+    assert classify(parse_log(raw)).verdict != "HEALTHY"
+
+
+def test_no_gateway_line_is_excluded_not_false_radio() -> None:
+    # A NO_GATEWAY sample (couldn't find a gateway to ping) is a MEASUREMENT
+    # failure, not a dead radio — it must be EXCLUDED so it never masquerades as
+    # RADIO/loss. (A real total-loss line to a gateway, rtt=NA loss=100.0
+    # DEGRADED, IS kept — see test_total_loss_window_classifies_radio.)
+    line = "2026-06-29T22:30:00 ssid=Net rtt=NA loss=NA% load=[2.0 2.0 2.0] NO_GATEWAY"
+    assert parse_log(line) == []

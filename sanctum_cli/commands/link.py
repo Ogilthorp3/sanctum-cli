@@ -110,7 +110,12 @@ def link_status(
         _report(err)
         raise typer.Exit(code=int(err.exit_code)) from exc
 
-    _render(link.classify(link.parse_log(text)))
+    # Window to the most recent slice: the verdict answers "is my link OK NOW?",
+    # so ancient history (a node that was LOAD-bound months ago) must not dilute
+    # it. The sampler also caps the on-disk log, so neither side grows unbounded.
+    samples = link.parse_log(text)
+    recent = samples[-link.STATUS_WINDOW_SAMPLES :]
+    _render(link.classify(recent))
 
 
 def _launchctl(args: list[str], *, check: bool) -> tuple[bool, str]:
