@@ -9,11 +9,21 @@ from __future__ import annotations
 import plistlib
 
 from sanctum_cli.net.link import (
+    SENTINEL_SCRIPT,
+    IdentityProbe,
+    NodeSignals,
     Sample,
+    _enc_from_security,
     analyze_mac,
     classify,
+    classify_node,
+    diagnose_identity,
+    firewalla_quarantine_check,
+    identity_is_drift,
     is_locally_administered,
+    parse_identity,
     parse_log,
+    probe_identity,
     probe_wifi,
     render_mac_stability_profile,
 )
@@ -264,3 +274,262 @@ def test_render_profile_carries_encryption_type() -> None:
         render_mac_stability_profile("NetA", HARDWARE_MAC, encryption_type="WPA2").encode()
     )
     assert parsed2["PayloadContent"][0]["EncryptionType"] == "WPA2"
+
+
+# ─── Link Identity Guard — Task 1: IdentityProbe + probe_identity ─────────────
+# The LITERAL ipconfig getsummary shape captured on the Mini during the incident.
+_MINI_GETSUMMARY = """  SSID : Nepveu-6G
+  Security : WPA2_PSK
+  LinkStatusActive : TRUE
+  RouterARPVerified : FALSE
+  RouterARPTimedOut : TRUE
+"""
+_HEALTHY_GETSUMMARY = """  SSID : Nepveu-6G
+  Security : WPA3_SAE
+  LinkStatusActive : TRUE
+  RouterARPVerified : TRUE
+"""
+
+
+def _fake_runner(mapping):
+    def run(argv):
+        key = " ".join(argv)
+        for pat, out in mapping.items():
+            if pat in key:
+                return out
+        return ""
+    return run
+
+
+def test_probe_identity_reads_quarantine_signature():
+    run = _fake_runner({
+        "listallhardwareports": "Hardware Port: Wi-Fi\nDevice: en1\nEthernet Address: d0:11:e5:1c:88:59",
+        "ifconfig en1": "\tether 32:a6:f4:de:54:cf",
+        "getmacaddress en1": "Ethernet Address: d0:11:e5:1c:88:59",
+        "getsummary en1": _MINI_GETSUMMARY,
+        "route -n get default": "gateway: 10.0.0.1\ninterface: en1",
+        "ping": "0 packets received, 100.0% packet loss",
+    })
+    p = probe_identity(run=run)
+    assert p.iface == "en1"
+    assert p.current_mac == "32:a6:f4:de:54:cf"
+    assert p.hardware_mac == "d0:11:e5:1c:88:59"
+    assert p.ssid == "Nepveu-6G"
+    assert p.security == "WPA2_PSK"
+    assert p.associated is True
+    assert p.router_arp_verified is False
+    assert p.gateway_reachable is False
+
+
+def test_probe_identity_iface_absent_is_unverified():
+    p = probe_identity(run=_fake_runner({}))
+    assert p.iface == ""
+    assert p.associated is False
+    assert p.router_arp_verified is None
+
+
+def test_enc_from_security_maps_wpa3_and_defaults_wpa2():
+    assert _enc_from_security("WPA3_SAE") == "WPA3"
+    assert _enc_from_security("WPA2_PSK") == "WPA2"
+    assert _enc_from_security(None) == "WPA2"
+    assert _enc_from_security("weird") == "WPA2"
+
+
+# ─── Link Identity Guard — Task 2: diagnose_identity truth table ──────────────
+
+
+def _probe(**kw):
+    base = dict(iface="en1", ssid="Nepveu-6G", current_mac="d0:11:e5:1c:88:59",
+                hardware_mac="d0:11:e5:1c:88:59", security="WPA2_PSK",
+                associated=True, router_arp_verified=True, gateway_reachable=True)
+    base.update(kw)
+    return IdentityProbe(**base)
+
+
+def test_diagnose_quarantined_is_the_mini_signature():
+    d = diagnose_identity(_probe(current_mac="32:a6:f4:de:54:cf",
+                                 router_arp_verified=False, gateway_reachable=False))
+    assert d.verdict == "IDENTITY_QUARANTINED"
+
+
+def test_diagnose_rotating_when_random_mac_but_reachable():
+    d = diagnose_identity(_probe(current_mac="32:a6:f4:de:54:cf"))
+    assert d.verdict == "IDENTITY_ROTATING"
+
+
+def test_diagnose_stable_on_hardware_mac():
+    assert diagnose_identity(_probe()).verdict == "IDENTITY_STABLE"
+
+
+def test_diagnose_unverified_when_not_associated_or_unread():
+    assert diagnose_identity(_probe(associated=False)).verdict == "IDENTITY_UNVERIFIED"
+    assert diagnose_identity(_probe(iface="", current_mac="", hardware_mac="")).verdict == "IDENTITY_UNVERIFIED"
+
+
+# ─── Link Identity Guard — Task 3: classify_node (server vs roamer) ───────────
+
+
+def _sig(**kw):
+    base = dict(uptime_days=10.0, ip_config_method="Manual", ip_is_reserved_or_static=True,
+                distinct_ssids_seen=1, is_portable=False)
+    base.update(kw)
+    return NodeSignals(**base)
+
+
+def test_classify_server_when_fixed_infra():
+    assert classify_node(_sig()).klass == "SERVER"
+
+
+def test_classify_roamer_when_portable():
+    assert classify_node(_sig(is_portable=True)).klass == "ROAMER"
+
+
+def test_classify_roamer_when_many_ssids():
+    assert classify_node(_sig(distinct_ssids_seen=9)).klass == "ROAMER"
+
+
+def test_classify_unknown_is_conservative():
+    # not portable, short uptime, DHCP/no reservation, a couple SSIDs → UNKNOWN
+    assert classify_node(_sig(uptime_days=0.2, ip_config_method="DHCP",
+                              ip_is_reserved_or_static=False, distinct_ssids_seen=3)).klass == "UNKNOWN"
+
+
+# ─── Link Identity Guard — Task 4: firewalla_quarantine_check (enrichment) ────
+
+
+def test_fw_check_none_when_no_transport():
+    assert firewalla_quarantine_check("32:a6:f4:de:54:cf") is None
+
+
+def test_fw_check_none_when_empty_response():
+    assert firewalla_quarantine_check("32:a6", transport=lambda mac: "") is None
+
+
+def test_fw_check_reports_quarantine_tag():
+    f = firewalla_quarantine_check("32:a6", transport=lambda mac: '["18"]')
+    assert f is not None and f.quarantined is True and f.tag == "18"
+
+
+def test_fw_check_reports_untagged():
+    f = firewalla_quarantine_check("d0:11", transport=lambda mac: "[]")
+    assert f is not None and f.quarantined is False
+
+
+def test_parse_identity_reads_id_token():
+    line = "2026-07-01T10:00:00 ssid=X rtt=2/3/4/1 loss=0.0% load=[1] id=cur=32:a6:f4:de:54:cf,hw=d0:11:e5:1c:88:59,arp=FALSE DEGRADED"
+    ids = parse_identity(line)
+    assert ids is not None
+    assert ids["cur"] == "32:a6:f4:de:54:cf" and ids["hw"] == "d0:11:e5:1c:88:59" and ids["arp"] == "FALSE"
+
+
+def test_identity_drift_true_on_random_mac_and_arp_false():
+    assert identity_is_drift(parse_identity(
+        "x rtt=NA loss=100.0% load=[1] id=cur=32:a6:f4:de:54:cf,hw=d0:11:e5:1c:88:59,arp=FALSE DEGRADED")) is True
+
+
+def test_identity_drift_false_on_hardware_mac():
+    assert identity_is_drift(parse_identity(
+        "x rtt=2/3/4/1 loss=0.0% load=[1] id=cur=d0:11:e5:1c:88:59,hw=d0:11:e5:1c:88:59,arp=TRUE ok")) is False
+
+
+def test_existing_parse_log_still_reads_degraded_with_id_token():
+    # regression guard: the trailing flag + rtt/loss/load parse survive the id= insert
+    line = "x ssid=Y rtt=2/3/4/1 loss=0.0% load=[1.5] id=cur=aa:bb:cc:dd:ee:ff,hw=aa:bb:cc:dd:ee:ff,arp=TRUE DEGRADED"
+    s = parse_log(line)
+    assert len(s) == 1 and s[0].degraded is True and s[0].load == 1.5
+
+
+# ─── sentinel PRODUCER wiring: drift marker (Task 7 completion) ───────────
+#
+# Task 7 shipped the pure detectors (parse_identity / identity_is_drift). These
+# tests close the loop by running the REAL producer — the exact drift-marker
+# conditional + printf lines extracted verbatim from SENTINEL_SCRIPT — with the
+# radio/router reads (CURMAC/HWMAC/ARP/LOAD/RTT/LOSS/SSID) injected as plain
+# shell vars, so NO live subprocess/radio/router call fires. This is the
+# producer→consumer contract, not a hand-built fixture: the assertion survives
+# because a different layer (the bash sampler) authored the line.
+
+
+def _run_sentinel_emit(*, curmac: str, hwmac: str, arp: str, rtt: str, loss: str, flag: str) -> str:
+    """Run the sentinel's REAL drift-marker + printf shell logic; return the line.
+
+    Slices the two producer statements (the ``DRIFT`` conditional and the final
+    ``printf``) out of ``SENTINEL_SCRIPT`` verbatim and executes them with the
+    system-read outputs injected as vars — so the actual producer code path emits
+    the line without any live radio/router/ping call.
+    """
+    import shutil
+    import subprocess
+
+    src = SENTINEL_SCRIPT
+    drift_start = src.index('DRIFT=""')
+    printf_start = src.index("printf '%s ssid=", drift_start)
+    printf_end = src.index('>> "$LOG"', printf_start) + len('>> "$LOG"')
+    producer = src[drift_start:printf_end].replace('>> "$LOG"', "")
+
+    bash = shutil.which("bash") or "/bin/bash"
+    script = (
+        f'CURMAC={curmac!r}; HWMAC={hwmac!r}; ARP={arp!r}\n'
+        f'RTT={rtt!r}; LOSS={loss!r}; LOAD="1.5 1.4 1.3"; SSID="Nepveu-6G"; FLAG={flag!r}\n'
+        f"{producer}\n"
+    )
+    out = subprocess.run(
+        [bash, "-c", script], capture_output=True, text=True, check=True, timeout=10
+    )
+    return out.stdout.strip()
+
+
+def test_sentinel_producer_stamps_drift_and_detector_reads_it():
+    # Rotating MAC (cur != hw) + arp=FALSE → the producer stamps ,drift=1, and the
+    # pure detectors read it back as drift.
+    line = _run_sentinel_emit(
+        curmac="32:a6:f4:de:54:cf",
+        hwmac="d0:11:e5:1c:88:59",
+        arp="FALSE",
+        rtt="NA",
+        loss="100.0",
+        flag="DEGRADED",
+    )
+    assert ",drift=1" in line, line
+    ids = parse_identity(line)
+    assert ids is not None and ids["drift"] == "1"
+    assert identity_is_drift(ids) is True
+
+
+def test_sentinel_producer_no_drift_on_hardware_mac_and_line_parses_healthy():
+    # Stable hardware MAC + arp=TRUE → NO drift marker; and the emitted line still
+    # parses via parse_log with degraded/rtt/loss/load intact (trailing flag last).
+    line = _run_sentinel_emit(
+        curmac="d0:11:e5:1c:88:59",
+        hwmac="d0:11:e5:1c:88:59",
+        arp="TRUE",
+        rtt="2.0/3.0/4.0/1.0",
+        loss="0.0",
+        flag="ok",
+    )
+    assert ",drift=" not in line, line
+    assert identity_is_drift(parse_identity(line)) is False
+    # parse_log invariant: rtt/loss/load read + trailing health flag both survive.
+    samples = parse_log(line)
+    assert len(samples) == 1
+    s = samples[0]
+    assert s.degraded is False
+    assert s.avg == 3.0 and s.max == 4.0
+    assert s.loss == 0.0 and s.load == 1.5
+
+
+def test_sentinel_producer_degraded_line_with_drift_still_ends_in_degraded():
+    # A drifting AND radio-degraded window: the id= token carries ,drift=1 but the
+    # trailing FLAG stays last, so parse_log's endswith("DEGRADED") still fires.
+    line = _run_sentinel_emit(
+        curmac="32:a6:f4:de:54:cf",
+        hwmac="d0:11:e5:1c:88:59",
+        arp="FALSE",
+        rtt="4.0/30.0/120.0/40.0",
+        loss="0.0",
+        flag="DEGRADED",
+    )
+    assert ",drift=1" in line
+    samples = parse_log(line)
+    assert len(samples) == 1 and samples[0].degraded is True
+    assert identity_is_drift(parse_identity(line)) is True

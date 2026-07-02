@@ -292,11 +292,30 @@ AVG="$(printf '%s' "$RTT" | cut -d/ -f2)"; MAX="$(printf '%s' "$RTT" | cut -d/ -
 FLAG="ok"
 # degraded window: avg local ping > 20ms, OR max > 100ms, OR any loss
 awk -v a="${AVG:-0}" -v m="${MAX:-0}" -v l="${LOSS:-0}" 'BEGIN{exit !(a+0>20 || m+0>100 || l+0>0)}' && FLAG="DEGRADED"
+# Identity tuple — read-only L3 identity, NO Wi-Fi scan (never self-induces jitter):
+# current in-use MAC, burned-in hardware MAC, and whether macOS verified the router
+# via ARP. A random/rotating MAC + unverified ARP is the drift signature.
+CURMAC="$(ifconfig "$IFACE" 2>/dev/null | awk '/ether/{print $2; exit}')"
+HWMAC="$(networksetup -getmacaddress "$IFACE" 2>/dev/null | awk '/Ethernet Address/{print $3; exit}')"
+ARP="$(ipconfig getsummary "$IFACE" 2>/dev/null | awk -F': ' '/RouterARPVerified/{print $2; exit}')"; [ -z "$ARP" ] && ARP="NA"
+# Identity-drift marker: the node is on a rotating/randomized MAC (CURMAC non-empty
+# AND differs from the burned-in HWMAC, case-insensitive) AND the router has NOT
+# ARP-verified it (arp=FALSE) — the exact quarantine/isolation signature. Emitted as
+# a ,drift=1 field INSIDE the id= token (not a trailing word) so the trailing health
+# FLAG stays last: the _LINE rtt/loss/load parse and parse_log's endswith("DEGRADED")
+# read both still hold, and a healthy line's flag never falsely stops ending in DEGRADED.
+DRIFT=""
+if [ -n "$CURMAC" ] && [ "$(printf '%s' "$CURMAC" | tr 'A-Z' 'a-z')" != "$(printf '%s' "$HWMAC" | tr 'A-Z' 'a-z')" ] && [ "$ARP" = "FALSE" ]; then
+  DRIFT=",drift=1"
+fi
 # On 100% loss `ping` prints no round-trip line, so RTT is empty -> rtt=NA; LOSS
 # is still captured (100.0). The parser reads loss independently of rtt, so this
-# total-loss window is NOT dropped — it drives the RADIO verdict.
-printf '%s ssid=%s rtt=%s loss=%s%% load=[%s] %s\n' \
-  "$(date '+%Y-%m-%dT%H:%M:%S')" "${SSID:-?}" "${RTT:-NA}" "${LOSS:-NA}" "$LOAD" "$FLAG" >> "$LOG"
+# total-loss window is NOT dropped — it drives the RADIO verdict. The id= token is
+# inserted BEFORE the trailing flag so the existing rtt/loss/load parse + the
+# endswith("DEGRADED") flag read both still hold.
+printf '%s ssid=%s rtt=%s loss=%s%% load=[%s] id=cur=%s,hw=%s,arp=%s%s %s\n' \
+  "$(date '+%Y-%m-%dT%H:%M:%S')" "${SSID:-?}" "${RTT:-NA}" "${LOSS:-NA}" "$LOAD" \
+  "${CURMAC:-NA}" "${HWMAC:-NA}" "$ARP" "$DRIFT" "$FLAG" >> "$LOG"
 
 # Cap the log so it cannot grow without bound (~10k samples; status only reads
 # the most recent slice anyway). umask 077 keeps the rewritten file 0600.
@@ -432,6 +451,58 @@ def is_locally_administered(mac: str) -> bool:
     except ValueError:
         return False
     return bool(octet & 0b10)
+
+
+# The identity tuple the sentinel now appends to each sample line, e.g.
+# ``id=cur=32:a6:f4:de:54:cf,hw=d0:11:e5:1c:88:59,arp=FALSE`` — with an OPTIONAL
+# trailing ``,drift=1`` the sampler stamps when it has itself detected the drift
+# signature (rotating MAC + arp=FALSE). Parsed INDEPENDENTLY of the rtt/loss/load
+# fields so a drift-only pass never needs the radio metrics — and vice versa (a
+# legacy line with no id= token parses fine as before). arp is the literal
+# ``TRUE``/``FALSE``/``NA`` the sentinel emits; the ``,drift=1`` field sits INSIDE
+# the id= token so the trailing health flag stays last (endswith("DEGRADED") holds).
+_IDENTITY = re.compile(
+    r"id=cur=(?P<cur>[0-9a-fA-F:]+),hw=(?P<hw>[0-9a-fA-F:]+),arp=(?P<arp>TRUE|FALSE|NA)"
+    r"(?:,drift=(?P<drift>1))?"
+)
+
+
+def parse_identity(line: str) -> dict[str, str] | None:
+    """Pure: read the ``id=cur=…,hw=…,arp=…[,drift=1]`` tuple from one sentinel line.
+
+    Returns ``{"cur", "hw", "arp", "drift"}`` (``drift`` is ``"1"`` when the sampler
+    stamped the drift marker, else ``"0"``) or ``None`` when the line carries no
+    identity token (a pre-Task-7 sentinel line, or garbage). No I/O.
+    """
+    m = _IDENTITY.search(line)
+    if m is None:
+        return None
+    return {
+        "cur": m["cur"],
+        "hw": m["hw"],
+        "arp": m["arp"],
+        "drift": "1" if m["drift"] == "1" else "0",
+    }
+
+
+def identity_is_drift(ids: dict[str, str] | None) -> bool:
+    """Pure: True when this sample shows the MAC-identity drift signature.
+
+    Drift = the in-use MAC is randomized/differs from the burned-in hardware MAC
+    AND macOS did NOT verify the router by ARP (``arp=FALSE``). A stable hardware
+    MAC, or an ARP-verified association, is not drift. The sampler stamps a
+    ``,drift=1`` marker when it detects the same signature at sample time; that
+    marker is honored too, so a line the PRODUCER flagged reads as drift here even
+    if a future field shift changed the tuple layout. Fail-closed: ``None`` (no
+    identity token) is never drift.
+    """
+    if ids is None:
+        return False
+    if ids.get("drift") == "1":
+        return True
+    cur, hw, arp = ids["cur"], ids["hw"], ids["arp"]
+    macs_diverge = is_locally_administered(cur) or cur.lower() != hw.lower()
+    return macs_diverge and arp == "FALSE"
 
 
 _MAC_RISK_RANDOMIZED = (
@@ -603,3 +674,221 @@ def probe_wifi(run: CommandRunner | None = None) -> WifiProbe:
     hardware = _first_match(_GETMAC_RE, runner(["networksetup", "-getmacaddress", iface])) or ""
     ssid = _first_match(_SSID_RE, runner(["ipconfig", "getsummary", iface]))
     return WifiProbe(iface=iface, current_mac=current, hardware_mac=hardware, ssid=ssid)
+
+
+# ─── Link Identity Guard (anti-quarantine: identity probe + diagnose) ──
+
+_LINK_ACTIVE_RE = re.compile(r"LinkStatusActive\s*:\s*(TRUE|FALSE)", re.IGNORECASE)
+_ROUTER_ARP_RE = re.compile(r"RouterARPVerified\s*:\s*(TRUE|FALSE)", re.IGNORECASE)
+_SECURITY_RE = re.compile(r"^\s*Security\s*:\s*(.+?)\s*$", re.MULTILINE)
+_GW_RE = re.compile(r"gateway:\s*([0-9a-fA-F:.]+)")
+# The packet-loss percentage from a ping summary. Anchored on a word boundary so
+# "0.0%" is NOT read out of "100.0%" (a naive `"0.0% packet loss" in out` substring
+# check reports total loss as reachable — the exact false-STABLE this guards against).
+_PING_LOSS_RE = re.compile(r"([0-9]+(?:\.[0-9]+)?)%\s*packet loss")
+
+
+@dataclass(frozen=True)
+class IdentityProbe:
+    """Live network *identity* facts (distinct from the sentinel link-health log).
+
+    Read from ``ipconfig getsummary`` (+ one bounded gateway ping) — router-agnostic.
+    ``router_arp_verified``/``gateway_reachable`` are None when unknown/unattempted;
+    empty ``iface`` (or MACs) means UNVERIFIED — never a silent false-STABLE.
+    """
+
+    iface: str
+    ssid: str | None
+    current_mac: str
+    hardware_mac: str
+    security: str | None
+    associated: bool
+    router_arp_verified: bool | None
+    gateway_reachable: bool | None
+
+
+def _enc_from_security(security: str | None) -> str:
+    """Map an ``ipconfig getsummary`` Security value to a profile EncryptionType.
+
+    A mismatch would make macOS create a non-joining duplicate network, so this is
+    a hard requirement, not a guess; WPA2 is the safe default (covers WPA2/WPA3
+    personal transition).
+    """
+    if security and "WPA3" in security.upper():
+        return "WPA3"
+    return "WPA2"
+
+
+def _tri(pattern: re.Pattern[str], text: str) -> bool | None:
+    """TRUE/FALSE → bool; field absent → None (unknown, fail-open to None)."""
+    m = pattern.search(text)
+    if not m:
+        return None
+    return m.group(1).upper() == "TRUE"
+
+
+def probe_identity(run: CommandRunner | None = None, *, ping_gateway: bool = True) -> IdentityProbe:
+    """Read the node's live Wi-Fi *identity + reachability* behind an injected runner.
+
+    Thin impure boundary: interface + MACs (reused from :func:`probe_wifi`'s reads),
+    plus ``ipconfig getsummary`` association/RouterARPVerified/Security, plus a
+    bounded default-gateway ping. Fail-closed: no Wi-Fi iface → UNVERIFIED probe.
+    """
+    runner = run if run is not None else _real_run
+    iface = _parse_wifi_iface(runner(["networksetup", "-listallhardwareports"]))
+    if not iface:
+        return IdentityProbe(
+            iface="", ssid=None, current_mac="", hardware_mac="", security=None,
+            associated=False, router_arp_verified=None, gateway_reachable=None,
+        )
+    current = _first_match(_ETHER_RE, runner(["ifconfig", iface])) or ""
+    hardware = _first_match(_GETMAC_RE, runner(["networksetup", "-getmacaddress", iface])) or ""
+    summary = runner(["ipconfig", "getsummary", iface])
+    ssid = _first_match(_SSID_RE, summary)
+    security = _first_match(_SECURITY_RE, summary)
+    associated = _tri(_LINK_ACTIVE_RE, summary) is True
+    arp = _tri(_ROUTER_ARP_RE, summary)
+
+    gw_reachable: bool | None = None
+    if ping_gateway and associated:
+        gw = _first_match(_GW_RE, runner(["route", "-n", "get", "default"]))
+        if gw:
+            out = runner(["ping", "-c", "3", "-t", "2", gw])
+            loss = _first_match(_PING_LOSS_RE, out)
+            # Reachable when the summary reports <100% loss; a parse-failure leaves it
+            # None (unknown) so we never claim reachable from an unread ping.
+            gw_reachable = float(loss) < 100.0 if loss is not None else None
+    return IdentityProbe(
+        iface=iface, ssid=ssid, current_mac=current, hardware_mac=hardware,
+        security=security, associated=associated,
+        router_arp_verified=arp, gateway_reachable=gw_reachable,
+    )
+
+
+_IDENTITY_REMEDY: dict[str, str] = {
+    "IDENTITY_QUARANTINED": (
+        "This node is associated but its gateway is unreachable while it presents a "
+        "rotating/private MAC — the router does not recognize it (a DHCP-reservation "
+        "miss or device quarantine). Pin it to its hardware MAC: sanctum link optimize "
+        "--apply (or Private Wi-Fi Address ▸ Off), then re-verify."
+    ),
+    "IDENTITY_ROTATING": (
+        "MAC is randomized (private address) — it works now but will isolate the node "
+        "on the next router-trust reset (reboot/renumber). Pin to the hardware MAC: "
+        "sanctum link optimize --apply."
+    ),
+    "IDENTITY_STABLE": "Identity is correct — the node is on its stable hardware MAC.",
+    "IDENTITY_UNVERIFIED": "Could not read the Wi-Fi identity — is this node associated? Re-run when connected.",
+}
+
+
+@dataclass(frozen=True)
+class IdentityDiagnosis:
+    """The IDENTITY verdict (who the node is on the network) + remedy + probe."""
+
+    verdict: str
+    detail: str
+    remedy: str
+    probe: IdentityProbe
+
+
+def diagnose_identity(probe: IdentityProbe) -> IdentityDiagnosis:
+    """PURE: classify the node's Wi-Fi *identity* (orthogonal to link health).
+
+    UNVERIFIED (fail-closed) when we cannot read it; QUARANTINED for the exact
+    incident signature (associated + LAN-dead + rotating MAC); ROTATING for the
+    at-risk private-MAC case; STABLE when on the hardware MAC.
+    """
+    if not probe.iface or not probe.current_mac or not probe.hardware_mac or not probe.associated:
+        v = "IDENTITY_UNVERIFIED"
+        return IdentityDiagnosis(v, "identity could not be read", _IDENTITY_REMEDY[v], probe)
+    randomized = (
+        is_locally_administered(probe.current_mac)
+        or probe.current_mac.lower() != probe.hardware_mac.lower()
+    )
+    lan_dead = probe.router_arp_verified is False or probe.gateway_reachable is False
+    if randomized and lan_dead:
+        v, detail = "IDENTITY_QUARANTINED", (
+            f"associated on {probe.iface} but gateway unreachable "
+            f"(RouterARPVerified={probe.router_arp_verified}) while presenting "
+            f"rotating MAC {probe.current_mac} ≠ hardware {probe.hardware_mac}"
+        )
+    elif randomized:
+        v, detail = "IDENTITY_ROTATING", (
+            f"rotating MAC {probe.current_mac} ≠ hardware {probe.hardware_mac}; reachable for now"
+        )
+    else:
+        note = "" if not lan_dead else " (gateway unreachable — see `sanctum link status` for a link-health read)"
+        v, detail = "IDENTITY_STABLE", f"on hardware MAC {probe.hardware_mac}{note}"
+    return IdentityDiagnosis(v, detail, _IDENTITY_REMEDY[v], probe)
+
+
+# ─── node classification (SERVER auto-enroll vs ROAMER opt-in) ─────────
+
+SERVER_UPTIME_DAYS = 3.0
+SSID_ROAMER_THRESHOLD = 5
+SSID_SERVER_MAX = 3
+
+
+@dataclass(frozen=True)
+class NodeSignals:
+    uptime_days: float
+    ip_config_method: str  # "Manual" | "DHCP" | ""
+    ip_is_reserved_or_static: bool
+    distinct_ssids_seen: int
+    is_portable: bool
+
+
+@dataclass(frozen=True)
+class NodeClass:
+    klass: str  # "SERVER" | "ROAMER" | "UNKNOWN"
+    reason: str
+
+
+def classify_node(signals: NodeSignals) -> NodeClass:
+    """PURE: is this a fixed-infra SERVER (auto-enroll) or a ROAMER (opt-in only)?
+
+    Conservative and privacy-first: portability or many-SSIDs → ROAMER; a
+    non-portable, long-lived / static-or-reserved, single-SSID node → SERVER;
+    anything ambiguous → UNKNOWN (treated as ROAMER downstream, never auto-enrolled).
+    """
+    if signals.is_portable or signals.distinct_ssids_seen > SSID_ROAMER_THRESHOLD:
+        return NodeClass("ROAMER", "portable or roams across many networks")
+    fixed = signals.uptime_days >= SERVER_UPTIME_DAYS or signals.ip_is_reserved_or_static
+    if not signals.is_portable and fixed and signals.distinct_ssids_seen <= SSID_SERVER_MAX:
+        return NodeClass("SERVER", "always-on / static-or-reserved IP / single network")
+    return NodeClass("UNKNOWN", "insufficient signal — treated as roamer (privacy-first)")
+
+
+# ─── Task 4: optional Firewalla quarantine enrichment ────────────────
+
+QuarantineTransport = Callable[[str], str]
+"""mac → raw tags response (e.g. redis ``hget policy:mac:<MAC> tags``); "" when absent."""
+
+
+@dataclass(frozen=True)
+class QuarantineFinding:
+    quarantined: bool
+    tag: str | None
+    detail: str
+
+
+def firewalla_quarantine_check(
+    mac: str, transport: QuarantineTransport | None = None
+) -> QuarantineFinding | None:
+    """OPTIONAL enrichment: is ``mac`` in a Firewalla quarantine tag?
+
+    Returns None when no Firewalla transport is wired or it does not answer — the
+    router-agnostic path never depends on this. When a transport answers with a
+    tags array, a non-empty tag list means quarantined (tag "18" == the DAP
+    Quarantine group observed in the incident).
+    """
+    if transport is None:
+        return None
+    raw = transport(mac).strip()
+    if not raw:
+        return None
+    tags = re.findall(r'"(\d+)"', raw)
+    if not tags:
+        return QuarantineFinding(False, None, "device present, no quarantine tag")
+    return QuarantineFinding(True, tags[0], f"in Firewalla tag {tags[0]} (quarantine)")

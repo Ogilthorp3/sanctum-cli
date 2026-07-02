@@ -26,6 +26,7 @@ import enum
 import os
 import re
 import shutil
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
@@ -34,6 +35,7 @@ import typer
 import yaml
 from rich.align import Align
 from rich.console import Console, Group
+from rich.markup import escape
 from rich.panel import Panel
 from rich.prompt import Confirm, Prompt
 from rich.text import Text
@@ -42,6 +44,7 @@ from sanctum_cli import config, recipes
 from sanctum_cli.backends import b2, gdrive, r2
 from sanctum_cli.commands import backup as backup_cmd
 from sanctum_cli.errors import LocalError, UserError
+from sanctum_cli.net import link
 from sanctum_cli.onboard_experience import chapter_banner, green_check, recap_card
 from sanctum_cli.providers.base import HealthSnapshot
 
@@ -106,6 +109,7 @@ RECIPE_GATES: dict[str, tuple[str, ...]] = {
         "firewalla-pairing",
         "firewalla-compat",
         "network-gear",
+        "wifi-identity",
         "ha-green",
     ),
     # The Apple arc is UNIVERSAL — the recipe only chooses the backup scope, so the
@@ -118,10 +122,12 @@ RECIPE_GATES: dict[str, tuple[str, ...]] = {
     "operator": (
         "identity-setup",
         "ai-providers",
+        "wifi-identity",
     ),
     "code": (
         "identity-setup",
         "ai-providers",
+        "wifi-identity",
     ),
 }
 
@@ -161,7 +167,13 @@ _ARC_CHAPTERS: tuple[tuple[str, str], ...] = (
 _CHAPTER_GATES: dict[str, tuple[str, ...]] = {
     "You": ("identity-setup", "family-setup"),
     "Your AI": ("ai-providers",),
-    "Your Network": ("firewalla-pairing", "firewalla-compat", "network-gear", "ha-green"),
+    "Your Network": (
+        "firewalla-pairing",
+        "firewalla-compat",
+        "network-gear",
+        "wifi-identity",
+        "ha-green",
+    ),
 }
 
 #: Human label shown per gate inside the per-step header (calm, lowercase-free).
@@ -172,6 +184,7 @@ _GATE_LABELS: dict[str, str] = {
     "firewalla-pairing": "Firewalla pairing",
     "firewalla-compat": "Firewalla compatibility",
     "network-gear": "Network gear",
+    "wifi-identity": "Wi-Fi identity (stable MAC)",
     "ha-green": "HA Green (Home Assistant)",
 }
 
@@ -199,6 +212,8 @@ def _run_gate(gate: str, *, yes: bool) -> bool:
         return _run_firewalla_compat()
     if gate == "network-gear":
         return _run_network_gear(yes=yes)
+    if gate == "wifi-identity":
+        return _run_wifi_identity(yes=yes)
     if gate == "ha-green":
         return _run_ha_green(yes=yes)
     return False
@@ -1653,6 +1668,188 @@ def _run_ha_green(*, yes: bool) -> bool:
         "(or `sanctum net ha-green status`) after fixing the token."
     )
     return False
+
+
+# ── Wi-Fi identity gate (SERVER auto-enroll on the home SSID) ─────────
+# The onboard-time sibling of ``sanctum link optimize``. On THIS node's home SSID
+# it reads the live Wi-Fi identity (``link.probe_identity`` → ``diagnose_identity``)
+# and classifies the node (``link.classify_node``). ONLY a fixed-infra SERVER whose
+# identity reads QUARANTINED / ROTATING is auto-enrolled: we generate a
+# MAC-stability .mobileconfig and narrate the one-click System-Settings approve.
+# A ROAMER (laptop/phone) or an UNKNOWN node is NEVER auto-enrolled — it gets a
+# one-line informational nudge and configures nothing (privacy-first / per-SSID /
+# home-only). HONEST-VERIFY: the green check is derived from the REAL probe verdict,
+# never from "the step ran"; an UNVERIFIED probe is fail-closed (no action). No live
+# radio/router/profile-install call is fired in tests — every read is a module-level
+# seam (``link.probe_identity`` / ``_node_signals`` / ``_write_identity_profile``).
+
+
+def _node_signals(probe: link.IdentityProbe) -> link.NodeSignals:
+    """Best-effort, router-agnostic host signals for ``link.classify_node``.
+
+    A thin impure boundary (tests patch it wholesale): reads THIS node's uptime,
+    IP-config method, and portability from the local OS. Fail-open to the most
+    CONSERVATIVE (privacy-first) value on any read miss — an unreadable signal must
+    never up-classify a node to SERVER (which is the only class that auto-enrolls).
+    So a miss yields short-uptime / DHCP / not-reserved / portable, all of which push
+    ``classify_node`` toward ROAMER/UNKNOWN, never SERVER.
+    """
+    import subprocess
+
+    def _run(argv: list[str]) -> str:
+        try:
+            return subprocess.run(
+                argv, capture_output=True, text=True, timeout=5, check=False
+            ).stdout
+        except (OSError, subprocess.SubprocessError):
+            return ""
+
+    # Uptime (days) from `sysctl kern.boottime` → { sec = <epoch>, ... }.
+    uptime_days = 0.0
+    m = re.search(r"sec\s*=\s*(\d+)", _run(["sysctl", "-n", "kern.boottime"]))
+    if m:
+        with contextlib.suppress(ValueError, OverflowError):
+            uptime_days = max(0.0, (time.time() - float(m.group(1))) / 86400.0)
+
+    # IP-config method + reserved/static from the live interface summary.
+    ip_config_method = ""
+    ip_reserved_or_static = False
+    if probe.iface:
+        summary = _run(["ipconfig", "getsummary", probe.iface])
+        cm = re.search(r"ConfigMethod\s*:\s*(\w+)", summary)
+        if cm:
+            ip_config_method = cm.group(1)
+            ip_reserved_or_static = ip_config_method.lower() == "manual"
+
+    # Portability: a laptop (model contains "Book") is portable; a desktop/server
+    # (Mac mini / Mac Studio / Mac Pro / iMac) is not. Unknown model → portable
+    # (conservative: never auto-enroll a node we can't prove is fixed).
+    model = _run(["sysctl", "-n", "hw.model"]).strip()
+    is_portable = ("book" in model.lower()) or (model == "")
+
+    return link.NodeSignals(
+        uptime_days=uptime_days,
+        ip_config_method=ip_config_method,
+        ip_is_reserved_or_static=ip_reserved_or_static,
+        # This onboard gate is scoped to the node's CURRENT home SSID (per-SSID,
+        # home-only); it does not track SSID history, so it reports 1 distinct SSID.
+        distinct_ssids_seen=1,
+        is_portable=is_portable,
+    )
+
+
+def _write_identity_profile(probe: link.IdentityProbe, out: Path) -> None:
+    """Render the MAC-stability .mobileconfig for a SERVER, at ``out`` (0644).
+
+    Never touches the radio — GENERATES the payload (deterministic uuid5 over
+    ssid+hardware_mac; NO plaintext PSK in the managed payload) and lets the operator
+    approve it in System Settings. Mirrors ``link._write_profile`` but takes an
+    :class:`link.IdentityProbe` (the identity gate's probe shape). Both fields are
+    guaranteed non-empty by the caller's SERVER + at-risk verdict, but we guard
+    anyway rather than render a broken profile.
+    """
+    if not probe.ssid or not probe.hardware_mac:
+        return
+    enc = link._enc_from_security(probe.security)
+    profile_xml = link.render_mac_stability_profile(
+        probe.ssid, probe.hardware_mac, encryption_type=enc
+    )
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(profile_xml, encoding="utf-8")
+    out.chmod(0o644)
+
+
+def _run_wifi_identity(*, yes: bool) -> bool:
+    """Wi-Fi identity gate — SERVER auto-enroll on the home SSID; fail-closed.
+
+    Returns True ONLY when the node's identity is a genuinely verified good/handled
+    state: a SERVER already STABLE on its hardware MAC, or a SERVER we just generated
+    a stability profile for (QUARANTINED / ROTATING). Returns False when ``--yes``
+    skips, the probe is UNVERIFIED (fail-closed), or the node is a ROAMER / UNKNOWN
+    (privacy-first: nudge only, never auto-enrolled) — so the recap reads "skipped"
+    rather than a false "configured" (design spec §2/§11; HONEST-VERIFY).
+
+    Interactive-context step, so ``--yes`` SKIPS it (no probe, no write). Non-blocking:
+    the backup already succeeded, so a miss never fails the run.
+    """
+    if yes:
+        console.print(
+            "  [yellow]skipped[/] — interactive step; run `sanctum onboard` without "
+            "--yes to check this node's Wi-Fi identity"
+        )
+        return False
+
+    diag = link.diagnose_identity(link.probe_identity())
+    probe = diag.probe
+
+    # Fail-closed: we could not read the identity → do nothing, claim nothing.
+    if diag.verdict == "IDENTITY_UNVERIFIED":
+        console.print(
+            "  [dim]could not read this node's Wi-Fi identity — nothing to do "
+            "(connect it to your network, then re-run `sanctum onboard`)[/]"
+        )
+        return False
+
+    node = link.classify_node(_node_signals(probe))
+
+    # PRIVACY: only a fixed-infra SERVER is ever auto-enrolled. A ROAMER / UNKNOWN
+    # (laptop, phone, anything we can't prove is fixed) gets a one-line nudge — its
+    # owner opts in explicitly via `sanctum link optimize --apply`, never here.
+    if node.klass != "SERVER":
+        if diag.verdict in ("IDENTITY_QUARANTINED", "IDENTITY_ROTATING"):
+            console.print(
+                f"  [dim]this node looks like a {node.klass.lower()} "
+                f"({escape(node.reason)}) on a rotating MAC — that's fine for a "
+                "roamer. To pin it on this network, run "
+                "[bold]sanctum link optimize --apply[/] on the node itself.[/]"
+            )
+        else:
+            console.print(
+                f"  [dim]{node.klass.lower()} node — Wi-Fi identity left as-is "
+                "(privacy-first; roamers opt in per node).[/]"
+            )
+        return False
+
+    # SERVER already on its hardware MAC → real, verified good state. No profile.
+    if diag.verdict == "IDENTITY_STABLE":
+        console.print(
+            f"  [green]✓[/] Wi-Fi identity STABLE on [bold]{escape(probe.hardware_mac)}[/] "
+            f"— this server is pinned to its hardware MAC on "
+            f"[bold]{escape(probe.ssid or '?')}[/]"
+        )
+        return True
+
+    # SERVER + at-risk identity (QUARANTINED / ROTATING) → auto-generate the profile.
+    out = link.default_profile_path()
+    try:
+        _write_identity_profile(probe, out)
+    except OSError as exc:
+        console.print(
+            f"  [yellow]![/] could not write the stability profile ({escape(str(exc))}) "
+            "— run [bold]sanctum link optimize --apply[/] on this node to retry."
+        )
+        return False
+
+    tag = "QUARANTINED" if diag.verdict == "IDENTITY_QUARANTINED" else "ROTATING"
+    console.print(
+        f"  [bold]This server reads {tag}[/] on [bold]{escape(probe.ssid or '?')}[/] "
+        f"(rotating MAC {escape(probe.current_mac)} ≠ hardware "
+        f"{escape(probe.hardware_mac)})."
+    )
+    console.print(
+        f"  [green]✓[/] generated a MAC-stability profile → "
+        f"[bold]{escape(str(out))}[/] [dim](0644)[/]"
+    )
+    console.print(
+        f"  [dim]One-click approve:[/] open [bold]{escape(str(out))}[/], then System "
+        "Settings ▸ Privacy & Security ▸ Profiles → approve "
+        "[bold]Wi-Fi MAC Stability[/]."
+    )
+    console.print(
+        "  [dim]It verifies once approved — re-run [bold]sanctum link status[/] to "
+        "confirm IDENTITY reads STABLE. This never toggles the radio.[/]"
+    )
+    return True
 
 
 # ── Network-gear detection + pairing gate ────────────────────────────
