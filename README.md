@@ -62,7 +62,25 @@ sanctum status                       # one-line health: backup age, disk, provid
 sanctum backup                       # run a backup
 sanctum self-test                    # honest, tier-aware health check
 sanctum doctor --ship backup         # score a module against the six ship-bar gates
+sanctum link status                  # Wi-Fi link health + IDENTITY verdict (is this node quarantined?)
+sanctum link optimize                # audit Wi-Fi identity; --apply pins a stable MAC (servers), --verify confirms
 ```
+
+### Link Identity Guard — stay on Wi-Fi, unquarantined
+
+A fixed-infra Mac on Wi-Fi can be fully associated yet unreachable on the LAN: macOS
+re-defaults "Private Wi-Fi Address" to Rotating on every network re-join, so the node
+keeps presenting a *changing* MAC — and any router that keys trust to a MAC (a DHCP
+reservation, a device allow-list, a Firewalla quarantine tag) stops recognizing it. The
+failure looks perfect to radio diagnostics (RSSI/BSSID are fine); it lives one layer up,
+at *who the node is on the network*.
+
+`sanctum link` detects that exact signature (router-agnostic), auto-classifies the node
+(a SERVER-class node is enrolled on the home SSID; a roaming laptop keeps its private MAC),
+and — with your one-click approval — enforces a **stable hardware MAC via a per-SSID
+configuration profile** so macOS can't silently re-randomize it. `sanctum onboard` sets it
+up automatically for fixed-infra nodes. Fail-closed, per-SSID (home only), never touches a
+roaming laptop's privacy without `--force`.
 
 ## Develop
 
