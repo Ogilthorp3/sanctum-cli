@@ -44,6 +44,14 @@ _VERDICT_STYLE: dict[str, str] = {
     "NO_DATA": "dim",
 }
 
+# IDENTITY verdict → Rich style (mirrors _VERDICT_STYLE for the identity block).
+_IDENTITY_STYLE: dict[str, str] = {
+    "IDENTITY_STABLE": "green",
+    "IDENTITY_ROTATING": "yellow",
+    "IDENTITY_QUARANTINED": "red",
+    "IDENTITY_UNVERIFIED": "dim",
+}
+
 
 def _report(exc: SanctumError) -> None:
     """Pretty-print a SanctumError to stderr with its optional fix suggestion.
@@ -68,6 +76,18 @@ def _render(diag: link.Diagnosis) -> None:
             f"p50 {m.p50_avg_ms}ms, worst {m.worst_avg_ms}ms, "
             f"loss {m.mean_loss_pct}%)[/]"
         )
+    console.print(f"  → {escape(diag.remedy)}")
+
+
+def _render_identity(diag: link.IdentityDiagnosis) -> None:
+    """Print the IDENTITY block: verdict (coloured) + detail + remedy.
+
+    Mirrors :func:`_render` for the link-health verdict, so a glance at the colour
+    reads who the node is on the network alongside how healthy the link is.
+    """
+    style = _IDENTITY_STYLE.get(diag.verdict, "white")
+    console.print(f"[bold]IDENTITY:[/] [{style}]{escape(diag.verdict)}[/]")
+    console.print(f"  {escape(diag.detail)}")
     console.print(f"  → {escape(diag.remedy)}")
 
 
@@ -116,6 +136,13 @@ def link_status(
     samples = link.parse_log(text)
     recent = samples[-link.STATUS_WINDOW_SAMPLES :]
     _render(link.classify(recent))
+
+    # IDENTITY (who the node is on the network) sits beside link health. A probe
+    # hiccup must never break ``status`` — degrade to a fail-closed UNVERIFIED.
+    try:
+        _render_identity(link.diagnose_identity(link.probe_identity()))
+    except Exception:  # status must never break on a probe hiccup — fail closed
+        console.print("[bold]IDENTITY:[/] [dim]IDENTITY_UNVERIFIED[/]")
 
 
 def _launchctl(args: list[str], *, check: bool) -> tuple[bool, str]:

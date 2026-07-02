@@ -5,11 +5,14 @@ from __future__ import annotations
 import os
 import plistlib
 from typing import TYPE_CHECKING
+from unittest.mock import patch
 
 from typer.testing import CliRunner
 
 from sanctum_cli.cli import app
+from sanctum_cli.commands.link import link_app
 from sanctum_cli.net import link
+from sanctum_cli.net import link as linkmod
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -222,3 +225,23 @@ def test_optimize_apply_default_profile_path(
     assert result.exit_code == 0, result.stdout
     assert out.exists()
     assert plistlib.loads(out.read_bytes())["PayloadType"] == "Configuration"
+
+
+def test_status_shows_identity_verdict(tmp_path: Path) -> None:
+    log = tmp_path / "wifi.log"
+    log.write_text("2026-07-01T10:00:00 ssid=X rtt=2/3/4/1 loss=0.0% load=[1] ok\n")
+    quarantined = linkmod.IdentityProbe(
+        iface="en1",
+        ssid="Nepveu-6G",
+        current_mac="32:a6:f4:de:54:cf",
+        hardware_mac="d0:11:e5:1c:88:59",
+        security="WPA2_PSK",
+        associated=True,
+        router_arp_verified=False,
+        gateway_reachable=False,
+    )
+    with patch.object(linkmod, "probe_identity", return_value=quarantined):
+        r = runner.invoke(link_app, ["status", "--log", str(log)])
+    assert r.exit_code == 0
+    assert "IDENTITY_QUARANTINED" in r.stdout
+    assert "HEALTHY" in r.stdout  # existing link-health verdict still shown
