@@ -603,3 +603,92 @@ def probe_wifi(run: CommandRunner | None = None) -> WifiProbe:
     hardware = _first_match(_GETMAC_RE, runner(["networksetup", "-getmacaddress", iface])) or ""
     ssid = _first_match(_SSID_RE, runner(["ipconfig", "getsummary", iface]))
     return WifiProbe(iface=iface, current_mac=current, hardware_mac=hardware, ssid=ssid)
+
+
+# ─── Link Identity Guard (anti-quarantine: identity probe + diagnose) ──
+
+_LINK_ACTIVE_RE = re.compile(r"LinkStatusActive\s*:\s*(TRUE|FALSE)", re.IGNORECASE)
+_ROUTER_ARP_RE = re.compile(r"RouterARPVerified\s*:\s*(TRUE|FALSE)", re.IGNORECASE)
+_SECURITY_RE = re.compile(r"^\s*Security\s*:\s*(.+?)\s*$", re.MULTILINE)
+_GW_RE = re.compile(r"gateway:\s*([0-9a-fA-F:.]+)")
+# The packet-loss percentage from a ping summary. Anchored on a word boundary so
+# "0.0%" is NOT read out of "100.0%" (a naive `"0.0% packet loss" in out` substring
+# check reports total loss as reachable — the exact false-STABLE this guards against).
+_PING_LOSS_RE = re.compile(r"([0-9]+(?:\.[0-9]+)?)%\s*packet loss")
+
+
+@dataclass(frozen=True)
+class IdentityProbe:
+    """Live network *identity* facts (distinct from the sentinel link-health log).
+
+    Read from ``ipconfig getsummary`` (+ one bounded gateway ping) — router-agnostic.
+    ``router_arp_verified``/``gateway_reachable`` are None when unknown/unattempted;
+    empty ``iface`` (or MACs) means UNVERIFIED — never a silent false-STABLE.
+    """
+
+    iface: str
+    ssid: str | None
+    current_mac: str
+    hardware_mac: str
+    security: str | None
+    associated: bool
+    router_arp_verified: bool | None
+    gateway_reachable: bool | None
+
+
+def _enc_from_security(security: str | None) -> str:
+    """Map an ``ipconfig getsummary`` Security value to a profile EncryptionType.
+
+    A mismatch would make macOS create a non-joining duplicate network, so this is
+    a hard requirement, not a guess; WPA2 is the safe default (covers WPA2/WPA3
+    personal transition).
+    """
+    if security and "WPA3" in security.upper():
+        return "WPA3"
+    return "WPA2"
+
+
+def _tri(pattern: re.Pattern[str], text: str) -> bool | None:
+    """TRUE/FALSE → bool; field absent → None (unknown, fail-open to None)."""
+    m = pattern.search(text)
+    if not m:
+        return None
+    return m.group(1).upper() == "TRUE"
+
+
+def probe_identity(run: CommandRunner | None = None, *, ping_gateway: bool = True) -> IdentityProbe:
+    """Read the node's live Wi-Fi *identity + reachability* behind an injected runner.
+
+    Thin impure boundary: interface + MACs (reused from :func:`probe_wifi`'s reads),
+    plus ``ipconfig getsummary`` association/RouterARPVerified/Security, plus a
+    bounded default-gateway ping. Fail-closed: no Wi-Fi iface → UNVERIFIED probe.
+    """
+    runner = run if run is not None else _real_run
+    iface = _parse_wifi_iface(runner(["networksetup", "-listallhardwareports"]))
+    if not iface:
+        return IdentityProbe(
+            iface="", ssid=None, current_mac="", hardware_mac="", security=None,
+            associated=False, router_arp_verified=None, gateway_reachable=None,
+        )
+    current = _first_match(_ETHER_RE, runner(["ifconfig", iface])) or ""
+    hardware = _first_match(_GETMAC_RE, runner(["networksetup", "-getmacaddress", iface])) or ""
+    summary = runner(["ipconfig", "getsummary", iface])
+    ssid = _first_match(_SSID_RE, summary)
+    security = _first_match(_SECURITY_RE, summary)
+    associated = _tri(_LINK_ACTIVE_RE, summary) is True
+    arp = _tri(_ROUTER_ARP_RE, summary)
+
+    gw_reachable: bool | None = None
+    if ping_gateway and associated:
+        gw = _first_match(_GW_RE, runner(["route", "-n", "get", "default"]))
+        if gw:
+            out = runner(["ping", "-c", "3", "-t", "2", gw])
+            loss = _first_match(_PING_LOSS_RE, out)
+            # Reachable when the summary reports <100% loss; a parse-failure leaves it
+            # None (unknown) so we never claim reachable from an unread ping.
+            gw_reachable = float(loss) < 100.0 if loss is not None else None
+    return IdentityProbe(
+        iface=iface, ssid=ssid, current_mac=current, hardware_mac=hardware,
+        security=security, associated=associated,
+        router_arp_verified=arp, gateway_reachable=gw_reachable,
+    )

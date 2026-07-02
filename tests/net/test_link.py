@@ -10,10 +10,12 @@ import plistlib
 
 from sanctum_cli.net.link import (
     Sample,
+    _enc_from_security,
     analyze_mac,
     classify,
     is_locally_administered,
     parse_log,
+    probe_identity,
     probe_wifi,
     render_mac_stability_profile,
 )
@@ -264,3 +266,62 @@ def test_render_profile_carries_encryption_type() -> None:
         render_mac_stability_profile("NetA", HARDWARE_MAC, encryption_type="WPA2").encode()
     )
     assert parsed2["PayloadContent"][0]["EncryptionType"] == "WPA2"
+
+
+# ─── Link Identity Guard — Task 1: IdentityProbe + probe_identity ─────────────
+# The LITERAL ipconfig getsummary shape captured on the Mini during the incident.
+_MINI_GETSUMMARY = """  SSID : Nepveu-6G
+  Security : WPA2_PSK
+  LinkStatusActive : TRUE
+  RouterARPVerified : FALSE
+  RouterARPTimedOut : TRUE
+"""
+_HEALTHY_GETSUMMARY = """  SSID : Nepveu-6G
+  Security : WPA3_SAE
+  LinkStatusActive : TRUE
+  RouterARPVerified : TRUE
+"""
+
+
+def _fake_runner(mapping):
+    def run(argv):
+        key = " ".join(argv)
+        for pat, out in mapping.items():
+            if pat in key:
+                return out
+        return ""
+    return run
+
+
+def test_probe_identity_reads_quarantine_signature():
+    run = _fake_runner({
+        "listallhardwareports": "Hardware Port: Wi-Fi\nDevice: en1\nEthernet Address: d0:11:e5:1c:88:59",
+        "ifconfig en1": "\tether 32:a6:f4:de:54:cf",
+        "getmacaddress en1": "Ethernet Address: d0:11:e5:1c:88:59",
+        "getsummary en1": _MINI_GETSUMMARY,
+        "route -n get default": "gateway: 10.0.0.1\ninterface: en1",
+        "ping": "0 packets received, 100.0% packet loss",
+    })
+    p = probe_identity(run=run)
+    assert p.iface == "en1"
+    assert p.current_mac == "32:a6:f4:de:54:cf"
+    assert p.hardware_mac == "d0:11:e5:1c:88:59"
+    assert p.ssid == "Nepveu-6G"
+    assert p.security == "WPA2_PSK"
+    assert p.associated is True
+    assert p.router_arp_verified is False
+    assert p.gateway_reachable is False
+
+
+def test_probe_identity_iface_absent_is_unverified():
+    p = probe_identity(run=_fake_runner({}))
+    assert p.iface == ""
+    assert p.associated is False
+    assert p.router_arp_verified is None
+
+
+def test_enc_from_security_maps_wpa3_and_defaults_wpa2():
+    assert _enc_from_security("WPA3_SAE") == "WPA3"
+    assert _enc_from_security("WPA2_PSK") == "WPA2"
+    assert _enc_from_security(None) == "WPA2"
+    assert _enc_from_security("weird") == "WPA2"
