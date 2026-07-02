@@ -241,13 +241,23 @@ class SagemcomHubProvider:
             secret=password,
             key_path=creds.key_path,
         )
-        client = _make_client(authed)
-        # Open the persistent loop BEFORE login so login and every later op run
-        # on the same loop the client's aiohttp session will bind to.
+        # Open the persistent loop FIRST, then build the client AND login INSIDE it.
+        # SagemcomClient.__init__ builds an aiohttp TCPConnector, which on modern
+        # aiohttp calls asyncio.get_running_loop() at init — so the client MUST be
+        # constructed while a loop is running. Building it before the loop (the old
+        # order) raised "RuntimeError: no running event loop". Creating it inside
+        # loop.run_until_complete binds its session to self._loop, the same loop
+        # every later op is driven on via _run(), preserving the persistent-loop design.
         loop = asyncio.new_event_loop()
         self._loop = loop
+
+        async def _build_and_login() -> Any:
+            built = _make_client(authed)
+            await built.login()
+            return built
+
         try:
-            loop.run_until_complete(client.login())
+            client = loop.run_until_complete(_build_and_login())
         except DeviceError:
             self._teardown_loop()
             raise
