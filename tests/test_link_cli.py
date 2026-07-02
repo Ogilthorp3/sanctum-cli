@@ -158,6 +158,31 @@ def test_install_reports_when_launchctl_fails_but_still_exits_zero(
 
 
 # ─── optimize (P2 — Optimize client) ─────────────────────────────────
+#
+# NOTE (Task 6): ``optimize`` now leads with the identity verdict + node class and
+# gates --apply on the node being a fixed-infra SERVER. The four P2 audit tests below
+# still assert the LEGACY MAC-stability audit output (RANDOMIZED / STABLE / the written
+# profile) — that headline is preserved beneath the new identity block — but they now
+# also patch the new module seams (``probe_identity`` / ``_node_signals``) so they stay
+# hermetic (NO live radio/router calls) and land deterministically on the enroll path.
+
+
+def _rotating_id_probe() -> link.IdentityProbe:
+    """A SERVER-shaped, at-risk (ROTATING) identity probe for the enroll path."""
+    return link.IdentityProbe(
+        iface="en0",
+        ssid="ClosetNet",
+        current_mac=RANDOMIZED_MAC,
+        hardware_mac=HARDWARE_MAC,
+        security="WPA3_SAE",
+        associated=True,
+        router_arp_verified=True,
+        gateway_reachable=True,
+    )
+
+
+def _server_signals() -> link.NodeSignals:
+    return link.NodeSignals(30.0, "Manual", True, 1, False)
 
 
 def test_optimize_audit_reports_randomized_and_exits_zero(
@@ -165,6 +190,8 @@ def test_optimize_audit_reports_randomized_and_exits_zero(
 ) -> None:
     """Default optimize is a read-only audit: probe → analyze → verdict, exit 0."""
     monkeypatch.setattr("sanctum_cli.net.link.probe_wifi", _randomized_probe)
+    monkeypatch.setattr("sanctum_cli.net.link.probe_identity", _rotating_id_probe)
+    monkeypatch.setattr("sanctum_cli.commands.link._node_signals", _server_signals)
     result = runner.invoke(app, ["link", "optimize"])
     assert result.exit_code == 0, result.stdout
     assert "MAC stability" in result.stdout
@@ -180,6 +207,19 @@ def test_optimize_audit_reports_stable_for_hardware_mac(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr("sanctum_cli.net.link.probe_wifi", _stable_probe)
+    # A stable identity probe so neither the identity block nor the audit says RANDOMIZED.
+    stable_id = link.IdentityProbe(
+        iface="en0",
+        ssid="ClosetNet",
+        current_mac=HARDWARE_MAC,
+        hardware_mac=HARDWARE_MAC,
+        security="WPA3_SAE",
+        associated=True,
+        router_arp_verified=True,
+        gateway_reachable=True,
+    )
+    monkeypatch.setattr("sanctum_cli.net.link.probe_identity", lambda: stable_id)
+    monkeypatch.setattr("sanctum_cli.commands.link._node_signals", _server_signals)
     result = runner.invoke(app, ["link", "optimize"])
     assert result.exit_code == 0, result.stdout
     assert "STABLE" in result.stdout
@@ -195,6 +235,8 @@ def test_optimize_apply_writes_valid_mobileconfig(
     plistlib, not just checked for existence.
     """
     monkeypatch.setattr("sanctum_cli.net.link.probe_wifi", _randomized_probe)
+    monkeypatch.setattr("sanctum_cli.net.link.probe_identity", _rotating_id_probe)
+    monkeypatch.setattr("sanctum_cli.commands.link._node_signals", _server_signals)
     out = tmp_path / "sub" / "wifi-mac-stability.mobileconfig"
     result = runner.invoke(
         app, ["link", "optimize", "--apply", "--profile-out", str(out)]
@@ -219,6 +261,8 @@ def test_optimize_apply_default_profile_path(
 ) -> None:
     """With no --profile-out, --apply writes to the default sanctum path."""
     monkeypatch.setattr("sanctum_cli.net.link.probe_wifi", _randomized_probe)
+    monkeypatch.setattr("sanctum_cli.net.link.probe_identity", _rotating_id_probe)
+    monkeypatch.setattr("sanctum_cli.commands.link._node_signals", _server_signals)
     out = tmp_path / "wifi-mac-stability.mobileconfig"
     monkeypatch.setattr("sanctum_cli.net.link.default_profile_path", lambda: out)
     result = runner.invoke(app, ["link", "optimize", "--apply"])
@@ -245,3 +289,71 @@ def test_status_shows_identity_verdict(tmp_path: Path) -> None:
     assert r.exit_code == 0
     assert "IDENTITY_QUARANTINED" in r.stdout
     assert "HEALTHY" in r.stdout  # existing link-health verdict still shown
+
+
+# ─── optimize (Task 6 — node-classify + --verify + server-gated --apply) ──
+
+
+def _mk_probe(**kw: object) -> link.IdentityProbe:
+    base: dict[str, object] = dict(
+        iface="en1",
+        ssid="Nepveu-6G",
+        current_mac="32:a6:f4:de:54:cf",
+        hardware_mac="d0:11:e5:1c:88:59",
+        security="WPA2_PSK",
+        associated=True,
+        router_arp_verified=False,
+        gateway_reachable=False,
+    )
+    base.update(kw)
+    return linkmod.IdentityProbe(**base)  # type: ignore[arg-type]
+
+
+def test_optimize_apply_enrolls_server(tmp_path: Path) -> None:
+    """A SERVER on a rotating MAC → --apply enrolls, carrying the DETECTED encryption."""
+    out = tmp_path / "p.mobileconfig"
+    with patch.object(linkmod, "probe_identity", return_value=_mk_probe()), patch.object(
+        linkmod,
+        "probe_wifi",
+        return_value=linkmod.WifiProbe(
+            "en1", "32:a6:f4:de:54:cf", "d0:11:e5:1c:88:59", "Nepveu-6G"
+        ),
+    ), patch(
+        "sanctum_cli.commands.link._node_signals",
+        return_value=linkmod.NodeSignals(30.0, "Manual", True, 1, False),
+    ):
+        r = runner.invoke(link_app, ["optimize", "--apply", "--profile-out", str(out)])
+    assert r.exit_code == 0, r.stdout
+    assert out.exists()
+    assert "WPA2" in out.read_text()  # detected encryption carried, not the WPA3 default
+
+
+def test_optimize_apply_roamer_nudges_no_write(tmp_path: Path) -> None:
+    """A ROAMER → --apply nudges to opt in and writes NOTHING (privacy-first)."""
+    out = tmp_path / "p.mobileconfig"
+    with patch.object(linkmod, "probe_identity", return_value=_mk_probe()), patch(
+        "sanctum_cli.commands.link._node_signals",
+        return_value=linkmod.NodeSignals(30.0, "DHCP", False, 9, True),
+    ):
+        r = runner.invoke(link_app, ["optimize", "--apply", "--profile-out", str(out)])
+    assert r.exit_code == 0, r.stdout
+    assert not out.exists()
+    assert "opt-in" in r.stdout.lower() or "--force" in r.stdout
+
+
+def test_optimize_verify_honest_pass_and_fail() -> None:
+    """--verify prints ✓ ONLY on hardware-MAC + RouterARPVerified; else ✗ (honest)."""
+    with patch.object(
+        linkmod,
+        "probe_identity",
+        return_value=_mk_probe(
+            current_mac="d0:11:e5:1c:88:59",
+            router_arp_verified=True,
+            gateway_reachable=True,
+        ),
+    ):
+        r = runner.invoke(link_app, ["optimize", "--verify"])
+    assert r.exit_code == 0 and "✓" in r.stdout
+    with patch.object(linkmod, "probe_identity", return_value=_mk_probe()):
+        r2 = runner.invoke(link_app, ["optimize", "--verify"])
+    assert "✗" in r2.stdout or "not" in r2.stdout.lower()
