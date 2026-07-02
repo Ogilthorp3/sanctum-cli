@@ -48,6 +48,10 @@ _INET_RE = re.compile(r"\binet\s+(\d{1,3}(?:\.\d{1,3}){3})\b")
 _TAILNET_NET = ipaddress.ip_network("100.64.0.0/10")
 _TB5_PREFIX = "10.0.5."
 
+# no-loop guard: after this many heal attempts (persisted across daemon runs) we
+# stop and alert a human rather than re-flapping the interface forever.
+MAX_HEAL_ATTEMPTS = 3
+
 
 @dataclass(frozen=True)
 class HealAction:
@@ -81,6 +85,23 @@ class PostureDiagnosis:
     remedy: str
     action: HealAction
     posture: NetPosture
+
+
+@dataclass(frozen=True)
+class HealPlan:
+    """The guarded decision over a :class:`PostureDiagnosis` (pure output).
+
+    ``execute`` is the single load-bearing gate: it is ``True`` only when every
+    doctrine gate passes — the diagnosed ``action`` is ``safe``, the no-loop
+    attempts cap is not yet reached, and the never-strand spine (tailnet / TB5)
+    is alive. ``action`` is the action to run (``None`` when we stop). ``reason``
+    is the human-readable *why* — carrying the specific stop cause (alert-only /
+    attempts-exhausted / spine-down) so the CLI / daemon can surface it verbatim.
+    """
+
+    execute: bool
+    action: HealAction | None
+    reason: str
 
 
 @dataclass(frozen=True)
@@ -296,4 +317,57 @@ def diagnose_posture(
         remedy="",
         action=HealAction("none", safe=True, detail="no action"),
         posture=posture,
+    )
+
+
+# ─── plan (pure guard — never-strand + no-loop + fail-closed) ──────────
+
+
+def plan_heal(
+    diagnosis: PostureDiagnosis,
+    *,
+    attempts: int,
+    tailnet_ok: bool,
+    tb5_ok: bool = False,
+) -> HealPlan:
+    """Guard a diagnosis into an executable (or stop-and-alert) plan (pure).
+
+    Encodes the three self-heal doctrines as ordered hard gates; a mutation is
+    planned ONLY when *all three* pass:
+
+    * **stays-out-of-the-NAT-domain / fail-closed** — the diagnosed ``action``
+      must be ``safe``. An ``alert_only`` verdict (DOUBLE_NAT_OVERLAP, UNVERIFIED)
+      is never executed: we stop and hand the one-line remedy to a human.
+    * **no-loop** — ``attempts`` (persisted across daemon runs) must be below
+      :data:`MAX_HEAL_ATTEMPTS`; at the cap we stop and alert rather than re-flap
+      the interface forever.
+    * **never-strand** — at least one spine (``tailnet_ok`` or ``tb5_ok``) must be
+      alive, so a failed heal + auto-revert is always reachable out-of-band. With
+      no spine we do NOT touch the interface (a bad flip could strand the node).
+
+    The stop ``reason`` is specific per gate so callers surface the real cause.
+    """
+    action = diagnosis.action
+    if action is None or not action.safe:
+        return HealPlan(
+            execute=False,
+            action=None,
+            reason=f"stop-and-alert: {diagnosis.verdict} is not auto-healable ({action.detail if action else 'no action'}).",
+        )
+    if attempts >= MAX_HEAL_ATTEMPTS:
+        return HealPlan(
+            execute=False,
+            action=None,
+            reason=f"stop-and-alert: heal attempts exhausted ({attempts}/{MAX_HEAL_ATTEMPTS}) — no-loop guard.",
+        )
+    if not (tailnet_ok or tb5_ok):
+        return HealPlan(
+            execute=False,
+            action=None,
+            reason="stop-and-alert: never-strand spine down (no tailnet and no TB5) — refusing to mutate the interface.",
+        )
+    return HealPlan(
+        execute=True,
+        action=action,
+        reason=f"heal: {diagnosis.verdict} → {action.kind} (spine up, attempt {attempts + 1}/{MAX_HEAL_ATTEMPTS}).",
     )

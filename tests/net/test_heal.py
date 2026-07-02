@@ -9,9 +9,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from sanctum_cli.net.heal import (
+    MAX_HEAL_ATTEMPTS,
     NetPosture,
     PostureDiagnosis,
     diagnose_posture,
+    plan_heal,
     probe_posture,
 )
 
@@ -137,3 +139,30 @@ def test_unverified_action_not_safe() -> None:
     # fail-closed: an unreadable posture never yields a safe (mutating) action.
     d = diagnose_posture(_p(iface="", config_method=""))
     assert not d.action.safe
+
+
+# ─── Task 3: plan_heal — never-strand + no-loop guard ──────────────────
+
+
+def test_safe_action_planned() -> None:
+    d = diagnose_posture(_p(config_method="Manual"))
+    hp = plan_heal(d, attempts=0, tailnet_ok=True)
+    assert hp.execute and hp.action is not None and hp.action.kind == "flip_dhcp"
+
+
+def test_risky_stops() -> None:
+    d = diagnose_posture(_p(gateway_reachable=False), overlap=True)
+    hp = plan_heal(d, attempts=0, tailnet_ok=True)
+    assert not hp.execute and "alert" in hp.reason.lower()
+
+
+def test_attempts_cap_stops() -> None:
+    d = diagnose_posture(_p(config_method="Manual"))
+    hp = plan_heal(d, attempts=MAX_HEAL_ATTEMPTS, tailnet_ok=True)
+    assert not hp.execute and "attempt" in hp.reason.lower()
+
+
+def test_no_spine_no_mutate() -> None:
+    d = diagnose_posture(_p(config_method="Manual"))
+    hp = plan_heal(d, attempts=0, tailnet_ok=False, tb5_ok=False)
+    assert not hp.execute and "spine" in hp.reason.lower()
