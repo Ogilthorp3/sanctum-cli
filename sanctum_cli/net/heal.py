@@ -53,6 +53,22 @@ _TB5_PREFIX = "10.0.5."
 # stop and alert a human rather than re-flapping the interface forever.
 MAX_HEAL_ATTEMPTS = 3
 
+# Machine-readable result marker `net heal --apply` emits on its own so the daemon
+# wrapper detects success on an UNAMBIGUOUS token — NOT on human prose. The failure
+# path prints "✗ not healed …", which CONTAINS the substring "healed"; a naive
+# `grep -q 'healed'` matched BOTH lines and reset the no-loop counter on every
+# reverted heal → the daemon re-fired the same failing heal forever (toggle-storm).
+# The wrapper now anchors on the exact `HEAL_RESULT_MARKER=healed` token, and the
+# CLI derives the token from the SAME real re-probe the ✓ derives from. The three
+# tokens are mutually exclusive: `healed` (re-probe passed: lease + reachable
+# gateway), `reverted` (fired but stayed unhealthy → reverted), `noop` (dry-run /
+# stop-and-alert / nothing to do / non-root). Any non-`healed` outcome (or no token
+# at all) must INCREMENT the attempts counter so the cap accrues.
+HEAL_RESULT_MARKER = "NET_HEAL_RESULT"
+HEAL_RESULT_HEALED = f"{HEAL_RESULT_MARKER}=healed"
+HEAL_RESULT_REVERTED = f"{HEAL_RESULT_MARKER}=reverted"
+HEAL_RESULT_NOOP = f"{HEAL_RESULT_MARKER}=noop"
+
 
 @dataclass(frozen=True)
 class HealAction:
@@ -507,14 +523,22 @@ else
 fi
 
 # 4. Run the real CLI heal (it re-checks spine + snapshot→verify→auto-reverts).
+#    Success is detected on the EXACT machine-readable token the CLI emits from
+#    its real re-probe (`{HEAL_RESULT_HEALED}`), NOT on the word "healed" — the
+#    failure/revert line ("✗ not healed …") also contains "healed", so a substring
+#    match would falsely reset the no-loop counter on every reverted heal and the
+#    daemon would re-fire the failing heal forever (the toggle-storm this cap
+#    exists to prevent). Anchoring on the token means a `reverted`/`noop` outcome
+#    (or no token at all) falls through to the else branch and INCREMENTS attempts.
 OUT="$("$SANCTUM" net heal --apply 2>&1)"
 RC=$?
-if printf '%s' "$OUT" | grep -q 'healed'; then
+if printf '%s' "$OUT" | grep -q '{HEAL_RESULT_HEALED}'; then
   # A real re-probe verified the heal — reset the attempts counter.
   echo 0 > "$ATTEMPTS_FILE"
   heartbeat "healed spine=$SPINE rc=$RC"
 else
-  # Not healed this cycle — bump the persisted attempts (no-loop backoff).
+  # Not healed this cycle (reverted / noop / no token) — bump the persisted
+  # attempts (no-loop backoff) so the MAX_ATTEMPTS cap accrues and stops+alerts.
   ATTEMPTS=$((ATTEMPTS + 1))
   echo "$ATTEMPTS" > "$ATTEMPTS_FILE"
   heartbeat "no-heal attempts=$ATTEMPTS/$MAX_ATTEMPTS spine=$SPINE rc=$RC"

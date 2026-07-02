@@ -438,6 +438,28 @@ def _render_posture(posture: heal.NetPosture, diag: heal.PostureDiagnosis) -> No
     console.print(f"  [bold]spine:[/] [{style}]{escape(' · '.join(spine))}[/]")
 
 
+def _emit_heal_result(outcome: str) -> None:
+    """Print the machine-readable ``NET_HEAL_RESULT=<outcome>`` token on its own line.
+
+    This is the daemon wrapper's contract, NOT for humans (the ✓/✗ prose lines are
+    kept for them). ``outcome`` is exactly one of ``healed`` (real re-probe passed:
+    lease + reachable gateway), ``reverted`` (fired but stayed unhealthy → reverted),
+    or ``noop`` (dry-run / stop-and-alert / nothing to do / non-root). The wrapper
+    resets the no-loop attempts counter ONLY on ``healed``; every other token (or its
+    absence) increments it, so the MAX_HEAL_ATTEMPTS cap accrues.
+
+    The token derives from the SAME real outcome as the human line (honest-verify),
+    and is printed with ``markup=False`` so the literal ``=`` / token bytes reach
+    stdout verbatim for the wrapper's anchored ``grep -q 'NET_HEAL_RESULT=healed'``.
+    """
+    token = {
+        "healed": heal.HEAL_RESULT_HEALED,
+        "reverted": heal.HEAL_RESULT_REVERTED,
+        "noop": heal.HEAL_RESULT_NOOP,
+    }[outcome]
+    console.print(token, markup=False, highlight=False)
+
+
 # ─── self-healing daemon install (the one sudo step) ─────────────────
 #
 # `sanctum net heal --install` writes the wrapper (0755) + a system LaunchDaemon
@@ -578,6 +600,11 @@ def net_heal(
     gateway, and on failure reverts to the snapshot and stops+alerts. A ✓ is
     printed ONLY from the real re-probe (honest-verify); a risky / UNVERIFIED /
     spine-down verdict never mutates (stays out of the NAT domain, fail-closed).
+    Under ``--apply`` it also emits an unambiguous machine-readable result token on
+    its own line — ``NET_HEAL_RESULT=healed`` / ``=reverted`` / ``=noop`` — derived
+    from the SAME real re-probe as the ✓; the daemon wrapper keys its no-loop
+    attempts counter on that token, not the human prose (the ``=healed`` token is
+    the only thing that resets the cap, so a reverted heal accrues it).
     ``--install`` writes the ``com.sanctum.net-heal`` LaunchDaemon (the one sudo
     step) so the node self-heals on a ~120s cadence behind the same doctrine
     (kill-switch, no-loop attempts cap, spine check).
@@ -620,6 +647,7 @@ def net_heal(
         console.print(f"\n[yellow]stop + alert:[/] {escape(plan.reason)}")
         if diag.remedy:
             console.print(f"  → {escape(diag.remedy)}")
+        _emit_heal_result("noop")
         return
 
     # Mutations need root — the daemon runs as root; a non-root shell gets the hint.
@@ -632,6 +660,7 @@ def net_heal(
             "  → run it with sudo: [bold]sudo sanctum net heal --apply[/], "
             "or install the daemon: [bold]sanctum net heal --install[/]"
         )
+        _emit_heal_result("noop")
         return
 
     # Snapshot the current config so a failed heal can be cleanly reverted. No
@@ -642,6 +671,7 @@ def net_heal(
             "\n[yellow]stop + alert:[/] could not snapshot the current IPv4 config — "
             "refusing to heal without a revert baseline (never-strand)."
         )
+        _emit_heal_result("noop")
         return
 
     argv = heal.heal_action_argv(plan.action, posture.iface)
@@ -656,6 +686,8 @@ def net_heal(
             f"ip [bold]{escape(healed.ip)}[/], gateway "
             f"[bold]{escape(healed.gateway or '-')}[/] reachable."
         )
+        # Machine-readable result derived from the SAME real re-probe as the ✓.
+        _emit_heal_result("healed")
         return
 
     # Heal did not come up healthy → revert to the snapshot and stop + alert.
@@ -668,6 +700,10 @@ def net_heal(
         f"  [yellow]↩ reverted[/] Wi-Fi to manual {escape(ip)} / {escape(mask)} / "
         f"{escape(router)} and stopped (stop + alert — no loop)."
     )
+    # Machine-readable result: fired but stayed unhealthy → reverted. The daemon
+    # wrapper's no-loop counter keys on this token (NOT the human prose), so it
+    # accrues the MAX_HEAL_ATTEMPTS cap instead of resetting on the word "healed".
+    _emit_heal_result("reverted")
 
 
 # ─── hub (network-gear provider surface) ─────────────────────────────

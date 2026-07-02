@@ -8,6 +8,7 @@ from typer.testing import CliRunner
 
 from sanctum_cli.cli import app
 from sanctum_cli.commands.net import _firewalla_key_path
+from sanctum_cli.net import heal
 from tests.net import fixtures as fx
 
 if TYPE_CHECKING:
@@ -319,6 +320,110 @@ def test_net_heal_apply_risky_alert_only_no_mutation() -> None:
         "-setdhcp" in " ".join(c) or "set en1 DHCP" in " ".join(c) or "-setmanual" in " ".join(c)
         for c in fake.calls
     )
+
+
+# ─── NET_HEAL_RESULT token — kill the "not healed" substring collision ─────
+#
+# Whole-branch review found a NO-LOOP defeat: the daemon wrapper detected success
+# with `grep -q 'healed'`, but the CLI's FAILURE line ("✗ not healed — … reverting
+# …") CONTAINS the substring "healed". So a reverted heal matched the success
+# branch → the wrapper reset the attempts counter to 0 every cycle → the
+# MAX_HEAL_ATTEMPTS cap never accrued → the daemon re-fired the failing heal every
+# 120s forever (the toggle-storm the cap exists to prevent). These are the
+# hostile-input regressions proving the collision is dead: the CLI now emits an
+# unambiguous machine-readable token, and the wrapper anchors on the exact token.
+
+
+def test_net_heal_apply_success_emits_healed_token() -> None:
+    """A real, verified heal emits the machine-readable `NET_HEAL_RESULT=healed`
+    token — derived from the SAME real re-probe as the human ✓ (honest-verify)."""
+    fake = _HealFakeRunner(_STATIC_DRIFT_BEFORE, _STATIC_DRIFT_AFTER)
+    with (
+        patch("sanctum_cli.commands.net._build_heal_runner", return_value=fake),
+        patch("sanctum_cli.commands.net.os.getuid", return_value=0),
+    ):
+        result = runner.invoke(app, ["net", "heal", "--apply"])
+    assert result.exit_code == 0, result.stdout
+    assert heal.HEAL_RESULT_HEALED in result.stdout  # NET_HEAL_RESULT=healed
+    # Only the success token — never the reverted/noop tokens on a real heal.
+    assert heal.HEAL_RESULT_REVERTED not in result.stdout
+    assert heal.HEAL_RESULT_NOOP not in result.stdout
+
+
+def test_net_heal_apply_revert_emits_reverted_not_healed_token() -> None:
+    """THE hostile-input regression: a fired-but-stayed-broken heal reverts and its
+    output contains the human word "healed" (in "✗ not healed") — but MUST NOT
+    contain the success token `NET_HEAL_RESULT=healed`. It emits `=reverted`."""
+    fake = _HealFakeRunner(_STATIC_DRIFT_BEFORE, _STATIC_DRIFT_STAYS_BROKEN)
+    with (
+        patch("sanctum_cli.commands.net._build_heal_runner", return_value=fake),
+        patch("sanctum_cli.commands.net.os.getuid", return_value=0),
+    ):
+        result = runner.invoke(app, ["net", "heal", "--apply"])
+    assert result.exit_code == 0, result.stdout
+    out = result.stdout
+    # The human failure prose (still present for operators) DOES contain "healed".
+    assert "not healed" in out.lower()
+    # …but the machine-readable success token MUST NOT be present — the collision.
+    assert heal.HEAL_RESULT_HEALED not in out, (
+        "revert path leaked the success token — the 'not healed' substring "
+        "collision is back and the no-loop cap will never accrue"
+    )
+    # The correct token is emitted instead.
+    assert heal.HEAL_RESULT_REVERTED in out  # NET_HEAL_RESULT=reverted
+
+
+def test_net_heal_apply_risky_emits_noop_token() -> None:
+    """A stop-and-alert (risky / non-mutating) `--apply` emits `NET_HEAL_RESULT=noop`
+    and never the healed token — so the wrapper counts it as a no-heal cycle."""
+    fake = _HealFakeRunner(_OVERLAP_RISKY)
+    with (
+        patch("sanctum_cli.commands.net._build_heal_runner", return_value=fake),
+        patch("sanctum_cli.commands.net.os.getuid", return_value=0),
+    ):
+        result = runner.invoke(app, ["net", "heal", "--apply"])
+    assert result.exit_code == 0, result.stdout
+    assert heal.HEAL_RESULT_NOOP in result.stdout  # NET_HEAL_RESULT=noop
+    assert heal.HEAL_RESULT_HEALED not in result.stdout
+
+
+def test_wrapper_success_detector_matches_healed_but_not_revert_output() -> None:
+    """Cross-layer contract (Contracts at the Boundary): feed the REAL CLI outputs
+    through the EXACT `grep` the shipped HEAL_WRAPPER uses. The grep pattern comes
+    from production (heal.HEAL_RESULT_HEALED, embedded in HEAL_WRAPPER); the output
+    comes from the real CLI — no shared assumption. The detector MUST match the
+    healed output and MUST NOT match the reverted output (else the counter resets
+    on every reverted heal and the no-loop cap never accrues)."""
+    import subprocess
+
+    # The wrapper's exact anchored pattern (single-source-of-truth token).
+    pattern = heal.HEAL_RESULT_HEALED
+    assert f"grep -q '{pattern}'" in heal.HEAL_WRAPPER, (
+        "the shipped wrapper no longer greps the anchored token this test proves"
+    )
+
+    def cli_apply_output(fake: _HealFakeRunner) -> str:
+        with (
+            patch("sanctum_cli.commands.net._build_heal_runner", return_value=fake),
+            patch("sanctum_cli.commands.net.os.getuid", return_value=0),
+        ):
+            return runner.invoke(app, ["net", "heal", "--apply"]).stdout
+
+    def grep_matches(text: str) -> bool:
+        # The real `grep -q '<token>'` the wrapper runs (RC 0 == matched).
+        proc = subprocess.run(
+            ["grep", "-q", pattern], input=text, text=True, check=False
+        )
+        return proc.returncode == 0
+
+    healed_out = cli_apply_output(_HealFakeRunner(_STATIC_DRIFT_BEFORE, _STATIC_DRIFT_AFTER))
+    reverted_out = cli_apply_output(
+        _HealFakeRunner(_STATIC_DRIFT_BEFORE, _STATIC_DRIFT_STAYS_BROKEN)
+    )
+    # Success branch (resets ATTEMPTS to 0) fires ONLY on a real heal.
+    assert grep_matches(healed_out) is True
+    # Reverted heal falls through to the else branch → ATTEMPTS increments.
+    assert grep_matches(reverted_out) is False
 
 
 # ─── net heal --install (Task 5 — self-healing LaunchDaemon) ─────────

@@ -244,3 +244,87 @@ def test_heal_wrapper_honors_disabled_kill_switch_and_caps_attempts() -> None:
     # It heals via the real CLI (`sanctum net heal --apply`) + writes a heartbeat.
     assert "net heal --apply" in HEAL_WRAPPER
     assert "heartbeat" in HEAL_WRAPPER.lower()
+
+
+# ─── no-loop invariant: the wrapper's success detector is the TOKEN, not prose ──
+#
+# Whole-branch review found a NO-LOOP defeat: the wrapper detected success with
+# `grep -q 'healed'`, but the CLI's revert/failure line ("✗ not healed — …") also
+# contains "healed", so a reverted heal reset the attempts counter every cycle and
+# the MAX_HEAL_ATTEMPTS cap never accrued → the daemon re-fired forever. The
+# wrapper now anchors on the exact machine-readable token `NET_HEAL_RESULT=healed`.
+
+
+def test_wrapper_detector_anchors_on_the_token_not_the_word_healed() -> None:
+    # The shipped wrapper must grep the anchored token, never the bare word — the
+    # substring collision defense. (Structural guard on the artifact itself.)
+    from sanctum_cli.net.heal import HEAL_RESULT_HEALED, HEAL_WRAPPER
+
+    assert f"grep -q '{HEAL_RESULT_HEALED}'" in HEAL_WRAPPER
+    assert "grep -q 'healed'" not in HEAL_WRAPPER
+
+
+def _run_wrapper_once(tmp_state: object, sanctum_stdout: str) -> str:
+    """Run the REAL shipped HEAL_WRAPPER once with state redirected to a temp dir
+    and a stub `sanctum` on PATH emitting ``sanctum_stdout``. Returns the attempts
+    file contents ("" if absent). No live network/sudo — the stub is the CLI seam.
+
+    Only the baked absolute state-dir prefix is rewritten to the temp dir; the
+    success-detector line (the thing under test) is left verbatim — asserted below.
+    """
+    import os
+    import stat
+    import subprocess
+    from pathlib import Path
+
+    from sanctum_cli.net.heal import HEAL_WRAPPER
+
+    tmp = Path(str(tmp_state))
+    real_prefix = "/Library/Application Support/sanctum"
+    state_dir = tmp / "state"
+    wrapper_src = HEAL_WRAPPER.replace(real_prefix, str(state_dir))
+    # The detector must survive the rewrite untouched (it names no state path).
+    assert "grep -q 'NET_HEAL_RESULT=healed'" in wrapper_src
+
+    # Stub `sanctum` on PATH: prints the chosen result-token line to stdout.
+    bindir = tmp / "bin"
+    bindir.mkdir(parents=True)
+    stub = bindir / "sanctum"
+    stub.write_text(f"#!/bin/bash\nprintf '%s\\n' '{sanctum_stdout}'\n", encoding="utf-8")
+    stub.chmod(stub.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+
+    wrapper_path = tmp / "net-heal.sh"
+    wrapper_path.write_text(wrapper_src, encoding="utf-8")
+
+    env = dict(os.environ)
+    env["PATH"] = f"{bindir}{os.pathsep}{env.get('PATH', '')}"
+    subprocess.run(
+        ["/bin/bash", str(wrapper_path)],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=True,
+    )
+    attempts_file = state_dir / "net-heal.attempts"
+    return attempts_file.read_text(encoding="utf-8").strip() if attempts_file.exists() else ""
+
+
+def test_wrapper_reverted_run_increments_attempts_not_resets(tmp_path: object) -> None:
+    # A reverted heal (CLI prints "✗ not healed …" + NET_HEAL_RESULT=reverted) must
+    # INCREMENT the persisted attempts counter — the no-loop cap accrues. This is
+    # the bug: a `grep 'healed'` matched "not healed" and reset it to 0.
+    from sanctum_cli.net.heal import HEAL_RESULT_REVERTED
+
+    reverted_line = f"✗ not healed — re-probe still unhealthy; reverting. {HEAL_RESULT_REVERTED}"
+    attempts = _run_wrapper_once(tmp_path, reverted_line)
+    assert attempts == "1", f"expected attempts incremented to 1, got {attempts!r}"
+
+
+def test_wrapper_healed_run_resets_attempts(tmp_path: object) -> None:
+    # A genuinely healed run (NET_HEAL_RESULT=healed) resets the counter to 0.
+    from sanctum_cli.net.heal import HEAL_RESULT_HEALED
+
+    healed_line = f"✓ healed — flip_dhcp took. {HEAL_RESULT_HEALED}"
+    attempts = _run_wrapper_once(tmp_path, healed_line)
+    assert attempts == "0", f"expected attempts reset to 0, got {attempts!r}"
