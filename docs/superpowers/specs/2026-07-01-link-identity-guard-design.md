@@ -210,3 +210,17 @@ as part of cutover.
 None blocking. Future (out of scope here): a `firewalla trust-node <hw-mac>` primitive to pin a
 Sanctum host to a trusted tag + monitoring-exemption (the router-side complement, Firewalla-only);
 extending the Guard to iOS/other platforms if Sanctum nodes ever run there.
+
+Future integration point — `sanctum link rescue`: when the Wi-Fi identity is UNVERIFIED or the sole
+radio link is down, the sibling TB5 Layer-3 bridge (MBP↔Mini over the Thunderbolt bridge, `10.0.5.x`)
+is a router-independent path to re-probe and re-assert identity. The Guard's `probe_identity` and
+`classify_node` are already router-agnostic (L3 read), so `link rescue` can reuse them over the TB5
+transport to recover a node whose Wi-Fi association is flapping. Not built here.
+
+Known gap carried into whole-branch review (Task 9 verification): Task 6 (`sanctum link optimize`
+gaining `--verify` for an honest re-probe ✓/✗ and a SERVER-gated `--apply`) was not landed in this
+run — the commit history goes T5 → T7. Today `optimize` is a read-only audit plus an ungated
+`--apply` that only renders the `.mobileconfig` (never mutates the radio, smoke-verified), so behavior
+is safe and additive; but the `--verify` honest-re-probe and node-class gating on `--apply` remain to
+be implemented per the plan's Task 6 before that surface is complete. The `link status` IDENTITY
+verdict (T5) already provides the honest re-probe read in the interim.
