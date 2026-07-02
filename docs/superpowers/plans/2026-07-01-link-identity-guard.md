@@ -235,7 +235,7 @@ _IDENTITY_REMEDY: dict[str, str] = {
         "--apply (or Private Wi-Fi Address ▸ Off), then re-verify."
     ),
     "IDENTITY_ROTATING": (
-        "MAC is randomized (private address) — it works now but will islande the node "
+        "MAC is randomized (private address) — it works now but will isolate the node "
         "on the next router-trust reset (reboot/renumber). Pin to the hardware MAC: "
         "sanctum link optimize --apply."
     ),

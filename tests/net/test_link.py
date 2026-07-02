@@ -9,6 +9,7 @@ from __future__ import annotations
 import plistlib
 
 from sanctum_cli.net.link import (
+    SENTINEL_SCRIPT,
     IdentityProbe,
     NodeSignals,
     Sample,
@@ -436,3 +437,99 @@ def test_existing_parse_log_still_reads_degraded_with_id_token():
     line = "x ssid=Y rtt=2/3/4/1 loss=0.0% load=[1.5] id=cur=aa:bb:cc:dd:ee:ff,hw=aa:bb:cc:dd:ee:ff,arp=TRUE DEGRADED"
     s = parse_log(line)
     assert len(s) == 1 and s[0].degraded is True and s[0].load == 1.5
+
+
+# ─── sentinel PRODUCER wiring: drift marker (Task 7 completion) ───────────
+#
+# Task 7 shipped the pure detectors (parse_identity / identity_is_drift). These
+# tests close the loop by running the REAL producer — the exact drift-marker
+# conditional + printf lines extracted verbatim from SENTINEL_SCRIPT — with the
+# radio/router reads (CURMAC/HWMAC/ARP/LOAD/RTT/LOSS/SSID) injected as plain
+# shell vars, so NO live subprocess/radio/router call fires. This is the
+# producer→consumer contract, not a hand-built fixture: the assertion survives
+# because a different layer (the bash sampler) authored the line.
+
+
+def _run_sentinel_emit(*, curmac: str, hwmac: str, arp: str, rtt: str, loss: str, flag: str) -> str:
+    """Run the sentinel's REAL drift-marker + printf shell logic; return the line.
+
+    Slices the two producer statements (the ``DRIFT`` conditional and the final
+    ``printf``) out of ``SENTINEL_SCRIPT`` verbatim and executes them with the
+    system-read outputs injected as vars — so the actual producer code path emits
+    the line without any live radio/router/ping call.
+    """
+    import shutil
+    import subprocess
+
+    src = SENTINEL_SCRIPT
+    drift_start = src.index('DRIFT=""')
+    printf_start = src.index("printf '%s ssid=", drift_start)
+    printf_end = src.index('>> "$LOG"', printf_start) + len('>> "$LOG"')
+    producer = src[drift_start:printf_end].replace('>> "$LOG"', "")
+
+    bash = shutil.which("bash") or "/bin/bash"
+    script = (
+        f'CURMAC={curmac!r}; HWMAC={hwmac!r}; ARP={arp!r}\n'
+        f'RTT={rtt!r}; LOSS={loss!r}; LOAD="1.5 1.4 1.3"; SSID="Nepveu-6G"; FLAG={flag!r}\n'
+        f"{producer}\n"
+    )
+    out = subprocess.run(
+        [bash, "-c", script], capture_output=True, text=True, check=True, timeout=10
+    )
+    return out.stdout.strip()
+
+
+def test_sentinel_producer_stamps_drift_and_detector_reads_it():
+    # Rotating MAC (cur != hw) + arp=FALSE → the producer stamps ,drift=1, and the
+    # pure detectors read it back as drift.
+    line = _run_sentinel_emit(
+        curmac="32:a6:f4:de:54:cf",
+        hwmac="d0:11:e5:1c:88:59",
+        arp="FALSE",
+        rtt="NA",
+        loss="100.0",
+        flag="DEGRADED",
+    )
+    assert ",drift=1" in line, line
+    ids = parse_identity(line)
+    assert ids is not None and ids["drift"] == "1"
+    assert identity_is_drift(ids) is True
+
+
+def test_sentinel_producer_no_drift_on_hardware_mac_and_line_parses_healthy():
+    # Stable hardware MAC + arp=TRUE → NO drift marker; and the emitted line still
+    # parses via parse_log with degraded/rtt/loss/load intact (trailing flag last).
+    line = _run_sentinel_emit(
+        curmac="d0:11:e5:1c:88:59",
+        hwmac="d0:11:e5:1c:88:59",
+        arp="TRUE",
+        rtt="2.0/3.0/4.0/1.0",
+        loss="0.0",
+        flag="ok",
+    )
+    assert ",drift=" not in line, line
+    assert identity_is_drift(parse_identity(line)) is False
+    # parse_log invariant: rtt/loss/load read + trailing health flag both survive.
+    samples = parse_log(line)
+    assert len(samples) == 1
+    s = samples[0]
+    assert s.degraded is False
+    assert s.avg == 3.0 and s.max == 4.0
+    assert s.loss == 0.0 and s.load == 1.5
+
+
+def test_sentinel_producer_degraded_line_with_drift_still_ends_in_degraded():
+    # A drifting AND radio-degraded window: the id= token carries ,drift=1 but the
+    # trailing FLAG stays last, so parse_log's endswith("DEGRADED") still fires.
+    line = _run_sentinel_emit(
+        curmac="32:a6:f4:de:54:cf",
+        hwmac="d0:11:e5:1c:88:59",
+        arp="FALSE",
+        rtt="4.0/30.0/120.0/40.0",
+        loss="0.0",
+        flag="DEGRADED",
+    )
+    assert ",drift=1" in line
+    samples = parse_log(line)
+    assert len(samples) == 1 and samples[0].degraded is True
+    assert identity_is_drift(parse_identity(line)) is True

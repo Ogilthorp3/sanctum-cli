@@ -53,9 +53,33 @@ LOAD_LOG = """\
 """
 
 
-def test_status_load_fixture_prints_load_and_exits_zero(tmp_path: Path) -> None:
+def _quarantined_probe() -> link.IdentityProbe:
+    """A canned IdentityProbe so the status IDENTITY block fires NO live call.
+
+    ``link status`` now probes the live Wi-Fi identity beside the link-health
+    verdict; without this stub the three status tests below would shell out to
+    real ``networksetup``/``ifconfig``/``ipconfig``/``route`` and ping the live
+    gateway on macOS. Mirrors the hermetic pattern at
+    ``test_status_shows_identity_verdict``.
+    """
+    return link.IdentityProbe(
+        iface="en1",
+        ssid="Nepveu-6G",
+        current_mac="32:a6:f4:de:54:cf",
+        hardware_mac="d0:11:e5:1c:88:59",
+        security="WPA2_PSK",
+        associated=True,
+        router_arp_verified=False,
+        gateway_reachable=False,
+    )
+
+
+def test_status_load_fixture_prints_load_and_exits_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     log = tmp_path / "wifi-stability.log"
     log.write_text(LOAD_LOG, encoding="utf-8")
+    monkeypatch.setattr("sanctum_cli.net.link.probe_identity", _quarantined_probe)
     result = runner.invoke(app, ["link", "status", "--log", str(log)])
     assert result.exit_code == 0, result.stdout
     assert "VERDICT: LOAD" in result.stdout
@@ -63,8 +87,11 @@ def test_status_load_fixture_prints_load_and_exits_zero(tmp_path: Path) -> None:
     assert "WIRED" in result.stdout
 
 
-def test_status_missing_log_exits_zero_with_no_data_hint(tmp_path: Path) -> None:
+def test_status_missing_log_exits_zero_with_no_data_hint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     missing = tmp_path / "does-not-exist.log"
+    monkeypatch.setattr("sanctum_cli.net.link.probe_identity", _quarantined_probe)
     result = runner.invoke(app, ["link", "status", "--log", str(missing)])
     assert result.exit_code == 0, result.stdout
     assert "NO_DATA" in result.stdout
@@ -80,6 +107,7 @@ def test_status_default_log_path_used_when_unset(
         "sanctum_cli.net.link.default_log_path",
         lambda: tmp_path / "absent.log",
     )
+    monkeypatch.setattr("sanctum_cli.net.link.probe_identity", _quarantined_probe)
     result = runner.invoke(app, ["link", "status"])
     assert result.exit_code == 0, result.stdout
     assert "NO_DATA" in result.stdout

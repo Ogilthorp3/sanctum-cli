@@ -13,7 +13,7 @@ to Rotating** whenever a network is re-joined (after a router swap, subnet renum
 The node then presents a *locally-administered, changing* MAC instead of its burned-in hardware
 MAC. Any router that keys trust/identity to a MAC — a DHCP **reservation**, a device
 **allow-list**, or a Firewalla **quarantine tag** — no longer recognizes the node, so it is
-islanded. The failure is invisible to radio diagnostics (RSSI/SNR/BSSID all look perfect) and
+isolated. The failure is invisible to radio diagnostics (RSSI/SNR/BSSID all look perfect) and
 recurs on every re-join, which is why it kept coming back.
 
 The fix is to make fixed-infra nodes present a **stable, hardware MAC on the home SSID**,
@@ -33,7 +33,7 @@ radio works*.
 
 Every beta user's **fixed-infra** Macs automatically present a stable, router-trusted Wi-Fi
 identity on their home network — **detected → enforced (guided one-click) → self-healed** — so
-macOS MAC-rotation can never islande a node behind a DHCP reservation or device-trust again.
+macOS MAC-rotation can never isolate a node behind a DHCP reservation or device-trust again.
 
 **Non-goals:** MDM enrollment (rejected — too heavy/invasive for a beta); disabling MAC
 randomization globally or off-home (privacy regression); auto-enrolling roaming laptops (privacy);
@@ -125,11 +125,24 @@ required and never blocks** the router-agnostic path.
     `WPA2`, which covers WPA2/WPA3-personal transition) is a hard requirement, not a guess.
   - *`--verify`:* re-probe; assert `current_mac == hardware_mac` on the home SSID AND
     `router_arp_verified is True`. Prints ✓ only on a real post-fix read (honest-verify).
-- **Sentinel extension:** each cycle also logs the identity tuple (`current_mac`, `hardware_mac`,
-  `associated`, `router_arp_verified`). `status`/`classify` detect drift; on the quarantine
-  signature the sentinel emits a `DEGRADED-IDENTITY` line and re-nudges (posts a notification /
-  re-prints guidance). The enforced profile prevents re-randomization; the sentinel is the
+- **Sentinel extension:** each cycle also logs the identity tuple as an
+  `id=cur=…,hw=…,arp=…` token. When the sampler itself detects the drift signature
+  (rotating MAC + `arp=FALSE`) it stamps a `,drift=1` field **inside** that token — kept
+  inside the token, not as a trailing word, so the line's trailing health flag stays
+  last and both invariants hold (`_LINE` still matches up to `load=[<num>`, and
+  `parse_log`'s `endswith("DEGRADED")` still reads the health flag). The pure detectors
+  `parse_identity` + `identity_is_drift` consume the tuple (and honor the stamped
+  `,drift=1`); the enforced profile prevents re-randomization; the sentinel is the
   safety-net that catches a *missing or removed* profile and a genuine re-drift.
+
+  > **Deferred (implemented as producer + detectors; log-tuple consumer is future):** the
+  > sentinel now *produces* the `,drift=1` marker and the pure `parse_identity`/`identity_is_drift`
+  > detectors *consume* it (tested against the real bash producer), but `status` does not yet read the
+  > logged identity tuple back to re-nudge. The **live `probe_identity` path in `status`/`optimize`
+  > is the current drift surface** (it reads identity now and renders `IDENTITY_QUARANTINED`/
+  > `IDENTITY_ROTATING`); the logged-tuple/`,drift=1` re-nudge from the on-disk log — including any
+  > `DEGRADED-IDENTITY`-style status wiring and desktop notification — is future work. The detectors
+  > are wired to a real producer, not silently orphaned.
 
 ### Onboarding integration (`sanctum_cli/commands/onboard.py`)
 
