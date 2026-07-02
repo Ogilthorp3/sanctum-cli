@@ -44,7 +44,7 @@ from sanctum_cli import config, recipes
 from sanctum_cli.backends import b2, gdrive, r2
 from sanctum_cli.commands import backup as backup_cmd
 from sanctum_cli.errors import LocalError, UserError
-from sanctum_cli.net import link
+from sanctum_cli.net import heal, link
 from sanctum_cli.onboard_experience import chapter_banner, green_check, recap_card
 from sanctum_cli.providers.base import HealthSnapshot
 
@@ -111,6 +111,7 @@ RECIPE_GATES: dict[str, tuple[str, ...]] = {
         "network-gear",
         "wifi-identity",
         "ha-green",
+        "network-resilience",
     ),
     # The Apple arc is UNIVERSAL — the recipe only chooses the backup scope, so the
     # "You" (identity) and "Your AI" chapters run on every recipe. operator/code are
@@ -123,11 +124,13 @@ RECIPE_GATES: dict[str, tuple[str, ...]] = {
         "identity-setup",
         "ai-providers",
         "wifi-identity",
+        "network-resilience",
     ),
     "code": (
         "identity-setup",
         "ai-providers",
         "wifi-identity",
+        "network-resilience",
     ),
 }
 
@@ -173,6 +176,7 @@ _CHAPTER_GATES: dict[str, tuple[str, ...]] = {
         "network-gear",
         "wifi-identity",
         "ha-green",
+        "network-resilience",
     ),
 }
 
@@ -186,6 +190,7 @@ _GATE_LABELS: dict[str, str] = {
     "network-gear": "Network gear",
     "wifi-identity": "Wi-Fi identity (stable MAC)",
     "ha-green": "HA Green (Home Assistant)",
+    "network-resilience": "Network resilience (self-heal)",
 }
 
 
@@ -216,6 +221,8 @@ def _run_gate(gate: str, *, yes: bool) -> bool:
         return _run_wifi_identity(yes=yes)
     if gate == "ha-green":
         return _run_ha_green(yes=yes)
+    if gate == "network-resilience":
+        return _run_network_resilience(yes=yes)
     return False
 
 
@@ -1668,6 +1675,166 @@ def _run_ha_green(*, yes: bool) -> bool:
         "(or `sanctum net ha-green status`) after fixing the token."
     )
     return False
+
+
+# ── Network-resilience gate (topology-adaptive self-heal) ─────────────
+# The onboard-time front door to ``sanctum net heal``. It reads THIS node's live
+# L3 posture (``heal.probe_posture`` → ``heal.diagnose_posture``) and, on a
+# STATIC_DRIFT verdict (a pinned Manual address that strands the node on any
+# foreign LAN), offers the GUIDED DHCP flip — but ONLY after confirming the
+# never-strand spine (Tailscale tailnet / TB5) is alive, so a failed flip is
+# always reachable out-of-band. It then installs the self-healing LaunchDaemon so
+# the node keeps healing after onboarding. Doctrine, encoded here as it is in the
+# pure core: never-strand (no flip without a live spine), fail-closed (UNVERIFIED
+# posture → no action), stays-out-of-NAT (DOUBLE_NAT_OVERLAP → alert only, never
+# touch the router), and HONEST-VERIFY (the green check is from a REAL re-probe
+# that reads DHCP-not-static, never from "the step ran"). No live networksetup /
+# ipconfig / launchctl call is fired in tests — the reads/mutations are
+# module-level seams (``heal.probe_posture`` / ``_flip_to_dhcp`` /
+# ``_install_net_heal_daemon``) the tests patch.
+
+
+def _flip_to_dhcp() -> None:
+    """Flip Wi-Fi from a Manual (static) address to DHCP — a module-level seam.
+
+    The one interface-mutation this gate performs, isolated behind a seam so the
+    onboarding tests never shell out to ``networksetup``. Uses the same stable
+    ``"Wi-Fi"`` macOS service label the pure core's :func:`heal.heal_action_argv`
+    emits for the ``flip_dhcp`` action. Best-effort: a failure surfaces on the
+    verifying re-probe (which will still read Manual), never as a raise out of
+    onboarding.
+    """
+    import subprocess
+
+    with contextlib.suppress(OSError, subprocess.SubprocessError):
+        subprocess.run(
+            ["networksetup", "-setdhcp", "Wi-Fi"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+
+
+def _install_net_heal_daemon() -> None:
+    """Install the ``com.sanctum.net-heal`` self-healing LaunchDaemon — a seam.
+
+    Delegates to the CLI's installer (``net._install_heal_daemon``) so the daemon
+    assets + launchctl wiring live in one place; a non-root onboarding run prints
+    the exact ``sudo`` command rather than half-installing (the installer already
+    handles the root gate). Best-effort by contract — a missing installer or a
+    launchctl miss is surfaced there and never aborts the gate. Tests patch this
+    seam so no real LaunchDaemon is written and no ``launchctl`` runs.
+    """
+    from sanctum_cli.commands import net as net_cmd
+
+    net_cmd._install_heal_daemon()
+
+
+def _run_network_resilience(*, yes: bool) -> bool:
+    """Network-resilience gate — DHCP-not-static + heal daemon + spine check; fail-closed.
+
+    Returns True ONLY on a genuinely verified good/handled state: a node already
+    healthy on DHCP (the daemon is installed to keep it that way), or a STATIC_DRIFT
+    node we flipped to DHCP AND a REAL re-probe confirmed reads DHCP-not-static
+    (then the daemon is installed). Returns False when ``--yes`` skips, the probe is
+    UNVERIFIED (fail-closed), the never-strand spine is down (never-strand: refuse
+    to flip), the operator declines the flip, the verdict is DOUBLE_NAT_OVERLAP
+    (stays out of the NAT domain: alert only), or the post-flip re-probe still reads
+    Manual (HONEST-VERIFY: no false "healed") — so the recap reads "skipped" rather
+    than a false "configured" (design spec §2/§11).
+
+    Interactive-context step, so ``--yes`` SKIPS it (no probe, no mutation). The
+    step is non-blocking: the backup already succeeded, so a miss never fails the run.
+    """
+    if yes:
+        console.print(
+            "  [yellow]skipped[/] — interactive step; run `sanctum onboard` without "
+            "--yes to check this node's network resilience"
+        )
+        return False
+
+    posture = heal.probe_posture()
+    diag = heal.diagnose_posture(posture, overlap=heal.overlap_for(posture))
+
+    # Fail-closed: we could not read the posture → do nothing, claim nothing.
+    if diag.verdict == "UNVERIFIED":
+        console.print(
+            "  [dim]could not read this node's network posture — nothing to do "
+            "(connect it to your network, then re-run `sanctum onboard`)[/]"
+        )
+        return False
+
+    # Stays-out-of-the-NAT-domain: an overlapping-DMZ LAN with a dead gateway is a
+    # router/NAT change a human must make — we alert and NEVER touch the interface.
+    if diag.verdict == "DOUBLE_NAT_OVERLAP":
+        console.print(
+            "  [yellow]![/] your LAN overlaps your ISP's WAN range (double-NAT) and the "
+            "gateway is unreachable — Sanctum stays out of the NAT domain."
+        )
+        if diag.remedy:
+            console.print(f"  [dim]→ {escape(diag.remedy)}[/]")
+        return False
+
+    # STATIC_DRIFT → offer the guided DHCP flip, but NEVER without a live spine
+    # (never-strand: a failed flip must be reachable out-of-band to revert).
+    if diag.verdict == "STATIC_DRIFT":
+        if not (posture.on_tailnet or posture.tb5_up):
+            console.print(
+                "  [yellow]![/] this node is on a Manual (static) address, but the "
+                "never-strand spine is down (no Tailscale tailnet, no TB5) — refusing "
+                "to flip to DHCP (a failed flip could strand it)."
+            )
+            console.print(
+                "  [dim]→ bring the tailnet/TB5 link up, then re-run `sanctum onboard` "
+                "(or run `sanctum net heal --apply` on the node itself).[/]"
+            )
+            return False
+
+        console.print(
+            f"  [bold]This node is on a Manual (static) address[/] "
+            f"({escape(posture.ip or '?')}) — that strands it on any foreign LAN. "
+            "Flipping to DHCP keeps it online as it roams."
+        )
+        if not Confirm.ask("  flip Wi-Fi to DHCP now?", default=True):
+            console.print(
+                "  [dim]skipped — this node stays on its static address until you flip it "
+                "(run `sanctum net heal --apply` later).[/]"
+            )
+            return False
+
+        _flip_to_dhcp()
+
+        # HONEST-VERIFY: only claim DHCP-not-static from a REAL re-probe. A re-probe
+        # that still reads Manual means the flip did not take — say so, install nothing.
+        after = heal.probe_posture()
+        if after.config_method == "Manual" or not after.config_method:
+            console.print(
+                "  [red]✗[/] the flip did not take — the node still reads Manual. "
+                "Nothing else changed; re-run `sanctum net heal --apply` (as root) to retry."
+            )
+            return False
+        console.print(
+            f"  [green]✓[/] flipped to DHCP — this node now reads "
+            f"[bold]{escape(after.config_method)}[/] and will follow the LAN as it roams."
+        )
+    else:
+        # HEALTHY / GATEWAY_DEAD / WRONG_SUBNET on DHCP: nothing static to flip here;
+        # the standing daemon handles a dead gateway / renumber on its own cadence.
+        console.print(
+            f"  [green]✓[/] network posture reads [bold]{escape(diag.verdict)}[/] on DHCP "
+            "— no static address to fix."
+        )
+
+    # Install the self-healing daemon so the node keeps healing after onboarding.
+    # The installer is root-gated (prints the sudo hint on a non-root run); either
+    # way the node is now DHCP-not-static, which is the durable resilience win.
+    console.print(
+        "  [dim]Installing the self-healing daemon so this node auto-heals a dead "
+        "gateway / renumber going forward…[/]"
+    )
+    _install_net_heal_daemon()
+    return True
 
 
 # ── Wi-Fi identity gate (SERVER auto-enroll on the home SSID) ─────────

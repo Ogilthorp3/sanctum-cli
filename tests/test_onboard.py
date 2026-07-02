@@ -300,6 +300,9 @@ def _invoke_family_onboard_interactive(input_text: str) -> tuple[int, str]:
         # HA Green is a later interactive gate (own tests); mock it so a real TCP
         # probe to 10.0.0.3 never runs and it never consumes this gate's stdin.
         patch("sanctum_cli.commands.onboard._run_ha_green"),
+        # Network-resilience is the last interactive gate (own tests); mock it so a
+        # real posture probe / DHCP flip / daemon install never runs here.
+        patch("sanctum_cli.commands.onboard._run_network_resilience"),
     ):
         result = runner.invoke(app, ["onboard", "--recipe", "family"], input=input_text)
     return result.exit_code, " ".join(result.stdout.split())
