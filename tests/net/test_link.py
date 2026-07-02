@@ -10,10 +10,12 @@ import plistlib
 
 from sanctum_cli.net.link import (
     IdentityProbe,
+    NodeSignals,
     Sample,
     _enc_from_security,
     analyze_mac,
     classify,
+    classify_node,
     diagnose_identity,
     is_locally_administered,
     parse_log,
@@ -358,3 +360,31 @@ def test_diagnose_stable_on_hardware_mac():
 def test_diagnose_unverified_when_not_associated_or_unread():
     assert diagnose_identity(_probe(associated=False)).verdict == "IDENTITY_UNVERIFIED"
     assert diagnose_identity(_probe(iface="", current_mac="", hardware_mac="")).verdict == "IDENTITY_UNVERIFIED"
+
+
+# ─── Link Identity Guard — Task 3: classify_node (server vs roamer) ───────────
+
+
+def _sig(**kw):
+    base = dict(uptime_days=10.0, ip_config_method="Manual", ip_is_reserved_or_static=True,
+                distinct_ssids_seen=1, is_portable=False)
+    base.update(kw)
+    return NodeSignals(**base)
+
+
+def test_classify_server_when_fixed_infra():
+    assert classify_node(_sig()).klass == "SERVER"
+
+
+def test_classify_roamer_when_portable():
+    assert classify_node(_sig(is_portable=True)).klass == "ROAMER"
+
+
+def test_classify_roamer_when_many_ssids():
+    assert classify_node(_sig(distinct_ssids_seen=9)).klass == "ROAMER"
+
+
+def test_classify_unknown_is_conservative():
+    # not portable, short uptime, DHCP/no reservation, a couple SSIDs → UNKNOWN
+    assert classify_node(_sig(uptime_days=0.2, ip_config_method="DHCP",
+                              ip_is_reserved_or_static=False, distinct_ssids_seen=3)).klass == "UNKNOWN"

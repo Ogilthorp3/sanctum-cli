@@ -750,3 +750,40 @@ def diagnose_identity(probe: IdentityProbe) -> IdentityDiagnosis:
         note = "" if not lan_dead else " (gateway unreachable — see `sanctum link status` for a link-health read)"
         v, detail = "IDENTITY_STABLE", f"on hardware MAC {probe.hardware_mac}{note}"
     return IdentityDiagnosis(v, detail, _IDENTITY_REMEDY[v], probe)
+
+
+# ─── node classification (SERVER auto-enroll vs ROAMER opt-in) ─────────
+
+SERVER_UPTIME_DAYS = 3.0
+SSID_ROAMER_THRESHOLD = 5
+SSID_SERVER_MAX = 3
+
+
+@dataclass(frozen=True)
+class NodeSignals:
+    uptime_days: float
+    ip_config_method: str  # "Manual" | "DHCP" | ""
+    ip_is_reserved_or_static: bool
+    distinct_ssids_seen: int
+    is_portable: bool
+
+
+@dataclass(frozen=True)
+class NodeClass:
+    klass: str  # "SERVER" | "ROAMER" | "UNKNOWN"
+    reason: str
+
+
+def classify_node(signals: NodeSignals) -> NodeClass:
+    """PURE: is this a fixed-infra SERVER (auto-enroll) or a ROAMER (opt-in only)?
+
+    Conservative and privacy-first: portability or many-SSIDs → ROAMER; a
+    non-portable, long-lived / static-or-reserved, single-SSID node → SERVER;
+    anything ambiguous → UNKNOWN (treated as ROAMER downstream, never auto-enrolled).
+    """
+    if signals.is_portable or signals.distinct_ssids_seen > SSID_ROAMER_THRESHOLD:
+        return NodeClass("ROAMER", "portable or roams across many networks")
+    fixed = signals.uptime_days >= SERVER_UPTIME_DAYS or signals.ip_is_reserved_or_static
+    if not signals.is_portable and fixed and signals.distinct_ssids_seen <= SSID_SERVER_MAX:
+        return NodeClass("SERVER", "always-on / static-or-reserved IP / single network")
+    return NodeClass("UNKNOWN", "insufficient signal — treated as roamer (privacy-first)")
