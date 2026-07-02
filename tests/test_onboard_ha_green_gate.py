@@ -290,6 +290,9 @@ def test_full_onboard_ha_green_gate_records_verified_pairing(
         patch("sanctum_cli.commands.onboard._run_ai_providers"),
         patch("sanctum_cli.commands.onboard._run_firewalla_pairing"),
         patch("sanctum_cli.commands.onboard._run_network_gear"),
+        # Network-resilience runs AFTER ha-green (own tests); mock it so a real
+        # posture probe / DHCP flip / daemon install never runs here.
+        patch("sanctum_cli.commands.onboard._run_network_resilience"),
         warnings.catch_warnings(),
     ):
         warnings.simplefilter("ignore", getpass.GetPassWarning)

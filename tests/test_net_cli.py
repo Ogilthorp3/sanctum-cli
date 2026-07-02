@@ -8,6 +8,7 @@ from typer.testing import CliRunner
 
 from sanctum_cli.cli import app
 from sanctum_cli.commands.net import _firewalla_key_path
+from sanctum_cli.net import heal
 from tests.net import fixtures as fx
 
 if TYPE_CHECKING:
@@ -145,3 +146,350 @@ def test_net_speedtest_no_test_human_output() -> None:
     out = result.stdout.lower()
     assert "ceiling" in out
     assert "nat" in out
+
+
+# ─── net heal (Task 4 — dry-run + guarded --apply) ───────────────────
+#
+# The heal CLI reads posture via an injected CommandRunner (argv -> stdout), so
+# NO live networksetup/ipconfig/route/ping/sudo is ever touched here. The tests
+# patch ``sanctum_cli.commands.net._build_heal_runner`` to feed canned outputs,
+# and (for --apply) ``os.getuid`` so the root gate is exercised deterministically.
+
+
+class _HealFakeRunner:
+    """A substring-keyed, mutation-aware fake CommandRunner (argv: list[str]).
+
+    ``table`` maps a substring of the joined argv to the stdout to return (first
+    match wins), mirroring the pure-core test ``_run`` helper. When a healing
+    mutation fires (``-setdhcp`` / ``set en1 DHCP``) the runner switches to
+    ``after`` — so a test can simulate a heal that WORKS (gateway comes back) or
+    STAYS BROKEN (gateway still dead → the CLI must revert). Every argv is logged
+    so a test can assert whether a mutating / reverting command was issued.
+    """
+
+    def __init__(
+        self, before: dict[str, str], after: dict[str, str] | None = None
+    ) -> None:
+        self._before = before
+        self._after = after if after is not None else before
+        self._table = before
+        self.calls: list[list[str]] = []
+
+    def __call__(self, argv: list[str]) -> str:
+        self.calls.append(argv)
+        joined = " ".join(argv)
+        if "-setdhcp" in joined or "set en1 DHCP" in joined:
+            # A healing mutation fired — subsequent posture reads see `after`.
+            self._table = self._after
+        for pat, out in self._table.items():
+            if pat in joined:
+                return out
+        return ""
+
+
+# A Manual/static Mini on a foreign LAN with the tailnet spine up — STATIC_DRIFT.
+_STATIC_DRIFT_BEFORE: dict[str, str] = {
+    "listallhardwareports": "Hardware Port: Wi-Fi\nDevice: en1\nEthernet Address: d0:11:e5:1c:88:59",
+    "getsummary en1": "  LinkStatusActive : TRUE\n  ConfigMethod : Manual\n",
+    "route -n get default": "gateway: 10.0.0.1\ninterface: en1",
+    "getifaddr en1": "10.0.0.10",
+    "getoption en1 subnet_mask": "255.255.255.0",
+    "ifconfig": "utun3: flags=...\n\tinet 100.107.112.118 --> 100.107.112.118",
+    "ping": "3 packets transmitted, 3 packets received, 0.0% packet loss",
+    "-getinfo": "IP address: 10.0.0.10\nSubnet mask: 255.255.255.0\nRouter: 10.0.0.1\n",
+}
+
+# After the flip, the node is on DHCP with a reachable gateway — a real heal.
+_STATIC_DRIFT_AFTER: dict[str, str] = {
+    **_STATIC_DRIFT_BEFORE,
+    "getsummary en1": "  LinkStatusActive : TRUE\n  ConfigMethod : DHCP\n",
+    "ping": "3 packets transmitted, 3 packets received, 0.0% packet loss",
+}
+
+# After the flip the gateway is STILL dead (heal did not take) — CLI must revert.
+_STATIC_DRIFT_STAYS_BROKEN: dict[str, str] = {
+    **_STATIC_DRIFT_BEFORE,
+    "getsummary en1": "  LinkStatusActive : TRUE\n  ConfigMethod : DHCP\n",
+    "ping": "3 packets transmitted, 0 packets received, 100.0% packet loss",
+}
+
+# A double-NAT overlap (10.x LAN inside Bell's 0/1 DMZ WAN) + dead gateway +
+# spine up → risky DOUBLE_NAT_OVERLAP → alert-only, NEVER a mutation.
+_OVERLAP_RISKY: dict[str, str] = {
+    "listallhardwareports": "Hardware Port: Wi-Fi\nDevice: en1\nEthernet Address: d0:11:e5:1c:88:59",
+    "getsummary en1": "  LinkStatusActive : TRUE\n  ConfigMethod : DHCP\n",
+    "route -n get default": "gateway: 10.0.0.1\ninterface: en1",
+    "getifaddr en1": "10.0.0.10",
+    "getoption en1 subnet_mask": "255.255.255.0",
+    "ifconfig": "utun3: flags=...\n\tinet 100.107.112.118 --> 100.107.112.118",
+    "ping": "3 packets transmitted, 0 packets received, 100.0% packet loss",
+    "-getinfo": "IP address: 10.0.0.10\nSubnet mask: 255.255.255.0\nRouter: 10.0.0.1\n",
+}
+
+
+def test_net_heal_dry_run_reports_static_drift_no_mutation() -> None:
+    """Default `net heal` is a dry-run: prints STATIC_DRIFT + the would-do flip,
+    and issues NO mutating command."""
+    fake = _HealFakeRunner(_STATIC_DRIFT_BEFORE)
+    with patch("sanctum_cli.commands.net._build_heal_runner", return_value=fake):
+        result = runner.invoke(app, ["net", "heal"])
+    assert result.exit_code == 0, result.stdout
+    out = result.stdout
+    assert "STATIC_DRIFT" in out
+    assert "flip_dhcp" in out
+    # Dry-run must never mutate: no setdhcp / no ipconfig-set command was issued.
+    assert not any(
+        "-setdhcp" in " ".join(c) or "set en1 DHCP" in " ".join(c) for c in fake.calls
+    )
+
+
+def test_net_heal_dry_run_shows_spine_state() -> None:
+    """The dry-run surfaces the never-strand spine state (tailnet / TB5)."""
+    fake = _HealFakeRunner(_STATIC_DRIFT_BEFORE)
+    with patch("sanctum_cli.commands.net._build_heal_runner", return_value=fake):
+        result = runner.invoke(app, ["net", "heal"])
+    assert result.exit_code == 0, result.stdout
+    # The tailnet spine (100.107.x present) must be reported as up.
+    lower = result.stdout.lower()
+    assert "tailnet" in lower or "spine" in lower
+
+
+def test_net_heal_apply_non_root_prints_sudo_hint_no_mutation() -> None:
+    """`--apply` from a non-root shell refuses to mutate and prints a sudo hint."""
+    fake = _HealFakeRunner(_STATIC_DRIFT_BEFORE)
+    with (
+        patch("sanctum_cli.commands.net._build_heal_runner", return_value=fake),
+        patch("sanctum_cli.commands.net.os.getuid", return_value=501),
+    ):
+        result = runner.invoke(app, ["net", "heal", "--apply"])
+    assert result.exit_code == 0, result.stdout
+    assert "sudo" in result.stdout.lower()
+    # Non-root: still no mutation.
+    assert not any(
+        "-setdhcp" in " ".join(c) or "set en1 DHCP" in " ".join(c) for c in fake.calls
+    )
+
+
+def test_net_heal_apply_heals_and_verifies() -> None:
+    """`--apply` (as root) on a STATIC_DRIFT node that comes back healthy:
+    fires the flip, re-probes, and prints ✓ from the REAL re-probe."""
+    fake = _HealFakeRunner(_STATIC_DRIFT_BEFORE, _STATIC_DRIFT_AFTER)
+    with (
+        patch("sanctum_cli.commands.net._build_heal_runner", return_value=fake),
+        patch("sanctum_cli.commands.net.os.getuid", return_value=0),
+    ):
+        result = runner.invoke(app, ["net", "heal", "--apply"])
+    assert result.exit_code == 0, result.stdout
+    # The flip actually fired.
+    assert any("-setdhcp" in " ".join(c) for c in fake.calls)
+    assert "✓" in result.stdout or "healed" in result.stdout.lower()
+    # No revert on a successful heal.
+    assert not any("-setmanual" in " ".join(c) for c in fake.calls)
+
+
+def test_net_heal_apply_stays_broken_reverts_and_alerts() -> None:
+    """`--apply` where the re-probe STAYS broken must revert to the snapshot and
+    stop+alert (honest-verify: no false ✓)."""
+    fake = _HealFakeRunner(_STATIC_DRIFT_BEFORE, _STATIC_DRIFT_STAYS_BROKEN)
+    with (
+        patch("sanctum_cli.commands.net._build_heal_runner", return_value=fake),
+        patch("sanctum_cli.commands.net.os.getuid", return_value=0),
+    ):
+        result = runner.invoke(app, ["net", "heal", "--apply"])
+    assert result.exit_code == 0, result.stdout
+    # The flip fired, then the revert (setmanual with the saved values) fired.
+    assert any("-setdhcp" in " ".join(c) for c in fake.calls)
+    assert any("-setmanual" in " ".join(c) for c in fake.calls)
+    lower = result.stdout.lower()
+    assert "revert" in lower and ("✗" in result.stdout or "not healed" in lower or "stop" in lower)
+
+
+def test_net_heal_apply_risky_alert_only_no_mutation() -> None:
+    """A risky DOUBLE_NAT_OVERLAP node under `--apply` alerts + issues NO mutation
+    (stays out of the NAT domain)."""
+    fake = _HealFakeRunner(_OVERLAP_RISKY)
+    with (
+        patch("sanctum_cli.commands.net._build_heal_runner", return_value=fake),
+        patch("sanctum_cli.commands.net.os.getuid", return_value=0),
+    ):
+        result = runner.invoke(app, ["net", "heal", "--apply"])
+    assert result.exit_code == 0, result.stdout
+    assert "DOUBLE_NAT_OVERLAP" in result.stdout
+    # Never touches the interface on a risky verdict.
+    assert not any(
+        "-setdhcp" in " ".join(c) or "set en1 DHCP" in " ".join(c) or "-setmanual" in " ".join(c)
+        for c in fake.calls
+    )
+
+
+# ─── NET_HEAL_RESULT token — kill the "not healed" substring collision ─────
+#
+# Whole-branch review found a NO-LOOP defeat: the daemon wrapper detected success
+# with `grep -q 'healed'`, but the CLI's FAILURE line ("✗ not healed — … reverting
+# …") CONTAINS the substring "healed". So a reverted heal matched the success
+# branch → the wrapper reset the attempts counter to 0 every cycle → the
+# MAX_HEAL_ATTEMPTS cap never accrued → the daemon re-fired the failing heal every
+# 120s forever (the toggle-storm the cap exists to prevent). These are the
+# hostile-input regressions proving the collision is dead: the CLI now emits an
+# unambiguous machine-readable token, and the wrapper anchors on the exact token.
+
+
+def test_net_heal_apply_success_emits_healed_token() -> None:
+    """A real, verified heal emits the machine-readable `NET_HEAL_RESULT=healed`
+    token — derived from the SAME real re-probe as the human ✓ (honest-verify)."""
+    fake = _HealFakeRunner(_STATIC_DRIFT_BEFORE, _STATIC_DRIFT_AFTER)
+    with (
+        patch("sanctum_cli.commands.net._build_heal_runner", return_value=fake),
+        patch("sanctum_cli.commands.net.os.getuid", return_value=0),
+    ):
+        result = runner.invoke(app, ["net", "heal", "--apply"])
+    assert result.exit_code == 0, result.stdout
+    assert heal.HEAL_RESULT_HEALED in result.stdout  # NET_HEAL_RESULT=healed
+    # Only the success token — never the reverted/noop tokens on a real heal.
+    assert heal.HEAL_RESULT_REVERTED not in result.stdout
+    assert heal.HEAL_RESULT_NOOP not in result.stdout
+
+
+def test_net_heal_apply_revert_emits_reverted_not_healed_token() -> None:
+    """THE hostile-input regression: a fired-but-stayed-broken heal reverts and its
+    output contains the human word "healed" (in "✗ not healed") — but MUST NOT
+    contain the success token `NET_HEAL_RESULT=healed`. It emits `=reverted`."""
+    fake = _HealFakeRunner(_STATIC_DRIFT_BEFORE, _STATIC_DRIFT_STAYS_BROKEN)
+    with (
+        patch("sanctum_cli.commands.net._build_heal_runner", return_value=fake),
+        patch("sanctum_cli.commands.net.os.getuid", return_value=0),
+    ):
+        result = runner.invoke(app, ["net", "heal", "--apply"])
+    assert result.exit_code == 0, result.stdout
+    out = result.stdout
+    # The human failure prose (still present for operators) DOES contain "healed".
+    assert "not healed" in out.lower()
+    # …but the machine-readable success token MUST NOT be present — the collision.
+    assert heal.HEAL_RESULT_HEALED not in out, (
+        "revert path leaked the success token — the 'not healed' substring "
+        "collision is back and the no-loop cap will never accrue"
+    )
+    # The correct token is emitted instead.
+    assert heal.HEAL_RESULT_REVERTED in out  # NET_HEAL_RESULT=reverted
+
+
+def test_net_heal_apply_risky_emits_noop_token() -> None:
+    """A stop-and-alert (risky / non-mutating) `--apply` emits `NET_HEAL_RESULT=noop`
+    and never the healed token — so the wrapper counts it as a no-heal cycle."""
+    fake = _HealFakeRunner(_OVERLAP_RISKY)
+    with (
+        patch("sanctum_cli.commands.net._build_heal_runner", return_value=fake),
+        patch("sanctum_cli.commands.net.os.getuid", return_value=0),
+    ):
+        result = runner.invoke(app, ["net", "heal", "--apply"])
+    assert result.exit_code == 0, result.stdout
+    assert heal.HEAL_RESULT_NOOP in result.stdout  # NET_HEAL_RESULT=noop
+    assert heal.HEAL_RESULT_HEALED not in result.stdout
+
+
+def test_wrapper_success_detector_matches_healed_but_not_revert_output() -> None:
+    """Cross-layer contract (Contracts at the Boundary): feed the REAL CLI outputs
+    through the EXACT `grep` the shipped HEAL_WRAPPER uses. The grep pattern comes
+    from production (heal.HEAL_RESULT_HEALED, embedded in HEAL_WRAPPER); the output
+    comes from the real CLI — no shared assumption. The detector MUST match the
+    healed output and MUST NOT match the reverted output (else the counter resets
+    on every reverted heal and the no-loop cap never accrues)."""
+    import subprocess
+
+    # The wrapper's exact anchored pattern (single-source-of-truth token).
+    pattern = heal.HEAL_RESULT_HEALED
+    assert f"grep -q '{pattern}'" in heal.HEAL_WRAPPER, (
+        "the shipped wrapper no longer greps the anchored token this test proves"
+    )
+
+    def cli_apply_output(fake: _HealFakeRunner) -> str:
+        with (
+            patch("sanctum_cli.commands.net._build_heal_runner", return_value=fake),
+            patch("sanctum_cli.commands.net.os.getuid", return_value=0),
+        ):
+            return runner.invoke(app, ["net", "heal", "--apply"]).stdout
+
+    def grep_matches(text: str) -> bool:
+        # The real `grep -q '<token>'` the wrapper runs (RC 0 == matched).
+        proc = subprocess.run(
+            ["grep", "-q", pattern], input=text, text=True, check=False
+        )
+        return proc.returncode == 0
+
+    healed_out = cli_apply_output(_HealFakeRunner(_STATIC_DRIFT_BEFORE, _STATIC_DRIFT_AFTER))
+    reverted_out = cli_apply_output(
+        _HealFakeRunner(_STATIC_DRIFT_BEFORE, _STATIC_DRIFT_STAYS_BROKEN)
+    )
+    # Success branch (resets ATTEMPTS to 0) fires ONLY on a real heal.
+    assert grep_matches(healed_out) is True
+    # Reverted heal falls through to the else branch → ATTEMPTS increments.
+    assert grep_matches(reverted_out) is False
+
+
+# ─── net heal --install (Task 5 — self-healing LaunchDaemon) ─────────
+#
+# The install path writes a wrapper (0755) + a LaunchDaemon plist into paths
+# redirected to a temp dir, and stubs the one sudo step (launchctl bootstrap
+# system) so nothing touches /Library/LaunchDaemons or shells out for real.
+
+
+def test_net_heal_install_writes_wrapper_and_plist_as_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--install` (as root) writes the wrapper 0755 + a plist naming it, then
+    best-effort bootstraps it into the system domain."""
+    wrapper = tmp_path / "sanctum" / "net-heal.sh"
+    plist = tmp_path / "LaunchDaemons" / "com.sanctum.net-heal.plist"
+    err_log = tmp_path / "logs" / "net-heal.err"
+    monkeypatch.setattr("sanctum_cli.net.heal.heal_wrapper_path", lambda: wrapper)
+    monkeypatch.setattr("sanctum_cli.net.heal.heal_plist_path", lambda: plist)
+    monkeypatch.setattr("sanctum_cli.net.heal.heal_err_path", lambda: err_log)
+
+    calls: list[list[str]] = []
+
+    def fake_launchctl(args: list[str], *, check: bool) -> tuple[bool, str]:
+        calls.append(args)
+        return (True, "")
+
+    with (
+        patch("sanctum_cli.commands.net._heal_launchctl", fake_launchctl),
+        patch("sanctum_cli.commands.net.os.getuid", return_value=0),
+    ):
+        result = runner.invoke(app, ["net", "heal", "--install"])
+    assert result.exit_code == 0, result.stdout
+
+    # Real artifacts on disk.
+    assert wrapper.exists()
+    assert wrapper.read_text(encoding="utf-8").startswith("#!/bin/bash")
+    assert oct(wrapper.stat().st_mode & 0o777) == "0o755"
+
+    plist_text = plist.read_text(encoding="utf-8")
+    assert str(wrapper) in plist_text
+    assert "com.sanctum.net-heal" in plist_text
+    assert str(err_log) in plist_text
+
+    # A bootstrap into the SYSTEM domain was attempted (the one sudo step).
+    assert any(a[:1] == ["bootstrap"] for a in calls)
+    assert any("system" in " ".join(a) for a in calls)
+
+
+def test_net_heal_install_non_root_prints_sudo_hint_no_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--install` from a non-root shell refuses to write the system daemon and
+    prints the exact sudo command (never a silent partial install)."""
+    wrapper = tmp_path / "sanctum" / "net-heal.sh"
+    plist = tmp_path / "LaunchDaemons" / "com.sanctum.net-heal.plist"
+    monkeypatch.setattr("sanctum_cli.net.heal.heal_wrapper_path", lambda: wrapper)
+    monkeypatch.setattr("sanctum_cli.net.heal.heal_plist_path", lambda: plist)
+    monkeypatch.setattr("sanctum_cli.net.heal.heal_err_path", lambda: tmp_path / "x.err")
+
+    with (
+        patch("sanctum_cli.commands.net.os.getuid", return_value=501),
+    ):
+        result = runner.invoke(app, ["net", "heal", "--install"])
+    assert result.exit_code == 0, result.stdout
+    assert "sudo" in result.stdout.lower()
+    # Non-root: nothing written to the system paths.
+    assert not wrapper.exists()
+    assert not plist.exists()

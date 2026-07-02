@@ -316,6 +316,7 @@ def _invoke_onboard_interactive(input_text: str) -> tuple[int, str]:
         patch("sanctum_cli.commands.onboard._run_firewalla_compat", return_value=False),
         patch("sanctum_cli.commands.onboard._run_network_gear", return_value=False),
         patch("sanctum_cli.commands.onboard._run_ha_green", return_value=False),
+        patch("sanctum_cli.commands.onboard._run_network_resilience", return_value=False),
         patch("sanctum_cli.commands.screen_time._fetch_bridge_json", lambda path: None),
         # The masked key prompt routes to getpass, which warns under CliRunner's
         # non-TTY stdin; pyproject turns warnings into errors, so suppress that one.
