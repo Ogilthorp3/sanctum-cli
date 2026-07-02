@@ -166,3 +166,81 @@ def test_no_spine_no_mutate() -> None:
     d = diagnose_posture(_p(config_method="Manual"))
     hp = plan_heal(d, attempts=0, tailnet_ok=False, tb5_ok=False)
     assert not hp.execute and "spine" in hp.reason.lower()
+
+
+# ─── Task 5: self-healing daemon assets (plist + wrapper) ──────────────
+
+
+def test_render_heal_plist_round_trips_via_plistlib() -> None:
+    # Real artifact through the real consumer (Contracts at the Boundary): the
+    # rendered bytes MUST parse as a plist and carry the daemon's label + cadence.
+    import plistlib
+    from pathlib import Path
+
+    from sanctum_cli.net.heal import (
+        HEAL_DAEMON_LABEL,
+        HEAL_INTERVAL_S,
+        render_heal_plist,
+    )
+
+    wrapper = Path("/Library/Application Support/sanctum/net-heal.sh")
+    err_log = Path("/var/log/sanctum-net-heal.err")
+    xml = render_heal_plist(wrapper=wrapper, err_log=err_log)
+    parsed = plistlib.loads(xml.encode("utf-8"))
+    assert parsed["Label"] == HEAL_DAEMON_LABEL
+    assert parsed["StartInterval"] == HEAL_INTERVAL_S
+    # launchd does not expand ~, so the absolute wrapper path must be named.
+    assert str(wrapper) in xml
+    assert str(err_log) in xml
+    # A LaunchDaemon so it can setdhcp/renew (runs as root).
+    assert HEAL_DAEMON_LABEL == "com.sanctum.net-heal"
+
+
+def test_render_heal_plist_names_the_wrapper_program() -> None:
+    import plistlib
+    from pathlib import Path
+
+    from sanctum_cli.net.heal import render_heal_plist
+
+    wrapper = Path("/opt/sanctum/net-heal.sh")
+    parsed = plistlib.loads(
+        render_heal_plist(wrapper=wrapper, err_log=Path("/tmp/x.err")).encode("utf-8")
+    )
+    args = parsed["ProgramArguments"]
+    assert str(wrapper) in args
+    assert parsed["RunAtLoad"] is True
+
+
+def test_heal_wrapper_is_valid_bash() -> None:
+    # The wrapper ships as a real script the LaunchDaemon executes; it must parse.
+    import shutil
+    import subprocess
+    import tempfile
+    from pathlib import Path
+
+    from sanctum_cli.net.heal import HEAL_WRAPPER
+
+    assert HEAL_WRAPPER.startswith("#!/bin/bash")
+    bash = shutil.which("bash") or "/bin/bash"
+    with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as fh:
+        fh.write(HEAL_WRAPPER)
+        path = fh.name
+    try:
+        proc = subprocess.run(
+            [bash, "-n", path], capture_output=True, text=True, timeout=10, check=False
+        )
+        assert proc.returncode == 0, proc.stderr
+    finally:
+        Path(path).unlink(missing_ok=True)
+
+
+def test_heal_wrapper_honors_disabled_kill_switch_and_caps_attempts() -> None:
+    # The wrapper must reference the DISABLED kill-switch sentinel + the attempts
+    # cap (no-loop) so the shipped script actually encodes the doctrine.
+    from sanctum_cli.net.heal import HEAL_WRAPPER, MAX_HEAL_ATTEMPTS
+
+    assert "DISABLED" in HEAL_WRAPPER
+    assert str(MAX_HEAL_ATTEMPTS) in HEAL_WRAPPER
+    # It heals via the real CLI (`sanctum net heal --apply`) + writes a heartbeat.
+    assert "net heal --apply" in HEAL_WRAPPER
+    assert "heartbeat" in HEAL_WRAPPER.lower()

@@ -319,3 +319,72 @@ def test_net_heal_apply_risky_alert_only_no_mutation() -> None:
         "-setdhcp" in " ".join(c) or "set en1 DHCP" in " ".join(c) or "-setmanual" in " ".join(c)
         for c in fake.calls
     )
+
+
+# ─── net heal --install (Task 5 — self-healing LaunchDaemon) ─────────
+#
+# The install path writes a wrapper (0755) + a LaunchDaemon plist into paths
+# redirected to a temp dir, and stubs the one sudo step (launchctl bootstrap
+# system) so nothing touches /Library/LaunchDaemons or shells out for real.
+
+
+def test_net_heal_install_writes_wrapper_and_plist_as_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--install` (as root) writes the wrapper 0755 + a plist naming it, then
+    best-effort bootstraps it into the system domain."""
+    wrapper = tmp_path / "sanctum" / "net-heal.sh"
+    plist = tmp_path / "LaunchDaemons" / "com.sanctum.net-heal.plist"
+    err_log = tmp_path / "logs" / "net-heal.err"
+    monkeypatch.setattr("sanctum_cli.net.heal.heal_wrapper_path", lambda: wrapper)
+    monkeypatch.setattr("sanctum_cli.net.heal.heal_plist_path", lambda: plist)
+    monkeypatch.setattr("sanctum_cli.net.heal.heal_err_path", lambda: err_log)
+
+    calls: list[list[str]] = []
+
+    def fake_launchctl(args: list[str], *, check: bool) -> tuple[bool, str]:
+        calls.append(args)
+        return (True, "")
+
+    with (
+        patch("sanctum_cli.commands.net._heal_launchctl", fake_launchctl),
+        patch("sanctum_cli.commands.net.os.getuid", return_value=0),
+    ):
+        result = runner.invoke(app, ["net", "heal", "--install"])
+    assert result.exit_code == 0, result.stdout
+
+    # Real artifacts on disk.
+    assert wrapper.exists()
+    assert wrapper.read_text(encoding="utf-8").startswith("#!/bin/bash")
+    assert oct(wrapper.stat().st_mode & 0o777) == "0o755"
+
+    plist_text = plist.read_text(encoding="utf-8")
+    assert str(wrapper) in plist_text
+    assert "com.sanctum.net-heal" in plist_text
+    assert str(err_log) in plist_text
+
+    # A bootstrap into the SYSTEM domain was attempted (the one sudo step).
+    assert any(a[:1] == ["bootstrap"] for a in calls)
+    assert any("system" in " ".join(a) for a in calls)
+
+
+def test_net_heal_install_non_root_prints_sudo_hint_no_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--install` from a non-root shell refuses to write the system daemon and
+    prints the exact sudo command (never a silent partial install)."""
+    wrapper = tmp_path / "sanctum" / "net-heal.sh"
+    plist = tmp_path / "LaunchDaemons" / "com.sanctum.net-heal.plist"
+    monkeypatch.setattr("sanctum_cli.net.heal.heal_wrapper_path", lambda: wrapper)
+    monkeypatch.setattr("sanctum_cli.net.heal.heal_plist_path", lambda: plist)
+    monkeypatch.setattr("sanctum_cli.net.heal.heal_err_path", lambda: tmp_path / "x.err")
+
+    with (
+        patch("sanctum_cli.commands.net.os.getuid", return_value=501),
+    ):
+        result = runner.invoke(app, ["net", "heal", "--install"])
+    assert result.exit_code == 0, result.stdout
+    assert "sudo" in result.stdout.lower()
+    # Non-root: nothing written to the system paths.
+    assert not wrapper.exists()
+    assert not plist.exists()

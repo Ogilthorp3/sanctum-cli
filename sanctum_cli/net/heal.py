@@ -17,6 +17,7 @@ from __future__ import annotations
 import ipaddress
 import re
 from dataclasses import dataclass
+from pathlib import Path
 
 from sanctum_cli.net.detect import lan_conflicts_with_bell_dmz, parse_default_gateway
 from sanctum_cli.net.link import (
@@ -421,3 +422,156 @@ def heal_action_argv(action: HealAction, iface: str) -> list[str]:
     if action.kind == "dhcp_renew":
         return ["ipconfig", "set", iface, "DHCP"]
     return []
+
+
+# ─── self-healing daemon assets (shipped by `sanctum net heal --install`) ──
+#
+# Unlike the wifi-stability *sentinel* (a per-user LaunchAgent that only samples),
+# the net-heal daemon must mutate the interface (setdhcp / renew), which needs
+# root — so it is a system LaunchDaemon under /Library/LaunchDaemons, installed
+# with the one sudo step (`launchctl bootstrap system`). It runs the real CLI
+# (`sanctum net heal --apply`) on a bounded cadence behind three doctrine gates
+# already encoded in the pure core: never-strand (plan_heal's spine gate), no-loop
+# (MAX_HEAL_ATTEMPTS, persisted here across runs), and a DISABLED kill-switch the
+# wrapper honors before doing anything.
+
+HEAL_DAEMON_LABEL = "com.sanctum.net-heal"
+HEAL_INTERVAL_S = 120
+
+# State the wrapper persists so the no-loop cap survives across daemon runs.
+_HEAL_STATE_DIR = Path("/Library/Application Support/sanctum")
+_HEAL_ATTEMPTS_FILE = _HEAL_STATE_DIR / "net-heal.attempts"
+_HEAL_HEARTBEAT_FILE = _HEAL_STATE_DIR / "net-heal.heartbeat"
+# The kill-switch: `touch` this and the daemon no-ops every cycle (fail-safe off).
+_HEAL_DISABLED_SENTINEL = _HEAL_STATE_DIR / "net-heal.DISABLED"
+
+# The wrapper the LaunchDaemon executes. Bash (parsed by `bash -n` in tests). It:
+#  1. honors the DISABLED kill-switch first (no-op + heartbeat, never mutate),
+#  2. enforces the no-loop cap (MAX_HEAL_ATTEMPTS attempts persisted on disk; at
+#     the cap it stops auto-healing and alerts rather than re-flapping forever),
+#  3. runs the real `sanctum net heal --apply` (which itself re-checks the spine +
+#     snapshot→verify→auto-reverts — the wrapper never touches the interface
+#     directly), incrementing the attempt counter on a non-healed exit,
+#  4. verifies the never-strand spine (tailnet 100.64/10 or TB5 10.0.5.x) each
+#     cycle and alerts (best-effort, degrade) when it is down — the "about to be
+#     strandable" page,
+#  5. always writes a heartbeat so a stalled daemon is observable.
+# Absolute paths only (launchd does not expand ~, and root has a bare env).
+HEAL_WRAPPER = f"""#!/bin/bash
+# Sanctum net-heal daemon wrapper — runs `sanctum net heal --apply` behind the
+# DISABLED kill-switch + a persisted no-loop attempts cap, verifies the
+# never-strand spine, and writes a heartbeat. Runs as root (LaunchDaemon) so the
+# CLI can flip DHCP / renew the lease. Absolute paths only.
+set -u
+STATE_DIR="{_HEAL_STATE_DIR}"
+ATTEMPTS_FILE="{_HEAL_ATTEMPTS_FILE}"
+HEARTBEAT_FILE="{_HEAL_HEARTBEAT_FILE}"
+DISABLED="{_HEAL_DISABLED_SENTINEL}"
+MAX_ATTEMPTS={MAX_HEAL_ATTEMPTS}
+umask 077
+mkdir -p "$STATE_DIR"
+
+now() {{ date '+%Y-%m-%dT%H:%M:%S'; }}
+heartbeat() {{ printf '%s %s\\n' "$(now)" "$1" >> "$HEARTBEAT_FILE"; }}
+
+# Resolve the sanctum CLI (bare root env has no user PATH additions).
+SANCTUM="$(command -v sanctum || true)"
+[ -z "$SANCTUM" ] && [ -x /opt/homebrew/bin/sanctum ] && SANCTUM=/opt/homebrew/bin/sanctum
+[ -z "$SANCTUM" ] && [ -x /usr/local/bin/sanctum ] && SANCTUM=/usr/local/bin/sanctum
+if [ -z "$SANCTUM" ]; then
+  heartbeat "ERROR sanctum-cli-not-found"
+  exit 0
+fi
+
+# 1. Kill-switch: DISABLED sentinel present → no-op (fail-safe off), never mutate.
+if [ -e "$DISABLED" ]; then
+  heartbeat "DISABLED kill-switch present — no-op"
+  exit 0
+fi
+
+# 2. No-loop cap: at MAX_ATTEMPTS we stop auto-healing + alert (no toggle-storm).
+ATTEMPTS=0
+[ -f "$ATTEMPTS_FILE" ] && ATTEMPTS="$(cat "$ATTEMPTS_FILE" 2>/dev/null || echo 0)"
+case "$ATTEMPTS" in ''|*[!0-9]*) ATTEMPTS=0 ;; esac
+if [ "$ATTEMPTS" -ge "$MAX_ATTEMPTS" ]; then
+  heartbeat "STOP attempts=$ATTEMPTS/$MAX_ATTEMPTS — no-loop cap; auto-heal paused"
+  exit 0
+fi
+
+# 3. Never-strand spine check (read-only): tailnet 100.64/10 or TB5 10.0.5.x up?
+SPINE="down"
+if ifconfig 2>/dev/null | grep -Eq 'inet (100\\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\\.|10\\.0\\.5\\.)'; then
+  SPINE="up"
+else
+  heartbeat "ALERT spine down (no tailnet / no TB5) — node is about to be strandable"
+fi
+
+# 4. Run the real CLI heal (it re-checks spine + snapshot→verify→auto-reverts).
+OUT="$("$SANCTUM" net heal --apply 2>&1)"
+RC=$?
+if printf '%s' "$OUT" | grep -q 'healed'; then
+  # A real re-probe verified the heal — reset the attempts counter.
+  echo 0 > "$ATTEMPTS_FILE"
+  heartbeat "healed spine=$SPINE rc=$RC"
+else
+  # Not healed this cycle — bump the persisted attempts (no-loop backoff).
+  ATTEMPTS=$((ATTEMPTS + 1))
+  echo "$ATTEMPTS" > "$ATTEMPTS_FILE"
+  heartbeat "no-heal attempts=$ATTEMPTS/$MAX_ATTEMPTS spine=$SPINE rc=$RC"
+fi
+exit 0
+"""
+
+# The LaunchDaemon template. launchd does NOT expand ``~``, so the wrapper path +
+# error-log path MUST be absolute — :func:`render_heal_plist` fills them. Mirrors
+# ``link.SENTINEL_PLIST`` but is a *system* daemon (no per-user domain) so it can
+# mutate the interface as root.
+HEAL_PLIST = """<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>{label}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>{wrapper}</string>
+  </array>
+  <key>StartInterval</key><integer>{interval}</integer>
+  <key>RunAtLoad</key><true/>
+  <key>StandardErrorPath</key><string>{err_log}</string>
+</dict>
+</plist>
+"""
+
+
+def heal_wrapper_path() -> Path:
+    """Where ``--install`` writes the daemon wrapper (0755, root-owned)."""
+    return _HEAL_STATE_DIR / "net-heal.sh"
+
+
+def heal_plist_path() -> Path:
+    """Where ``--install`` writes the LaunchDaemon plist (system domain)."""
+    return Path("/Library/LaunchDaemons") / f"{HEAL_DAEMON_LABEL}.plist"
+
+
+def heal_err_path() -> Path:
+    """The plist's StandardErrorPath for the daemon."""
+    return _HEAL_STATE_DIR / "net-heal.err"
+
+
+def render_heal_plist(
+    *, wrapper: Path | None = None, err_log: Path | None = None
+) -> str:
+    """Render :data:`HEAL_PLIST` with absolute paths.
+
+    Defaults resolve from the path helpers so the caller normally renders with no
+    arguments; tests inject ``wrapper`` / ``err_log`` to write into a temp dir.
+    """
+    wrapper = wrapper if wrapper is not None else heal_wrapper_path()
+    err_log = err_log if err_log is not None else heal_err_path()
+    return HEAL_PLIST.format(
+        label=HEAL_DAEMON_LABEL,
+        wrapper=wrapper,
+        interval=HEAL_INTERVAL_S,
+        err_log=err_log,
+    )

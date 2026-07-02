@@ -4,6 +4,7 @@ import json
 import os
 import re
 import socket
+import subprocess
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -19,7 +20,7 @@ from sanctum_cli.devices import ha_green as ha_green_provider
 from sanctum_cli.devices import intents, rails, registry, sagemcom
 from sanctum_cli.devices import orbi as orbi_provider
 from sanctum_cli.devices.base import Capability, Creds, DeviceError, NetContext, OpResult
-from sanctum_cli.errors import ExitCode, SanctumError
+from sanctum_cli.errors import ExitCode, LocalError, SanctumError
 from sanctum_cli.net import detect, heal, playbooks, render, safety, speedtest, system, verify
 from sanctum_cli.net.types import SpeedReport, Verdict
 
@@ -437,6 +438,117 @@ def _render_posture(posture: heal.NetPosture, diag: heal.PostureDiagnosis) -> No
     console.print(f"  [bold]spine:[/] [{style}]{escape(' · '.join(spine))}[/]")
 
 
+# ─── self-healing daemon install (the one sudo step) ─────────────────
+#
+# `sanctum net heal --install` writes the wrapper (0755) + a system LaunchDaemon
+# and best-effort bootstraps it. Unlike the wifi-stability sentinel (a per-user
+# LaunchAgent), this is a *system* daemon (it must setdhcp/renew as root), so the
+# bootstrap targets the `system` domain — the single sudo action. `launchctl` is
+# behind a module-level seam so tests stub it without shelling out.
+
+_HEAL_LAUNCHCTL_BIN = "/bin/launchctl"
+_HEAL_LAUNCHCTL_TIMEOUT_S = 10
+
+
+def _heal_launchctl(args: list[str], *, check: bool) -> tuple[bool, str]:
+    """Run ``launchctl`` once; return (ok, stderr-tail). Never raises.
+
+    Module-level seam (mirrors ``link._launchctl``) so ``--install`` tests stub
+    launchctl without shelling out. ``check=False`` is used for the pre-emptive
+    bootout (a not-loaded label returning non-zero is expected and ignored).
+    """
+    try:
+        proc = subprocess.run(
+            [_HEAL_LAUNCHCTL_BIN, *args],
+            capture_output=True,
+            text=True,
+            timeout=_HEAL_LAUNCHCTL_TIMEOUT_S,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return (False, str(exc)[:160])
+    ok = proc.returncode == 0 or not check
+    return (ok, proc.stderr.strip()[:160])
+
+
+def _bootstrap_heal_daemon(plist_path: Path) -> tuple[bool, str]:
+    """Best-effort (re)load the net-heal LaunchDaemon. Returns (loaded, detail).
+
+    Idempotent: bootout any prior instance (failure ignored) then bootstrap the
+    fresh plist into the SYSTEM domain (this is the sudo-gated action — a system
+    daemon so it can mutate the interface).
+    """
+    label = heal.HEAL_DAEMON_LABEL
+    _heal_launchctl(["bootout", f"system/{label}"], check=False)
+    ok, detail = _heal_launchctl(["bootstrap", "system", str(plist_path)], check=True)
+    if ok:
+        return (True, f"bootstrapped {label}")
+    return (False, detail or "launchctl bootstrap failed")
+
+
+def _install_heal_daemon() -> None:
+    """Write the net-heal wrapper (0755) + LaunchDaemon plist and load it (root).
+
+    The one sudo step. A non-root shell never partially installs a system daemon:
+    it prints the exact ``sudo sanctum net heal --install`` command and returns.
+    File writes are the real contract; the ``launchctl`` load is best-effort.
+    """
+    wrapper_path = heal.heal_wrapper_path()
+    plist_path = heal.heal_plist_path()
+    err_path = heal.heal_err_path()
+
+    if os.getuid() != 0:
+        console.print(
+            "\n[yellow]![/] --install writes a system LaunchDaemon to "
+            f"{escape(str(plist_path))} — that needs root."
+        )
+        console.print(
+            "  → run it with sudo: [bold]sudo sanctum net heal --install[/]"
+        )
+        return
+
+    try:
+        wrapper_path.parent.mkdir(parents=True, exist_ok=True)
+        err_path.parent.mkdir(parents=True, exist_ok=True)
+        plist_path.parent.mkdir(parents=True, exist_ok=True)
+
+        wrapper_path.write_text(heal.HEAL_WRAPPER, encoding="utf-8")
+        wrapper_path.chmod(0o755)
+
+        plist_path.write_text(
+            heal.render_heal_plist(wrapper=wrapper_path, err_log=err_path),
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        err = LocalError(
+            f"failed to install net-heal daemon files: {exc}",
+            fix="check that /Library/Application Support/sanctum and "
+            "/Library/LaunchDaemons are writable (run as root).",
+        )
+        _report(err)
+        raise typer.Exit(code=int(err.exit_code)) from exc
+
+    console.print(f"[green]✓[/] wrote wrapper     {escape(str(wrapper_path))} [dim](0755)[/]")
+    console.print(f"[green]✓[/] wrote LaunchDaemon {escape(str(plist_path))}")
+
+    loaded, detail = _bootstrap_heal_daemon(plist_path)
+    if loaded:
+        console.print(
+            f"[green]✓[/] {escape(detail)} "
+            f"[dim](heals every {heal.HEAL_INTERVAL_S}s; kill-switch: "
+            f"touch {escape(str(heal._HEAL_DISABLED_SENTINEL))})[/]"
+        )
+    else:
+        console.print(
+            f"[yellow]![/] daemon files installed but launchctl load was not "
+            f"confirmed: {escape(detail)}"
+        )
+        console.print(
+            f"  [dim]load it manually: sudo launchctl bootstrap system "
+            f"{escape(str(plist_path))}[/]"
+        )
+
+
 @net_app.command(
     "heal",
     help="Diagnose + (with --apply) self-heal the node's network posture. Dry-run by default.",
@@ -446,6 +558,13 @@ def net_heal(
         bool,
         typer.Option(
             "--apply", help="Execute a safe heal (snapshot→act→verify→auto-revert; needs root)."
+        ),
+    ] = False,
+    install: Annotated[
+        bool,
+        typer.Option(
+            "--install",
+            help="Install the self-healing LaunchDaemon (system, root — the one sudo step).",
         ),
     ] = False,
 ) -> None:
@@ -459,7 +578,14 @@ def net_heal(
     gateway, and on failure reverts to the snapshot and stops+alerts. A ✓ is
     printed ONLY from the real re-probe (honest-verify); a risky / UNVERIFIED /
     spine-down verdict never mutates (stays out of the NAT domain, fail-closed).
+    ``--install`` writes the ``com.sanctum.net-heal`` LaunchDaemon (the one sudo
+    step) so the node self-heals on a ~120s cadence behind the same doctrine
+    (kill-switch, no-loop attempts cap, spine check).
     """
+    if install:
+        _install_heal_daemon()
+        return
+
     runner = _build_heal_runner()
     posture = heal.probe_posture(run=runner)
     diag = heal.diagnose_posture(posture, overlap=heal.overlap_for(posture))
