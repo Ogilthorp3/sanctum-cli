@@ -692,3 +692,61 @@ def probe_identity(run: CommandRunner | None = None, *, ping_gateway: bool = Tru
         security=security, associated=associated,
         router_arp_verified=arp, gateway_reachable=gw_reachable,
     )
+
+
+_IDENTITY_REMEDY: dict[str, str] = {
+    "IDENTITY_QUARANTINED": (
+        "This node is associated but its gateway is unreachable while it presents a "
+        "rotating/private MAC — the router does not recognize it (a DHCP-reservation "
+        "miss or device quarantine). Pin it to its hardware MAC: sanctum link optimize "
+        "--apply (or Private Wi-Fi Address ▸ Off), then re-verify."
+    ),
+    "IDENTITY_ROTATING": (
+        "MAC is randomized (private address) — it works now but will islande the node "
+        "on the next router-trust reset (reboot/renumber). Pin to the hardware MAC: "
+        "sanctum link optimize --apply."
+    ),
+    "IDENTITY_STABLE": "Identity is correct — the node is on its stable hardware MAC.",
+    "IDENTITY_UNVERIFIED": "Could not read the Wi-Fi identity — is this node associated? Re-run when connected.",
+}
+
+
+@dataclass(frozen=True)
+class IdentityDiagnosis:
+    """The IDENTITY verdict (who the node is on the network) + remedy + probe."""
+
+    verdict: str
+    detail: str
+    remedy: str
+    probe: IdentityProbe
+
+
+def diagnose_identity(probe: IdentityProbe) -> IdentityDiagnosis:
+    """PURE: classify the node's Wi-Fi *identity* (orthogonal to link health).
+
+    UNVERIFIED (fail-closed) when we cannot read it; QUARANTINED for the exact
+    incident signature (associated + LAN-dead + rotating MAC); ROTATING for the
+    at-risk private-MAC case; STABLE when on the hardware MAC.
+    """
+    if not probe.iface or not probe.current_mac or not probe.hardware_mac or not probe.associated:
+        v = "IDENTITY_UNVERIFIED"
+        return IdentityDiagnosis(v, "identity could not be read", _IDENTITY_REMEDY[v], probe)
+    randomized = (
+        is_locally_administered(probe.current_mac)
+        or probe.current_mac.lower() != probe.hardware_mac.lower()
+    )
+    lan_dead = probe.router_arp_verified is False or probe.gateway_reachable is False
+    if randomized and lan_dead:
+        v, detail = "IDENTITY_QUARANTINED", (
+            f"associated on {probe.iface} but gateway unreachable "
+            f"(RouterARPVerified={probe.router_arp_verified}) while presenting "
+            f"rotating MAC {probe.current_mac} ≠ hardware {probe.hardware_mac}"
+        )
+    elif randomized:
+        v, detail = "IDENTITY_ROTATING", (
+            f"rotating MAC {probe.current_mac} ≠ hardware {probe.hardware_mac}; reachable for now"
+        )
+    else:
+        note = "" if not lan_dead else " (gateway unreachable — see `sanctum link status` for a link-health read)"
+        v, detail = "IDENTITY_STABLE", f"on hardware MAC {probe.hardware_mac}{note}"
+    return IdentityDiagnosis(v, detail, _IDENTITY_REMEDY[v], probe)

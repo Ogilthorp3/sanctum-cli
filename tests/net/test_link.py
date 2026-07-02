@@ -9,10 +9,12 @@ from __future__ import annotations
 import plistlib
 
 from sanctum_cli.net.link import (
+    IdentityProbe,
     Sample,
     _enc_from_security,
     analyze_mac,
     classify,
+    diagnose_identity,
     is_locally_administered,
     parse_log,
     probe_identity,
@@ -325,3 +327,34 @@ def test_enc_from_security_maps_wpa3_and_defaults_wpa2():
     assert _enc_from_security("WPA2_PSK") == "WPA2"
     assert _enc_from_security(None) == "WPA2"
     assert _enc_from_security("weird") == "WPA2"
+
+
+# ─── Link Identity Guard — Task 2: diagnose_identity truth table ──────────────
+
+
+def _probe(**kw):
+    base = dict(iface="en1", ssid="Nepveu-6G", current_mac="d0:11:e5:1c:88:59",
+                hardware_mac="d0:11:e5:1c:88:59", security="WPA2_PSK",
+                associated=True, router_arp_verified=True, gateway_reachable=True)
+    base.update(kw)
+    return IdentityProbe(**base)
+
+
+def test_diagnose_quarantined_is_the_mini_signature():
+    d = diagnose_identity(_probe(current_mac="32:a6:f4:de:54:cf",
+                                 router_arp_verified=False, gateway_reachable=False))
+    assert d.verdict == "IDENTITY_QUARANTINED"
+
+
+def test_diagnose_rotating_when_random_mac_but_reachable():
+    d = diagnose_identity(_probe(current_mac="32:a6:f4:de:54:cf"))
+    assert d.verdict == "IDENTITY_ROTATING"
+
+
+def test_diagnose_stable_on_hardware_mac():
+    assert diagnose_identity(_probe()).verdict == "IDENTITY_STABLE"
+
+
+def test_diagnose_unverified_when_not_associated_or_unread():
+    assert diagnose_identity(_probe(associated=False)).verdict == "IDENTITY_UNVERIFIED"
+    assert diagnose_identity(_probe(iface="", current_mac="", hardware_mac="")).verdict == "IDENTITY_UNVERIFIED"
