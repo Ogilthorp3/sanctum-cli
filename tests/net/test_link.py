@@ -17,6 +17,7 @@ from sanctum_cli.net.link import (
     classify,
     classify_node,
     diagnose_identity,
+    firewalla_quarantine_check,
     is_locally_administered,
     parse_log,
     probe_identity,
@@ -388,3 +389,24 @@ def test_classify_unknown_is_conservative():
     # not portable, short uptime, DHCP/no reservation, a couple SSIDs → UNKNOWN
     assert classify_node(_sig(uptime_days=0.2, ip_config_method="DHCP",
                               ip_is_reserved_or_static=False, distinct_ssids_seen=3)).klass == "UNKNOWN"
+
+
+# ─── Link Identity Guard — Task 4: firewalla_quarantine_check (enrichment) ────
+
+
+def test_fw_check_none_when_no_transport():
+    assert firewalla_quarantine_check("32:a6:f4:de:54:cf") is None
+
+
+def test_fw_check_none_when_empty_response():
+    assert firewalla_quarantine_check("32:a6", transport=lambda mac: "") is None
+
+
+def test_fw_check_reports_quarantine_tag():
+    f = firewalla_quarantine_check("32:a6", transport=lambda mac: '["18"]')
+    assert f is not None and f.quarantined is True and f.tag == "18"
+
+
+def test_fw_check_reports_untagged():
+    f = firewalla_quarantine_check("d0:11", transport=lambda mac: "[]")
+    assert f is not None and f.quarantined is False

@@ -787,3 +787,37 @@ def classify_node(signals: NodeSignals) -> NodeClass:
     if not signals.is_portable and fixed and signals.distinct_ssids_seen <= SSID_SERVER_MAX:
         return NodeClass("SERVER", "always-on / static-or-reserved IP / single network")
     return NodeClass("UNKNOWN", "insufficient signal — treated as roamer (privacy-first)")
+
+
+# ─── Task 4: optional Firewalla quarantine enrichment ────────────────
+
+QuarantineTransport = Callable[[str], str]
+"""mac → raw tags response (e.g. redis ``hget policy:mac:<MAC> tags``); "" when absent."""
+
+
+@dataclass(frozen=True)
+class QuarantineFinding:
+    quarantined: bool
+    tag: str | None
+    detail: str
+
+
+def firewalla_quarantine_check(
+    mac: str, transport: QuarantineTransport | None = None
+) -> QuarantineFinding | None:
+    """OPTIONAL enrichment: is ``mac`` in a Firewalla quarantine tag?
+
+    Returns None when no Firewalla transport is wired or it does not answer — the
+    router-agnostic path never depends on this. When a transport answers with a
+    tags array, a non-empty tag list means quarantined (tag "18" == the DAP
+    Quarantine group observed in the incident).
+    """
+    if transport is None:
+        return None
+    raw = transport(mac).strip()
+    if not raw:
+        return None
+    tags = re.findall(r'"(\d+)"', raw)
+    if not tags:
+        return QuarantineFinding(False, None, "device present, no quarantine tag")
+    return QuarantineFinding(True, tags[0], f"in Firewalla tag {tags[0]} (quarantine)")
