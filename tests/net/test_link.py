@@ -18,7 +18,9 @@ from sanctum_cli.net.link import (
     classify_node,
     diagnose_identity,
     firewalla_quarantine_check,
+    identity_is_drift,
     is_locally_administered,
+    parse_identity,
     parse_log,
     probe_identity,
     probe_wifi,
@@ -410,3 +412,27 @@ def test_fw_check_reports_quarantine_tag():
 def test_fw_check_reports_untagged():
     f = firewalla_quarantine_check("d0:11", transport=lambda mac: "[]")
     assert f is not None and f.quarantined is False
+
+
+def test_parse_identity_reads_id_token():
+    line = "2026-07-01T10:00:00 ssid=X rtt=2/3/4/1 loss=0.0% load=[1] id=cur=32:a6:f4:de:54:cf,hw=d0:11:e5:1c:88:59,arp=FALSE DEGRADED"
+    ids = parse_identity(line)
+    assert ids is not None
+    assert ids["cur"] == "32:a6:f4:de:54:cf" and ids["hw"] == "d0:11:e5:1c:88:59" and ids["arp"] == "FALSE"
+
+
+def test_identity_drift_true_on_random_mac_and_arp_false():
+    assert identity_is_drift(parse_identity(
+        "x rtt=NA loss=100.0% load=[1] id=cur=32:a6:f4:de:54:cf,hw=d0:11:e5:1c:88:59,arp=FALSE DEGRADED")) is True
+
+
+def test_identity_drift_false_on_hardware_mac():
+    assert identity_is_drift(parse_identity(
+        "x rtt=2/3/4/1 loss=0.0% load=[1] id=cur=d0:11:e5:1c:88:59,hw=d0:11:e5:1c:88:59,arp=TRUE ok")) is False
+
+
+def test_existing_parse_log_still_reads_degraded_with_id_token():
+    # regression guard: the trailing flag + rtt/loss/load parse survive the id= insert
+    line = "x ssid=Y rtt=2/3/4/1 loss=0.0% load=[1.5] id=cur=aa:bb:cc:dd:ee:ff,hw=aa:bb:cc:dd:ee:ff,arp=TRUE DEGRADED"
+    s = parse_log(line)
+    assert len(s) == 1 and s[0].degraded is True and s[0].load == 1.5

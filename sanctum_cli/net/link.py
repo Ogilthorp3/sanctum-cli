@@ -292,11 +292,20 @@ AVG="$(printf '%s' "$RTT" | cut -d/ -f2)"; MAX="$(printf '%s' "$RTT" | cut -d/ -
 FLAG="ok"
 # degraded window: avg local ping > 20ms, OR max > 100ms, OR any loss
 awk -v a="${AVG:-0}" -v m="${MAX:-0}" -v l="${LOSS:-0}" 'BEGIN{exit !(a+0>20 || m+0>100 || l+0>0)}' && FLAG="DEGRADED"
+# Identity tuple — read-only L3 identity, NO Wi-Fi scan (never self-induces jitter):
+# current in-use MAC, burned-in hardware MAC, and whether macOS verified the router
+# via ARP. A random/rotating MAC + unverified ARP is the drift signature.
+CURMAC="$(ifconfig "$IFACE" 2>/dev/null | awk '/ether/{print $2; exit}')"
+HWMAC="$(networksetup -getmacaddress "$IFACE" 2>/dev/null | awk '/Ethernet Address/{print $3; exit}')"
+ARP="$(ipconfig getsummary "$IFACE" 2>/dev/null | awk -F': ' '/RouterARPVerified/{print $2; exit}')"; [ -z "$ARP" ] && ARP="NA"
 # On 100% loss `ping` prints no round-trip line, so RTT is empty -> rtt=NA; LOSS
 # is still captured (100.0). The parser reads loss independently of rtt, so this
-# total-loss window is NOT dropped — it drives the RADIO verdict.
-printf '%s ssid=%s rtt=%s loss=%s%% load=[%s] %s\n' \
-  "$(date '+%Y-%m-%dT%H:%M:%S')" "${SSID:-?}" "${RTT:-NA}" "${LOSS:-NA}" "$LOAD" "$FLAG" >> "$LOG"
+# total-loss window is NOT dropped — it drives the RADIO verdict. The id= token is
+# inserted BEFORE the trailing flag so the existing rtt/loss/load parse + the
+# endswith("DEGRADED") flag read both still hold.
+printf '%s ssid=%s rtt=%s loss=%s%% load=[%s] id=cur=%s,hw=%s,arp=%s %s\n' \
+  "$(date '+%Y-%m-%dT%H:%M:%S')" "${SSID:-?}" "${RTT:-NA}" "${LOSS:-NA}" "$LOAD" \
+  "${CURMAC:-NA}" "${HWMAC:-NA}" "$ARP" "$FLAG" >> "$LOG"
 
 # Cap the log so it cannot grow without bound (~10k samples; status only reads
 # the most recent slice anyway). umask 077 keeps the rewritten file 0600.
@@ -432,6 +441,43 @@ def is_locally_administered(mac: str) -> bool:
     except ValueError:
         return False
     return bool(octet & 0b10)
+
+
+# The identity tuple the sentinel now appends to each sample line, e.g.
+# ``id=cur=32:a6:f4:de:54:cf,hw=d0:11:e5:1c:88:59,arp=FALSE``. Parsed
+# INDEPENDENTLY of the rtt/loss/load fields so a drift-only pass never needs the
+# radio metrics — and vice versa (a legacy line with no id= token parses fine as
+# before). arp is the literal ``TRUE``/``FALSE``/``NA`` the sentinel emits.
+_IDENTITY = re.compile(
+    r"id=cur=(?P<cur>[0-9a-fA-F:]+),hw=(?P<hw>[0-9a-fA-F:]+),arp=(?P<arp>TRUE|FALSE|NA)"
+)
+
+
+def parse_identity(line: str) -> dict[str, str] | None:
+    """Pure: read the ``id=cur=…,hw=…,arp=…`` tuple from one sentinel line.
+
+    Returns ``{"cur", "hw", "arp"}`` or ``None`` when the line carries no identity
+    token (a pre-Task-7 sentinel line, or garbage). No I/O.
+    """
+    m = _IDENTITY.search(line)
+    if m is None:
+        return None
+    return {"cur": m["cur"], "hw": m["hw"], "arp": m["arp"]}
+
+
+def identity_is_drift(ids: dict[str, str] | None) -> bool:
+    """Pure: True when this sample shows the MAC-identity drift signature.
+
+    Drift = the in-use MAC is randomized/differs from the burned-in hardware MAC
+    AND macOS did NOT verify the router by ARP (``arp=FALSE``). A stable hardware
+    MAC, or an ARP-verified association, is not drift. Fail-closed: ``None`` (no
+    identity token) is never drift.
+    """
+    if ids is None:
+        return False
+    cur, hw, arp = ids["cur"], ids["hw"], ids["arp"]
+    macs_diverge = is_locally_administered(cur) or cur.lower() != hw.lower()
+    return macs_diverge and arp == "FALSE"
 
 
 _MAC_RISK_RANDOMIZED = (
