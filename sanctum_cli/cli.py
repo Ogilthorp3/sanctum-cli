@@ -40,6 +40,7 @@ from sanctum_cli.commands import self_test as self_test_cmd
 from sanctum_cli.commands import uninstall as uninstall_cmd
 from sanctum_cli.commands import update as update_cmd
 from sanctum_cli.commands import vision as vision_cmd
+from sanctum_cli.commands.link import link_app
 from sanctum_cli.commands.module import module_app
 from sanctum_cli.commands.net import net_app
 from sanctum_cli.errors import ExitCode, SanctumError
@@ -397,6 +398,7 @@ def screentime_phone_mode(
 
 app.add_typer(module_app, name="module")
 app.add_typer(net_app, name="net")
+app.add_typer(link_app, name="link")
 
 # The seventh organ — hormone panel + creative-mode lever. Read-only/file-based;
 # adds no behavior to any seat until a seat opts into the receptor.
