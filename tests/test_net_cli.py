@@ -145,3 +145,177 @@ def test_net_speedtest_no_test_human_output() -> None:
     out = result.stdout.lower()
     assert "ceiling" in out
     assert "nat" in out
+
+
+# ─── net heal (Task 4 — dry-run + guarded --apply) ───────────────────
+#
+# The heal CLI reads posture via an injected CommandRunner (argv -> stdout), so
+# NO live networksetup/ipconfig/route/ping/sudo is ever touched here. The tests
+# patch ``sanctum_cli.commands.net._build_heal_runner`` to feed canned outputs,
+# and (for --apply) ``os.getuid`` so the root gate is exercised deterministically.
+
+
+class _HealFakeRunner:
+    """A substring-keyed, mutation-aware fake CommandRunner (argv: list[str]).
+
+    ``table`` maps a substring of the joined argv to the stdout to return (first
+    match wins), mirroring the pure-core test ``_run`` helper. When a healing
+    mutation fires (``-setdhcp`` / ``set en1 DHCP``) the runner switches to
+    ``after`` — so a test can simulate a heal that WORKS (gateway comes back) or
+    STAYS BROKEN (gateway still dead → the CLI must revert). Every argv is logged
+    so a test can assert whether a mutating / reverting command was issued.
+    """
+
+    def __init__(
+        self, before: dict[str, str], after: dict[str, str] | None = None
+    ) -> None:
+        self._before = before
+        self._after = after if after is not None else before
+        self._table = before
+        self.calls: list[list[str]] = []
+
+    def __call__(self, argv: list[str]) -> str:
+        self.calls.append(argv)
+        joined = " ".join(argv)
+        if "-setdhcp" in joined or "set en1 DHCP" in joined:
+            # A healing mutation fired — subsequent posture reads see `after`.
+            self._table = self._after
+        for pat, out in self._table.items():
+            if pat in joined:
+                return out
+        return ""
+
+
+# A Manual/static Mini on a foreign LAN with the tailnet spine up — STATIC_DRIFT.
+_STATIC_DRIFT_BEFORE: dict[str, str] = {
+    "listallhardwareports": "Hardware Port: Wi-Fi\nDevice: en1\nEthernet Address: d0:11:e5:1c:88:59",
+    "getsummary en1": "  LinkStatusActive : TRUE\n  ConfigMethod : Manual\n",
+    "route -n get default": "gateway: 10.0.0.1\ninterface: en1",
+    "getifaddr en1": "10.0.0.10",
+    "getoption en1 subnet_mask": "255.255.255.0",
+    "ifconfig": "utun3: flags=...\n\tinet 100.107.112.118 --> 100.107.112.118",
+    "ping": "3 packets transmitted, 3 packets received, 0.0% packet loss",
+    "-getinfo": "IP address: 10.0.0.10\nSubnet mask: 255.255.255.0\nRouter: 10.0.0.1\n",
+}
+
+# After the flip, the node is on DHCP with a reachable gateway — a real heal.
+_STATIC_DRIFT_AFTER: dict[str, str] = {
+    **_STATIC_DRIFT_BEFORE,
+    "getsummary en1": "  LinkStatusActive : TRUE\n  ConfigMethod : DHCP\n",
+    "ping": "3 packets transmitted, 3 packets received, 0.0% packet loss",
+}
+
+# After the flip the gateway is STILL dead (heal did not take) — CLI must revert.
+_STATIC_DRIFT_STAYS_BROKEN: dict[str, str] = {
+    **_STATIC_DRIFT_BEFORE,
+    "getsummary en1": "  LinkStatusActive : TRUE\n  ConfigMethod : DHCP\n",
+    "ping": "3 packets transmitted, 0 packets received, 100.0% packet loss",
+}
+
+# A double-NAT overlap (10.x LAN inside Bell's 0/1 DMZ WAN) + dead gateway +
+# spine up → risky DOUBLE_NAT_OVERLAP → alert-only, NEVER a mutation.
+_OVERLAP_RISKY: dict[str, str] = {
+    "listallhardwareports": "Hardware Port: Wi-Fi\nDevice: en1\nEthernet Address: d0:11:e5:1c:88:59",
+    "getsummary en1": "  LinkStatusActive : TRUE\n  ConfigMethod : DHCP\n",
+    "route -n get default": "gateway: 10.0.0.1\ninterface: en1",
+    "getifaddr en1": "10.0.0.10",
+    "getoption en1 subnet_mask": "255.255.255.0",
+    "ifconfig": "utun3: flags=...\n\tinet 100.107.112.118 --> 100.107.112.118",
+    "ping": "3 packets transmitted, 0 packets received, 100.0% packet loss",
+    "-getinfo": "IP address: 10.0.0.10\nSubnet mask: 255.255.255.0\nRouter: 10.0.0.1\n",
+}
+
+
+def test_net_heal_dry_run_reports_static_drift_no_mutation() -> None:
+    """Default `net heal` is a dry-run: prints STATIC_DRIFT + the would-do flip,
+    and issues NO mutating command."""
+    fake = _HealFakeRunner(_STATIC_DRIFT_BEFORE)
+    with patch("sanctum_cli.commands.net._build_heal_runner", return_value=fake):
+        result = runner.invoke(app, ["net", "heal"])
+    assert result.exit_code == 0, result.stdout
+    out = result.stdout
+    assert "STATIC_DRIFT" in out
+    assert "flip_dhcp" in out
+    # Dry-run must never mutate: no setdhcp / no ipconfig-set command was issued.
+    assert not any(
+        "-setdhcp" in " ".join(c) or "set en1 DHCP" in " ".join(c) for c in fake.calls
+    )
+
+
+def test_net_heal_dry_run_shows_spine_state() -> None:
+    """The dry-run surfaces the never-strand spine state (tailnet / TB5)."""
+    fake = _HealFakeRunner(_STATIC_DRIFT_BEFORE)
+    with patch("sanctum_cli.commands.net._build_heal_runner", return_value=fake):
+        result = runner.invoke(app, ["net", "heal"])
+    assert result.exit_code == 0, result.stdout
+    # The tailnet spine (100.107.x present) must be reported as up.
+    lower = result.stdout.lower()
+    assert "tailnet" in lower or "spine" in lower
+
+
+def test_net_heal_apply_non_root_prints_sudo_hint_no_mutation() -> None:
+    """`--apply` from a non-root shell refuses to mutate and prints a sudo hint."""
+    fake = _HealFakeRunner(_STATIC_DRIFT_BEFORE)
+    with (
+        patch("sanctum_cli.commands.net._build_heal_runner", return_value=fake),
+        patch("sanctum_cli.commands.net.os.getuid", return_value=501),
+    ):
+        result = runner.invoke(app, ["net", "heal", "--apply"])
+    assert result.exit_code == 0, result.stdout
+    assert "sudo" in result.stdout.lower()
+    # Non-root: still no mutation.
+    assert not any(
+        "-setdhcp" in " ".join(c) or "set en1 DHCP" in " ".join(c) for c in fake.calls
+    )
+
+
+def test_net_heal_apply_heals_and_verifies() -> None:
+    """`--apply` (as root) on a STATIC_DRIFT node that comes back healthy:
+    fires the flip, re-probes, and prints ✓ from the REAL re-probe."""
+    fake = _HealFakeRunner(_STATIC_DRIFT_BEFORE, _STATIC_DRIFT_AFTER)
+    with (
+        patch("sanctum_cli.commands.net._build_heal_runner", return_value=fake),
+        patch("sanctum_cli.commands.net.os.getuid", return_value=0),
+    ):
+        result = runner.invoke(app, ["net", "heal", "--apply"])
+    assert result.exit_code == 0, result.stdout
+    # The flip actually fired.
+    assert any("-setdhcp" in " ".join(c) for c in fake.calls)
+    assert "✓" in result.stdout or "healed" in result.stdout.lower()
+    # No revert on a successful heal.
+    assert not any("-setmanual" in " ".join(c) for c in fake.calls)
+
+
+def test_net_heal_apply_stays_broken_reverts_and_alerts() -> None:
+    """`--apply` where the re-probe STAYS broken must revert to the snapshot and
+    stop+alert (honest-verify: no false ✓)."""
+    fake = _HealFakeRunner(_STATIC_DRIFT_BEFORE, _STATIC_DRIFT_STAYS_BROKEN)
+    with (
+        patch("sanctum_cli.commands.net._build_heal_runner", return_value=fake),
+        patch("sanctum_cli.commands.net.os.getuid", return_value=0),
+    ):
+        result = runner.invoke(app, ["net", "heal", "--apply"])
+    assert result.exit_code == 0, result.stdout
+    # The flip fired, then the revert (setmanual with the saved values) fired.
+    assert any("-setdhcp" in " ".join(c) for c in fake.calls)
+    assert any("-setmanual" in " ".join(c) for c in fake.calls)
+    lower = result.stdout.lower()
+    assert "revert" in lower and ("✗" in result.stdout or "not healed" in lower or "stop" in lower)
+
+
+def test_net_heal_apply_risky_alert_only_no_mutation() -> None:
+    """A risky DOUBLE_NAT_OVERLAP node under `--apply` alerts + issues NO mutation
+    (stays out of the NAT domain)."""
+    fake = _HealFakeRunner(_OVERLAP_RISKY)
+    with (
+        patch("sanctum_cli.commands.net._build_heal_runner", return_value=fake),
+        patch("sanctum_cli.commands.net.os.getuid", return_value=0),
+    ):
+        result = runner.invoke(app, ["net", "heal", "--apply"])
+    assert result.exit_code == 0, result.stdout
+    assert "DOUBLE_NAT_OVERLAP" in result.stdout
+    # Never touches the interface on a risky verdict.
+    assert not any(
+        "-setdhcp" in " ".join(c) or "set en1 DHCP" in " ".join(c) or "-setmanual" in " ".join(c)
+        for c in fake.calls
+    )

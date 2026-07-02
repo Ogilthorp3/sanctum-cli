@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
+import re
 import socket
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
@@ -17,7 +20,7 @@ from sanctum_cli.devices import intents, rails, registry, sagemcom
 from sanctum_cli.devices import orbi as orbi_provider
 from sanctum_cli.devices.base import Capability, Creds, DeviceError, NetContext, OpResult
 from sanctum_cli.errors import ExitCode, SanctumError
-from sanctum_cli.net import detect, playbooks, render, safety, speedtest, system, verify
+from sanctum_cli.net import detect, heal, playbooks, render, safety, speedtest, system, verify
 from sanctum_cli.net.types import SpeedReport, Verdict
 
 if TYPE_CHECKING:
@@ -25,6 +28,7 @@ if TYPE_CHECKING:
 
     from sanctum_cli.devices.base import DeviceProvider
     from sanctum_cli.net.detect import HttpProbe, Runner
+    from sanctum_cli.net.link import CommandRunner
 
 console = Console()
 err_console = Console(stderr=True)
@@ -341,6 +345,203 @@ def net_speedtest(
         print(json.dumps(_speed_to_dict(report), indent=2))
         return
     render.render_speed(console, report)
+
+
+# ─── heal (topology-adaptive self-healing) ──────────────────────────
+#
+# `sanctum net heal` reads the node's live L3 posture, classifies it against the
+# pure truth table (heal.diagnose_posture), and guards a heal (heal.plan_heal:
+# never-strand + no-loop + fail-closed). Default is a READ-ONLY dry-run; --apply
+# executes a *safe* plan behind snapshot → act → verify-back → auto-revert. The
+# impure boundary is a single injected CommandRunner (argv -> stdout) so the whole
+# flow is unit-testable without a live network / sudo (tests patch _build_heal_runner).
+
+# Lines from `networksetup -getinfo "Wi-Fi"` we snapshot for a manual revert.
+_GETINFO_IP_RE = re.compile(r"^IP address:\s*(\S+)", re.MULTILINE)
+_GETINFO_MASK_RE = re.compile(r"^Subnet mask:\s*(\S+)", re.MULTILINE)
+_GETINFO_ROUTER_RE = re.compile(r"^Router:\s*(\S+)", re.MULTILINE)
+
+# Bounded verify-back after a heal: poll the re-probe a few times for a lease +
+# reachable gateway before deciding it failed (a DHCP flip takes a moment). These
+# are small so a test's stateful runner settles immediately; the daemon reuses them.
+_HEAL_VERIFY_TRIES = 3
+_HEAL_VERIFY_DELAY_S = 1.0
+
+
+def _build_heal_runner() -> CommandRunner:
+    """The impure boundary for `net heal` — a real subprocess CommandRunner.
+
+    A module-level seam (mirrors :func:`_build_runner`) so tests inject a fake
+    ``argv -> stdout`` runner and drive the entire probe/act/verify/revert flow
+    with zero live ``networksetup`` / ``ipconfig`` / ``route`` / ``ping`` / sudo.
+    Defaults to ``heal._real_run`` — the same never-raising subprocess seam the
+    pure-core posture read uses.
+    """
+    from sanctum_cli.net.link import _real_run
+
+    return _real_run
+
+
+def _heal_snapshot(runner: CommandRunner) -> tuple[str, str, str] | None:
+    """Snapshot the current manual IPv4 config from ``networksetup -getinfo "Wi-Fi"``.
+
+    Returns ``(ip, mask, router)`` when all three parse, else ``None`` (we refuse
+    to fire a heal we cannot cleanly revert — never-strand). This is the rollback
+    baseline the auto-revert restores if the heal does not come up healthy.
+    """
+    info = runner(["networksetup", "-getinfo", "Wi-Fi"])
+    ip = _GETINFO_IP_RE.search(info)
+    mask = _GETINFO_MASK_RE.search(info)
+    router = _GETINFO_ROUTER_RE.search(info)
+    if ip and mask and router:
+        return (ip.group(1), mask.group(1), router.group(1))
+    return None
+
+
+def _heal_reprobe_healthy(runner: CommandRunner) -> heal.NetPosture:
+    """Bounded verify-back: re-probe until the gateway answers (or tries run out).
+
+    Honest-verify: a heal is "healed" ONLY from a real re-probe that shows a lease
+    (an IP) AND a reachable gateway. Polls a few times so a just-issued DHCP flip
+    has a moment to settle; returns the last posture read either way.
+    """
+    posture = heal.probe_posture(run=runner)
+    tries = 0
+    while not (posture.ip and posture.gateway_reachable) and tries < _HEAL_VERIFY_TRIES:
+        time.sleep(_HEAL_VERIFY_DELAY_S)
+        posture = heal.probe_posture(run=runner)
+        tries += 1
+    return posture
+
+
+def _render_posture(posture: heal.NetPosture, diag: heal.PostureDiagnosis) -> None:
+    """Print the posture read + the verdict + the never-strand spine state."""
+    reach = (
+        "reachable"
+        if posture.gateway_reachable
+        else ("dead" if posture.gateway_reachable is False else "unknown")
+    )
+    console.print(f"[bold]VERDICT:[/] {escape(diag.verdict)}")
+    console.print(f"  {escape(diag.detail)}")
+    console.print(
+        f"  [dim]iface[/] {escape(posture.iface or '-')}  "
+        f"[dim]config[/] {escape(posture.config_method or '-')}  "
+        f"[dim]ip[/] {escape(posture.ip or '-')}  "
+        f"[dim]gateway[/] {escape(posture.gateway or '-')} ({reach})"
+    )
+    spine = []
+    spine.append("tailnet ✓" if posture.on_tailnet else "tailnet ✗")
+    spine.append("TB5 ✓" if posture.tb5_up else "TB5 ✗")
+    spine_ok = posture.on_tailnet or posture.tb5_up
+    style = "green" if spine_ok else "red"
+    console.print(f"  [bold]spine:[/] [{style}]{escape(' · '.join(spine))}[/]")
+
+
+@net_app.command(
+    "heal",
+    help="Diagnose + (with --apply) self-heal the node's network posture. Dry-run by default.",
+)
+def net_heal(
+    apply: Annotated[
+        bool,
+        typer.Option(
+            "--apply", help="Execute a safe heal (snapshot→act→verify→auto-revert; needs root)."
+        ),
+    ] = False,
+) -> None:
+    """Read L3 posture → diagnose → guarded heal (never-strand / no-loop / fail-closed).
+
+    Default is a READ-ONLY dry-run: print the posture, the verdict, the *would-do*
+    action, and the never-strand spine state — no mutation. ``--apply`` executes a
+    *safe* plan (root-only; the daemon runs as root) behind snapshot → act →
+    verify-back → auto-revert: it snapshots the current manual IPv4 config, fires
+    the action (``flip_dhcp`` / ``dhcp_renew``), re-probes for a lease + reachable
+    gateway, and on failure reverts to the snapshot and stops+alerts. A ✓ is
+    printed ONLY from the real re-probe (honest-verify); a risky / UNVERIFIED /
+    spine-down verdict never mutates (stays out of the NAT domain, fail-closed).
+    """
+    runner = _build_heal_runner()
+    posture = heal.probe_posture(run=runner)
+    diag = heal.diagnose_posture(posture, overlap=heal.overlap_for(posture))
+    _render_posture(posture, diag)
+
+    plan = heal.plan_heal(
+        diag,
+        attempts=0,
+        tailnet_ok=posture.on_tailnet,
+        tb5_ok=posture.tb5_up,
+    )
+
+    if not apply:
+        # Dry-run: describe the would-do, mutate nothing.
+        if plan.execute and plan.action is not None:
+            console.print(
+                f"\n[dim]would-do:[/] [bold]{escape(plan.action.kind)}[/] "
+                f"[dim]({escape(plan.action.detail)})[/]"
+            )
+            console.print(
+                "[dim]dry-run: no changes made. Re-run with --apply (as root) to heal.[/]"
+            )
+        else:
+            console.print(f"\n[yellow]{escape(plan.reason)}[/]")
+            if diag.remedy:
+                console.print(f"  → {escape(diag.remedy)}")
+        return
+
+    # --apply: a stop-and-alert plan never mutates — surface the reason + the
+    # one-line manual fix and exit clean (fail-closed / stays-out-of-NAT).
+    if not plan.execute or plan.action is None:
+        console.print(f"\n[yellow]stop + alert:[/] {escape(plan.reason)}")
+        if diag.remedy:
+            console.print(f"  → {escape(diag.remedy)}")
+        return
+
+    # Mutations need root — the daemon runs as root; a non-root shell gets the hint.
+    if os.getuid() != 0:
+        console.print(
+            "\n[yellow]![/] --apply needs root to change the interface "
+            "(the net-heal daemon runs as root)."
+        )
+        console.print(
+            "  → run it with sudo: [bold]sudo sanctum net heal --apply[/], "
+            "or install the daemon: [bold]sanctum net heal --install[/]"
+        )
+        return
+
+    # Snapshot the current config so a failed heal can be cleanly reverted. No
+    # revertable baseline → refuse (never-strand: don't fire what we can't undo).
+    snap = _heal_snapshot(runner)
+    if snap is None:
+        console.print(
+            "\n[yellow]stop + alert:[/] could not snapshot the current IPv4 config — "
+            "refusing to heal without a revert baseline (never-strand)."
+        )
+        return
+
+    argv = heal.heal_action_argv(plan.action, posture.iface)
+    console.print(f"\n[dim]healing:[/] {escape(' '.join(argv))}")
+    runner(argv)
+
+    healed = _heal_reprobe_healthy(runner)
+    if healed.ip and healed.gateway_reachable:
+        # Honest-verify: ✓ only from the real re-probe (lease + reachable gateway).
+        console.print(
+            f"[green]✓ healed[/] — {escape(plan.action.kind)} took: "
+            f"ip [bold]{escape(healed.ip)}[/], gateway "
+            f"[bold]{escape(healed.gateway or '-')}[/] reachable."
+        )
+        return
+
+    # Heal did not come up healthy → revert to the snapshot and stop + alert.
+    ip, mask, router = snap
+    console.print(
+        "[red]✗ not healed[/] — re-probe still unhealthy; reverting to the snapshot."
+    )
+    runner(["networksetup", "-setmanual", "Wi-Fi", ip, mask, router])
+    console.print(
+        f"  [yellow]↩ reverted[/] Wi-Fi to manual {escape(ip)} / {escape(mask)} / "
+        f"{escape(router)} and stopped (stop + alert — no loop)."
+    )
 
 
 # ─── hub (network-gear provider surface) ─────────────────────────────

@@ -18,7 +18,7 @@ import ipaddress
 import re
 from dataclasses import dataclass
 
-from sanctum_cli.net.detect import parse_default_gateway
+from sanctum_cli.net.detect import lan_conflicts_with_bell_dmz, parse_default_gateway
 from sanctum_cli.net.link import (
     CommandRunner,
     _parse_wifi_iface,
@@ -371,3 +371,53 @@ def plan_heal(
         action=action,
         reason=f"heal: {diagnosis.verdict} → {action.kind} (spine up, attempt {attempts + 1}/{MAX_HEAL_ATTEMPTS}).",
     )
+
+
+# ─── CLI-facing pure helpers (posture → overlap / action argv) ─────────
+
+
+def posture_cidr(posture: NetPosture) -> str:
+    """The node's own network as a CIDR (e.g. ``10.0.0.10/255.255.255.0``), or "".
+
+    Feeds :func:`overlap_for`. Fail-closed: any missing / unparseable field yields
+    "" (which :func:`overlap_for` treats as no overlap), so we never invent a
+    double-NAT overlap from an unread posture.
+    """
+    if not (posture.ip and posture.subnet):
+        return ""
+    try:
+        net = ipaddress.ip_network(f"{posture.ip}/{posture.subnet}", strict=False)
+    except ValueError:
+        return ""
+    return str(net)
+
+
+def overlap_for(posture: NetPosture) -> bool:
+    """True iff the node's own LAN overlaps Bell's Advanced-DMZ WAN range.
+
+    Pure wrapper over :func:`net.detect.lan_conflicts_with_bell_dmz` — the caller
+    passes the result to :func:`diagnose_posture` as ``overlap`` so a double-NAT
+    overlap is classified ``alert_only`` (stays out of the NAT domain). An
+    unreadable posture (empty CIDR) is never an overlap (no false alarm).
+    """
+    cidr = posture_cidr(posture)
+    return bool(cidr) and lan_conflicts_with_bell_dmz(cidr)
+
+
+def heal_action_argv(action: HealAction, iface: str) -> list[str]:
+    """The concrete argv a ``safe`` :class:`HealAction` runs (empty for none/alert).
+
+    * ``flip_dhcp`` → ``networksetup -setdhcp "Wi-Fi"`` (Manual → DHCP, the
+      DHCP-not-static heal).
+    * ``dhcp_renew`` → ``ipconfig set <iface> DHCP`` (bounce the lease).
+
+    The port label is the stable macOS ``"Wi-Fi"`` service name for the flip;
+    ``dhcp_renew`` operates on the resolved BSD ``iface``. A non-mutating action
+    (``none`` / ``alert_only``) returns ``[]`` — the caller must never shell out
+    for it (fail-closed at the boundary too).
+    """
+    if action.kind == "flip_dhcp":
+        return ["networksetup", "-setdhcp", "Wi-Fi"]
+    if action.kind == "dhcp_renew":
+        return ["ipconfig", "set", iface, "DHCP"]
+    return []
