@@ -8,7 +8,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from sanctum_cli.net.heal import NetPosture, probe_posture
+from sanctum_cli.net.heal import (
+    NetPosture,
+    PostureDiagnosis,
+    diagnose_posture,
+    probe_posture,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -57,3 +62,78 @@ def test_probe_posture_netposture_is_frozen() -> None:
     # NetPosture is an immutable value object (frozen dataclass) — pure-core contract.
     p = probe_posture(run=_run({}))
     assert isinstance(p, NetPosture)
+
+
+# ─── Task 2: diagnose_posture — pure topology truth table ──────────────
+
+
+def _p(**k: object) -> NetPosture:
+    base: dict[str, object] = dict(
+        iface="en1",
+        config_method="DHCP",
+        ip="10.0.0.10",
+        subnet="255.255.255.0",
+        gateway="10.0.0.1",
+        gateway_reachable=True,
+        associated=True,
+        on_tailnet=True,
+        tb5_up=True,
+    )
+    base.update(k)
+    return NetPosture(**base)  # type: ignore[arg-type]
+
+
+def test_healthy() -> None:
+    d = diagnose_posture(_p())
+    assert isinstance(d, PostureDiagnosis)
+    assert d.verdict == "HEALTHY"
+    assert d.action.kind == "none"
+    assert d.posture is not None
+
+
+def test_static_drift() -> None:
+    d = diagnose_posture(_p(config_method="Manual"))
+    assert d.verdict == "STATIC_DRIFT"
+    assert d.action.kind == "flip_dhcp"
+    assert d.action.safe
+
+
+def test_gateway_dead() -> None:
+    d = diagnose_posture(_p(gateway_reachable=False))
+    assert d.verdict == "GATEWAY_DEAD"
+    assert d.action.kind == "dhcp_renew"
+    assert d.action.safe
+
+
+def test_wrong_subnet_bell_static() -> None:
+    # Mini Manual 10.0.0.10 while really on Bell 192.168.2.x: static drift takes
+    # priority; both auto-heal to DHCP (safe).
+    d = diagnose_posture(_p(config_method="Manual", gateway_reachable=False))
+    assert d.verdict in ("STATIC_DRIFT", "WRONG_SUBNET")
+    assert d.action.safe
+
+
+def test_wrong_subnet_dhcp_gateway_off_subnet() -> None:
+    # DHCP lease but the default gateway sits outside our IP's subnet (renumber /
+    # stale lease): WRONG_SUBNET → guarded dhcp_renew (safe).
+    d = diagnose_posture(_p(ip="10.0.0.10", subnet="255.255.255.0", gateway="192.168.2.1"))
+    assert d.verdict == "WRONG_SUBNET"
+    assert d.action.kind == "dhcp_renew"
+    assert d.action.safe
+
+
+def test_double_nat_overlap_is_risky() -> None:
+    d = diagnose_posture(_p(gateway_reachable=False), overlap=True)
+    assert d.verdict == "DOUBLE_NAT_OVERLAP"
+    assert not d.action.safe
+    assert d.action.kind == "alert_only"
+
+
+def test_unverified() -> None:
+    assert diagnose_posture(_p(iface="", config_method="")).verdict == "UNVERIFIED"
+
+
+def test_unverified_action_not_safe() -> None:
+    # fail-closed: an unreadable posture never yields a safe (mutating) action.
+    d = diagnose_posture(_p(iface="", config_method=""))
+    assert not d.action.safe

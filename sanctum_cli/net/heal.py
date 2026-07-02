@@ -50,6 +50,40 @@ _TB5_PREFIX = "10.0.5."
 
 
 @dataclass(frozen=True)
+class HealAction:
+    """A single remediation the diagnosis prescribes.
+
+    ``kind`` is one of ``none|flip_dhcp|dhcp_renew|alert_only``. ``safe`` is the
+    load-bearing guard: only a ``safe`` action is ever a candidate for mutation
+    (:func:`plan_heal` still gates it on the spine + attempts cap). An
+    ``alert_only`` action is *never* safe — it is the fail-closed / stays-out-of-
+    the-NAT-domain verdict where the node stops and hands off to a human.
+    """
+
+    kind: str
+    safe: bool
+    detail: str
+
+
+@dataclass(frozen=True)
+class PostureDiagnosis:
+    """The classified verdict over a :class:`NetPosture` (pure truth-table output).
+
+    ``verdict`` is one of ``HEALTHY|STATIC_DRIFT|GATEWAY_DEAD|WRONG_SUBNET|
+    DOUBLE_NAT_OVERLAP|UNVERIFIED``. ``remedy`` is the one-line human fix (shown
+    when the plan is stop-and-alert). ``action`` carries the machine remedy +
+    its safety. ``posture`` is the input, retained so callers can render / re-
+    probe against it.
+    """
+
+    verdict: str
+    detail: str
+    remedy: str
+    action: HealAction
+    posture: NetPosture
+
+
+@dataclass(frozen=True)
 class NetPosture:
     """The node's live L3 posture — the pure input to :func:`diagnose_posture`.
 
@@ -161,4 +195,105 @@ def probe_posture(run: CommandRunner | None = None) -> NetPosture:
         associated=associated,
         on_tailnet=on_tailnet,
         tb5_up=tb5_up,
+    )
+
+
+# ─── diagnosis (pure truth table) ──────────────────────────────────────
+
+
+def _gateway_off_subnet(posture: NetPosture) -> bool:
+    """True iff the default gateway is *outside* the IP's own subnet.
+
+    A gateway that does not sit inside our IP/mask network is unroutable — the
+    signature of a stale static lease left over from a renumber (WRONG_SUBNET).
+    Fail-closed: any missing / unparseable field returns False (we do not invent
+    a wrong-subnet verdict from an unread posture).
+    """
+    if not (posture.ip and posture.subnet and posture.gateway):
+        return False
+    try:
+        net = ipaddress.ip_network(f"{posture.ip}/{posture.subnet}", strict=False)
+        gw = ipaddress.ip_address(posture.gateway)
+    except ValueError:
+        return False
+    return gw not in net
+
+
+def diagnose_posture(
+    posture: NetPosture, *, overlap: bool = False
+) -> PostureDiagnosis:
+    """Classify a :class:`NetPosture` into a verdict + a guarded remedy (pure).
+
+    The truth table, in priority order:
+
+    * **UNVERIFIED** — no iface / no ConfigMethod: the posture could not be read.
+      Fail-closed: ``alert_only`` (never a mutating action from an unread state).
+    * **DOUBLE_NAT_OVERLAP** — the caller detected the LAN overlaps Bell's
+      Advanced-DMZ WAN (``net.detect.lan_conflicts_with_bell_dmz``) *and* the
+      gateway is unreachable. Stays out of the NAT domain: ``alert_only`` (the
+      fix is a router/NAT change a human must make — we never touch it).
+    * **STATIC_DRIFT** — ConfigMethod is ``Manual``: a pinned static address that
+      strands the node on any foreign LAN. Auto-heal to DHCP (``flip_dhcp``).
+    * **GATEWAY_DEAD** — associated with a live link but the default gateway does
+      not answer: a stale lease / gateway change. Guarded ``dhcp_renew``.
+    * **WRONG_SUBNET** — the gateway sits outside our IP's subnet (renumber):
+      guarded ``dhcp_renew``.
+    * **HEALTHY** — none of the above.
+    """
+    # Fail-closed first: an unreadable posture never yields a mutating action.
+    if not posture.iface or not posture.config_method:
+        return PostureDiagnosis(
+            verdict="UNVERIFIED",
+            detail="Could not read the network posture (no interface / ConfigMethod).",
+            remedy="Re-run once the Wi-Fi interface is up; do not mutate an unread posture.",
+            action=HealAction("alert_only", safe=False, detail="posture unread — fail closed"),
+            posture=posture,
+        )
+
+    # Stays-out-of-the-NAT-domain: an overlapping-DMZ LAN with a dead gateway is a
+    # router/NAT problem — alert a human, never touch the NAT ourselves.
+    if overlap and posture.gateway_reachable is False:
+        return PostureDiagnosis(
+            verdict="DOUBLE_NAT_OVERLAP",
+            detail="LAN overlaps Bell's Advanced-DMZ WAN range and the gateway is dead.",
+            remedy="Renumber the LAN off 0.x-127.x (change the router's subnet); we stay out of the NAT domain.",
+            action=HealAction("alert_only", safe=False, detail="NAT-domain change — human only"),
+            posture=posture,
+        )
+
+    # STATIC_DRIFT takes priority over reachability: a Manual address is the root
+    # strand risk regardless of whether this particular gateway happens to answer.
+    if posture.config_method == "Manual":
+        return PostureDiagnosis(
+            verdict="STATIC_DRIFT",
+            detail="Interface is on a Manual (static) address — strands the node on any foreign LAN.",
+            remedy="Flip Wi-Fi to DHCP (networksetup -setdhcp \"Wi-Fi\").",
+            action=HealAction("flip_dhcp", safe=True, detail="Manual → DHCP"),
+            posture=posture,
+        )
+
+    if posture.associated and posture.gateway_reachable is False:
+        return PostureDiagnosis(
+            verdict="GATEWAY_DEAD",
+            detail="Associated to a live link but the default gateway does not answer.",
+            remedy="Renew the DHCP lease (ipconfig set <iface> DHCP).",
+            action=HealAction("dhcp_renew", safe=True, detail="stale lease — renew"),
+            posture=posture,
+        )
+
+    if _gateway_off_subnet(posture):
+        return PostureDiagnosis(
+            verdict="WRONG_SUBNET",
+            detail="Default gateway is outside the IP's own subnet — stale lease after a renumber.",
+            remedy="Renew the DHCP lease (ipconfig set <iface> DHCP).",
+            action=HealAction("dhcp_renew", safe=True, detail="renumber — renew"),
+            posture=posture,
+        )
+
+    return PostureDiagnosis(
+        verdict="HEALTHY",
+        detail="Posture is healthy — DHCP, reachable gateway, on-subnet.",
+        remedy="",
+        action=HealAction("none", safe=True, detail="no action"),
+        posture=posture,
     )
