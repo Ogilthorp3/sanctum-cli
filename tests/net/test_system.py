@@ -98,6 +98,77 @@ def test_firewalla_wan_via_ssh_never_raises_on_decode_error() -> None:
         assert system.firewalla_wan_via_ssh("10.0.0.1", "/tmp/key") == ("", "")
 
 
+# ─── firewalla_ports_and_wan_via_ssh (impure, one round-trip) ────────
+
+# The combined remote command frames its two answers with sentinel lines so one
+# SSH round-trip returns BOTH the port rows and the WAN kind. The '===PORTS==='
+# block carries 'name<TAB>mbps' rows; '===WAN===' carries the wan-kind token.
+_FW_COMBINED_STDOUT = (
+    "===PORTS===\n"
+    "eth0\t1000\n"
+    "eth3\t2500\n"
+    "===WAN===\n"
+    "pppoe\n"
+)
+
+
+def test_firewalla_ports_and_wan_via_ssh_parses_both() -> None:
+    def fake_run(cmd, **kwargs):
+        # one SSH invocation, one combined blob back
+        return subprocess.CompletedProcess(cmd, 0, stdout=_FW_COMBINED_STDOUT, stderr="")
+
+    with patch("sanctum_cli.net.system.subprocess.run", side_effect=fake_run) as run:
+        ports, wan = system.firewalla_ports_and_wan_via_ssh("10.0.0.1", "/tmp/k")
+    assert ports == [("eth0", 1000), ("eth3", 2500)]
+    assert wan == "pppoe"
+    assert run.call_count == 1  # single round-trip
+
+
+def test_firewalla_ports_and_wan_via_ssh_uses_batchmode_key_only() -> None:
+    captured: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        captured.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout=_FW_COMBINED_STDOUT, stderr="")
+
+    with patch("sanctum_cli.net.system.subprocess.run", side_effect=fake_run):
+        system.firewalla_ports_and_wan_via_ssh("10.0.0.1", "/tmp/k", user="pi")
+    argv = captured[0]
+    assert argv[0] == "ssh"
+    assert "-i" in argv and "/tmp/k" in argv
+    assert "BatchMode=yes" in argv
+    assert "PreferredAuthentications=publickey" in argv
+    assert "pi@10.0.0.1" in argv
+
+
+def test_firewalla_ports_and_wan_via_ssh_dhcp_no_ports() -> None:
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(
+            cmd, 0, stdout="===PORTS===\n===WAN===\ndhcp\n", stderr=""
+        )
+
+    with patch("sanctum_cli.net.system.subprocess.run", side_effect=fake_run):
+        ports, wan = system.firewalla_ports_and_wan_via_ssh("10.0.0.1", "/tmp/k")
+    assert ports == []
+    assert wan == "dhcp"
+
+
+def test_firewalla_ports_and_wan_via_ssh_empty_on_timeout() -> None:
+    def boom(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd, 12)
+
+    with patch("sanctum_cli.net.system.subprocess.run", side_effect=boom):
+        assert system.firewalla_ports_and_wan_via_ssh("10.0.0.1", "/tmp/k") == ([], "")
+
+
+def test_firewalla_ports_and_wan_via_ssh_never_raises_on_decode_error() -> None:
+    def boom(*a, **k):
+        raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "bad")
+
+    with patch("sanctum_cli.net.system.subprocess.run", side_effect=boom):
+        assert system.firewalla_ports_and_wan_via_ssh("10.0.0.1", "/tmp/k") == ([], "")
+
+
 # ─── speedtest probe helpers ─────────────────────────────────────────
 
 

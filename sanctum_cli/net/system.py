@@ -86,17 +86,14 @@ def _title(html: str) -> str:
     return m.group(1).strip() if m else ""
 
 
-def firewalla_wan_via_ssh(gateway: str, key: str, user: str = "pi") -> tuple[str, str]:
-    """SSH to the Firewalla (key-only, read-only) and return (wan_ip, wan_mac).
+def _ssh_argv(gateway: str, key: str, user: str, remote: str) -> list[str]:
+    """The key-only, BatchMode SSH argv shared by the Firewalla read probes.
 
-    Returns ("", "") on any failure. Reads the WAN interface's MAC + IPv4.
+    One place owns the read-only, publickey-only, host-key-accept-new, bounded
+    ConnectTimeout flags so ``firewalla_wan_via_ssh`` and the combined
+    ports/WAN probe cannot drift apart.
     """
-    remote = (
-        "D=$(ip -o route get 1.1.1.1 2>/dev/null | grep -oE 'dev [a-z0-9.]+' | cut -d' ' -f2); "
-        "cat /sys/class/net/$D/address 2>/dev/null; "
-        "ip -o -4 addr show $D 2>/dev/null | awk '{print $4}' | cut -d/ -f1"
-    )
-    argv = [
+    return [
         "ssh",
         "-i",
         key,
@@ -111,6 +108,19 @@ def firewalla_wan_via_ssh(gateway: str, key: str, user: str = "pi") -> tuple[str
         f"{user}@{gateway}",
         remote,
     ]
+
+
+def firewalla_wan_via_ssh(gateway: str, key: str, user: str = "pi") -> tuple[str, str]:
+    """SSH to the Firewalla (key-only, read-only) and return (wan_ip, wan_mac).
+
+    Returns ("", "") on any failure. Reads the WAN interface's MAC + IPv4.
+    """
+    remote = (
+        "D=$(ip -o route get 1.1.1.1 2>/dev/null | grep -oE 'dev [a-z0-9.]+' | cut -d' ' -f2); "
+        "cat /sys/class/net/$D/address 2>/dev/null; "
+        "ip -o -4 addr show $D 2>/dev/null | awk '{print $4}' | cut -d/ -f1"
+    )
+    argv = _ssh_argv(gateway, key, user, remote)
     try:
         proc = subprocess.run(
             argv, capture_output=True, text=True, errors="replace", timeout=12, check=False
@@ -125,6 +135,70 @@ def firewalla_wan_via_ssh(gateway: str, key: str, user: str = "pi") -> tuple[str
         elif re.fullmatch(r"\d{1,3}(\.\d{1,3}){3}", s):
             ip = s
     return (ip, mac)
+
+
+# Sentinels the combined Firewalla probe frames its two answers with, so ONE
+# SSH round-trip returns both the port rows and the WAN kind.
+_FW_PORTS_MARK = "===PORTS==="
+_FW_WAN_MARK = "===WAN==="
+
+# The combined remote command (one round-trip): for every link-UP ethN, print
+# "ethN<TAB><speed>" from /sys/class/net; then classify the WAN uplink — a pppN
+# iface (PPPoE) else dhcp/static from the WAN dev's addr config, falling back to
+# an empty token the parser reads as undetermined.
+_FW_COMBINED_REMOTE = (
+    f"echo {_FW_PORTS_MARK}; "
+    "for d in /sys/class/net/eth*; do "
+    'n=$(basename "$d"); '
+    's=$(cat "$d/speed" 2>/dev/null); '
+    'o=$(cat "$d/operstate" 2>/dev/null); '
+    '[ "$o" = up ] && [ -n "$s" ] && printf "%s\\t%s\\n" "$n" "$s"; '
+    "done; "
+    f"echo {_FW_WAN_MARK}; "
+    "if ip -o link show type ppp 2>/dev/null | grep -q ppp; then echo pppoe; "
+    "else "
+    "D=$(ip -o route get 1.1.1.1 2>/dev/null | grep -oE 'dev [a-z0-9.]+' | cut -d' ' -f2); "
+    "if pgrep -f \"dhclient.*$D\" >/dev/null 2>&1 || pgrep -x dhcpcd >/dev/null 2>&1; "
+    "then echo dhcp; else echo static; fi; "
+    "fi"
+)
+
+
+def firewalla_ports_and_wan_via_ssh(
+    gateway: str, key: str, user: str = "pi"
+) -> tuple[list[tuple[str, int]], str]:
+    """SSH to the Firewalla ONCE and return (port hops, wan_kind).
+
+    A single key-only, read-only round-trip (same transport as
+    :func:`firewalla_wan_via_ssh`) runs the combined remote command, which frames
+    its two answers with the ``===PORTS===`` / ``===WAN===`` sentinels. The
+    ``PORTS`` block is fed to :func:`parse_fw_ports` (link-up ``ethN`` rows) and
+    the ``WAN`` block to :func:`parse_wan_kind`. Returns ``([], "")`` on any
+    failure (timeout / transport / decode) — every caller fail-softs, so an
+    unreachable box simply omits the FW hops + the PPPoE band.
+    """
+    argv = _ssh_argv(gateway, key, user, _FW_COMBINED_REMOTE)
+    try:
+        proc = subprocess.run(
+            argv, capture_output=True, text=True, errors="replace", timeout=12, check=False
+        )
+    except (subprocess.TimeoutExpired, OSError, ValueError):
+        return ([], "")
+    return _split_ports_wan(proc.stdout)
+
+
+def _split_ports_wan(stdout: str) -> tuple[list[tuple[str, int]], str]:
+    """Split the combined probe stdout on its sentinels into (ports, wan_kind).
+
+    Everything between ``===PORTS===`` and ``===WAN===`` is the port block; the
+    remainder after ``===WAN===`` is the wan-kind token. A missing WAN sentinel
+    (defensive — the remote always emits both) leaves the WAN undetermined.
+    """
+    _, _, after_ports = stdout.partition(_FW_PORTS_MARK)
+    ports_blob, sep, wan_blob = after_ports.partition(_FW_WAN_MARK)
+    if not sep:
+        return (parse_fw_ports(after_ports), "")
+    return (parse_fw_ports(ports_blob), parse_wan_kind(wan_blob))
 
 
 # ─── speedtest probe parsers (pure) ──────────────────────────────────
