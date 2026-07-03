@@ -134,3 +134,36 @@ def test_backup_invalid_repo_filter_user_error(
     assert result.exit_code == 1
     combined = result.stdout + (result.stderr or "")
     assert "primary" in combined.lower()
+
+
+# ── _restic_env injects cloud creds by repo scheme (M8 fix) ──────────────
+def test_restic_env_injects_b2_creds(monkeypatch):
+    from sanctum_cli.commands import backup
+    monkeypatch.setattr(backup, "_load_password", lambda cfg: "pw")
+    monkeypatch.setattr(backup.keychain, "read", lambda account, service: f"{service}:val")
+    env = backup._restic_env(None, backup._Repo(label="primary", path="b2:bucket"))
+    assert env["RESTIC_PASSWORD"] == "pw"
+    assert env["B2_ACCOUNT_ID"] == "b2-account-id:val"
+    assert env["B2_ACCOUNT_KEY"] == "b2-application-key:val"
+    assert "AWS_ACCESS_KEY_ID" not in env
+
+
+def test_restic_env_injects_r2_s3_creds(monkeypatch):
+    from sanctum_cli.commands import backup
+    monkeypatch.setattr(backup, "_load_password", lambda cfg: "pw")
+    monkeypatch.setattr(backup.keychain, "read", lambda account, service: f"{service}:val")
+    for scheme in ("r2:bucket", "s3:bucket"):
+        env = backup._restic_env(None, backup._Repo(label="primary", path=scheme))
+        assert env["AWS_ACCESS_KEY_ID"] == "r2-access-key-id:val"
+        assert env["AWS_SECRET_ACCESS_KEY"] == "r2-secret-access-key:val"
+        assert env["AWS_DEFAULT_REGION"] == "auto"
+        assert "B2_ACCOUNT_ID" not in env
+
+
+def test_restic_env_local_repo_password_only(monkeypatch):
+    from sanctum_cli.commands import backup
+    monkeypatch.setattr(backup, "_load_password", lambda cfg: "pw")
+    monkeypatch.setattr(backup.keychain, "read", lambda account, service: "should-not-read")
+    env = backup._restic_env(None, backup._Repo(label="primary", path="/local/restic"))
+    assert env["RESTIC_PASSWORD"] == "pw"
+    assert "B2_ACCOUNT_ID" not in env and "AWS_ACCESS_KEY_ID" not in env
