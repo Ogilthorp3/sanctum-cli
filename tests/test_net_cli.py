@@ -148,6 +148,56 @@ def test_net_speedtest_no_test_human_output() -> None:
     assert "nat" in out
 
 
+# A fake host runner WITH the Firewalla present: a 2.5 GbE local NIC, plus the
+# Firewalla port probe returning a 1 GbE LAN hop (the real bottleneck) and a
+# PPPoE WAN. Exercises the newly-wired ('fw_ports',) + ('wan_kind',) tags E2E.
+SPEEDTEST_FW_PPPOE: dict[tuple[str, ...], str] = {
+    ("route",): "  interface: en7\n  gateway: 10.0.0.1\n",
+    ("link_speed",): "\tmedia: autoselect (2500Base-T <full-duplex>)\n\tstatus: active\n",
+    ("airport_ports",): "Hardware Port: Ethernet\nDevice: en7\n",
+    ("fw_ports",): "eth0\t2500\neth3\t1000\n",  # eth3 (1 GbE) is the slowest hop
+    ("wan_kind",): "pppoe",
+}
+
+
+def test_net_speedtest_json_renders_fw_hops_and_pppoe_band() -> None:
+    import json
+
+    fake = _SpeedFakeRunner(SPEEDTEST_FW_PPPOE)
+    with (
+        patch("sanctum_cli.commands.net._build_runner", return_value=fake),
+        patch("sanctum_cli.commands.net._firewalla_present", return_value=True),
+    ):
+        result = runner.invoke(app, ["net", "speedtest", "--no-test", "--json"])
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout)
+    # Both Firewalla port hops are added to the local NIC hop.
+    hop_names = [name for name, _ in payload["hops"]]
+    assert any("Firewalla eth0" in n for n in hop_names)
+    assert any("Firewalla eth3" in n for n in hop_names)
+    # The 1 GbE Firewalla LAN port is the path bottleneck (slower than the 2.5G NIC).
+    assert payload["ceiling_gbps"] == 1.0
+    assert "eth3" in payload["bottleneck"]
+    # The PPPoE band is emitted in the advice because wan_kind resolved to pppoe.
+    assert any("pppoe" in line.lower() for line in payload["advice"])
+    # The probe tags were actually read (the wiring, not a stub).
+    assert ("fw_ports",) in fake.calls
+    assert ("wan_kind",) in fake.calls
+
+
+def test_net_speedtest_human_renders_fw_hops_and_pppoe_band() -> None:
+    fake = _SpeedFakeRunner(SPEEDTEST_FW_PPPOE)
+    with (
+        patch("sanctum_cli.commands.net._build_runner", return_value=fake),
+        patch("sanctum_cli.commands.net._firewalla_present", return_value=True),
+    ):
+        result = runner.invoke(app, ["net", "speedtest", "--no-test"])
+    assert result.exit_code == 0, result.stdout
+    out = result.stdout.lower()
+    assert "firewalla eth3" in out  # the FW port hop rendered
+    assert "pppoe" in out  # the PPPoE advice band rendered
+
+
 # ─── net heal (Task 4 — dry-run + guarded --apply) ───────────────────
 #
 # The heal CLI reads posture via an injected CommandRunner (argv -> stdout), so
