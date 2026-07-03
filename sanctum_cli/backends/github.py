@@ -309,6 +309,28 @@ def _commit_and_push(target: Path, message: str) -> bool:
     status = _git(target, "status", "--porcelain", check=True)
     if not status.strip():
         return False
+    # Authoritative pre-push scan. ``git add -A`` stages the ENTIRE persistent
+    # clone, not just this run's files — a secret that entered the clone some
+    # other way (a prior run, a manual edit, an unrelated file dropped in the
+    # working tree) would ride along on the push. The wizard's Step-4 pre-scan
+    # only covers this run's ``written`` list, so it is UX, not a guarantee.
+    # Scan the actual staged set here and refuse before committing.
+    staged = _git(target, "diff", "--cached", "--name-only", "-z", check=True)
+    staged_paths = [target / rel for rel in staged.split("\0") if rel]
+    findings = secret_scanner.scan_paths(staged_paths)
+    if findings:
+        # Unstage everything (leave the working tree intact) so a re-run after
+        # remediation starts clean; then refuse.
+        _git(target, "reset", check=False)
+        _render_findings(findings)
+        msg = f"refused to push: {len(findings)} secret-scanner finding(s) in staged set"
+        raise UserError(
+            msg,
+            fix=(
+                "remove the offending content (or move it to your R2 bucket "
+                "via `sanctum backup run --recipe family`) and re-run."
+            ),
+        )
     _git(target, "commit", "-m", message)
     _git(target, "push", "origin", "HEAD", timeout=GH_TIMEOUT_S * 4)
     return True
