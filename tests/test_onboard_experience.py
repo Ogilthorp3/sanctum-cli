@@ -444,3 +444,51 @@ def test_interactive_ai_chapter_verified_key_persists_and_recap_says_connected(
     assert data["cli"]["providers"]["claude"]["via"] == "direct", data
     assert _recap_ai_status(out) == "connected", out
     assert "AI connected" in out, out
+
+
+# ── First Hello — the DOD1 finish line (fail-soft contract) ──────────────
+# The guided path's closing beat. It must reach the operator when installed,
+# and must NEVER turn a completed onboarding into a failure when it can't.
+
+def test_first_hello_absent_script_is_a_silent_skip(
+    tmp_path: "Path", monkeypatch: "pytest.MonkeyPatch"
+) -> None:
+    """No sanctum-first-hello.py installed → silent skip, no output, no raise."""
+    monkeypatch.setenv("HOME", str(tmp_path))  # a home with no ~/.sanctum/bin script
+    with patch("sanctum_cli.commands.onboard.console") as mock_console:
+        onboard._run_first_hello("Bert")  # must not raise
+    # Nothing printed — a haus with no First Hello installed just stays quiet.
+    assert not mock_console.print.called
+
+
+def test_first_hello_runs_script_and_passes_the_name(
+    tmp_path: "Path", monkeypatch: "pytest.MonkeyPatch"
+) -> None:
+    """Script present → announces + invokes it with SANCTUM_USER_NAME set."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    script = tmp_path / ".sanctum" / "bin" / "sanctum-first-hello.py"
+    script.parent.mkdir(parents=True)
+    script.write_text("#!/usr/bin/env python3\n")
+    with patch("subprocess.run") as mock_run, patch(
+        "sanctum_cli.commands.onboard.console"
+    ) as mock_console:
+        onboard._run_first_hello("Bert")
+    assert mock_run.called, "First Hello must invoke the installed script"
+    env = mock_run.call_args.kwargs.get("env", {})
+    assert env.get("SANCTUM_USER_NAME") == "Bert"
+    assert mock_console.print.called  # the "haus wants to say hello" beat
+
+
+def test_first_hello_never_breaks_onboarding_when_script_raises(
+    tmp_path: "Path", monkeypatch: "pytest.MonkeyPatch"
+) -> None:
+    """A finicky TTS / crashing script is suppressed — onboarding stays complete."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    script = tmp_path / ".sanctum" / "bin" / "sanctum-first-hello.py"
+    script.parent.mkdir(parents=True)
+    script.write_text("#!/usr/bin/env python3\n")
+    with patch(
+        "subprocess.run",
+        side_effect=OSError("no audio device"),
+    ), patch("sanctum_cli.commands.onboard.console"):
+        onboard._run_first_hello("Bert")  # must swallow the error, not raise
