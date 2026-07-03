@@ -127,7 +127,7 @@ def _all_green_inputs():
     return {
         "posture": _healthy_posture_diag(),
         "spine": SpineInfo(on_tailnet=True, tb5_up=True),
-        "daemon": DaemonInfo(loaded=True, last_result="healed"),
+        "daemon": DaemonInfo(loaded=True, last_result="healed", age_seconds=60, fresh=True),
         "identity": _stable_identity(),
         "topology": _topology_single(),
         "guardian": GuardianInfo(reachable=True, fresh=True, age_seconds=120),
@@ -316,9 +316,99 @@ def test_posture_unverified_is_unknown() -> None:
 
 def test_daemon_last_result_surfaced_in_detail() -> None:
     inp = _all_green_inputs()
-    inp["daemon"] = DaemonInfo(loaded=True, last_result="reverted")
+    inp["daemon"] = DaemonInfo(
+        loaded=True, last_result="reverted", age_seconds=30, fresh=True
+    )
     rep = build_status_report(**inp)
     daemon_row = next(r for r in rep.rows if r.label == "Heal daemon")
     assert "reverted" in daemon_row.detail
     # Loaded daemon is OK even if the last cycle reverted — it is running/guarding.
     assert daemon_row.status is RowStatus.OK
+
+
+# ─── MUST-FIX [HIGH]: a loaded-but-WEDGED daemon must NOT read GREEN ──
+#
+# The heal daemon is a *continuous-protection* layer: it is only doing its job if
+# it is heart-beating on its LaunchDaemon interval (HEAL_INTERVAL_S=120s). A daemon
+# that launchctl reports "loaded" but whose last heartbeat is hours old is WEDGED —
+# it is not guarding anything. The old assembler mapped loaded=True → OK
+# unconditionally (it discarded the heartbeat timestamp entirely), so a wedged
+# daemon read GREEN. These pin that a stale heartbeat degrades the row to DOWN and
+# drags the overall verdict to DEGRADED — mirroring how the guardian row already
+# gates on freshness.
+
+
+def test_daemon_loaded_but_stale_heartbeat_is_down_and_degraded() -> None:
+    # Loaded, but the last heartbeat is far older than the freshness window (a
+    # wedged daemon that stopped firing). It must NOT read OK/GREEN — the
+    # continuous-protection layer is effectively DOWN → overall DEGRADED.
+    inp = _all_green_inputs()
+    inp["daemon"] = DaemonInfo(
+        loaded=True, last_result="healed", age_seconds=7200, fresh=False
+    )
+    rep = build_status_report(**inp)
+    daemon_row = next(r for r in rep.rows if r.label == "Heal daemon")
+    assert daemon_row.status is RowStatus.DOWN
+    assert "stale" in daemon_row.detail.lower()
+    assert "7200s" in daemon_row.detail
+    assert rep.overall == "DEGRADED"
+
+
+def test_daemon_loaded_and_fresh_heartbeat_is_ok() -> None:
+    # Loaded AND heart-beating within the freshness window → OK, overall GREEN.
+    inp = _all_green_inputs()
+    inp["daemon"] = DaemonInfo(
+        loaded=True, last_result="healed", age_seconds=60, fresh=True
+    )
+    rep = build_status_report(**inp)
+    daemon_row = next(r for r in rep.rows if r.label == "Heal daemon")
+    assert daemon_row.status is RowStatus.OK
+    assert rep.overall == "GREEN"
+
+
+def test_daemon_loaded_unknown_age_is_ok_not_stale() -> None:
+    # Backward-compatible fail-open: if we could not compute the heartbeat age
+    # (no timestamp / unreadable), a loaded daemon is NOT declared stale — it
+    # stays OK (an unread freshness is not proof of a wedge, matching the
+    # fail-open-on-unknown doctrine of the roll-up).
+    inp = _all_green_inputs()
+    inp["daemon"] = DaemonInfo(
+        loaded=True, last_result="healed", age_seconds=None, fresh=None
+    )
+    rep = build_status_report(**inp)
+    daemon_row = next(r for r in rep.rows if r.label == "Heal daemon")
+    assert daemon_row.status is RowStatus.OK
+    assert rep.overall == "GREEN"
+
+
+def test_daemon_stop_token_is_down_no_loop_cap() -> None:
+    # The wrapper writes a "STOP …" heartbeat when the no-loop cap is hit (auto-heal
+    # paused). Even fresh, that is a protection outage — surface DOWN, not a benign
+    # "last: STOP" on an OK row.
+    inp = _all_green_inputs()
+    inp["daemon"] = DaemonInfo(
+        loaded=True,
+        last_result="STOP attempts=3/3 — no-loop cap; auto-heal paused",
+        age_seconds=60,
+        fresh=True,
+    )
+    rep = build_status_report(**inp)
+    daemon_row = next(r for r in rep.rows if r.label == "Heal daemon")
+    assert daemon_row.status is RowStatus.DOWN
+    assert rep.overall == "DEGRADED"
+
+
+def test_daemon_disabled_token_is_attention_kill_switch() -> None:
+    # The DISABLED kill-switch is an INTENTIONAL off (fail-safe), not a wedge — it
+    # is at-risk (no protection while off) but deliberate, so surface ATTENTION.
+    inp = _all_green_inputs()
+    inp["daemon"] = DaemonInfo(
+        loaded=True,
+        last_result="DISABLED kill-switch present — no-op",
+        age_seconds=60,
+        fresh=True,
+    )
+    rep = build_status_report(**inp)
+    daemon_row = next(r for r in rep.rows if r.label == "Heal daemon")
+    assert daemon_row.status is RowStatus.ATTENTION
+    assert rep.overall == "ATTENTION"

@@ -7,6 +7,7 @@ import socket
 import subprocess
 import time
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, TypeVar
 
@@ -735,9 +736,11 @@ _GUARDIAN_HEARTBEAT_PATH = "/home/pi/.sanctum/trust-guardian/heartbeat"
 _GUARDIAN_FRESH_S = 25 * 60  # 25 minutes
 _GUARDIAN_SSH_TIMEOUT_S = 8
 
-# The last-known heal-daemon result token pattern in the heartbeat log (the daemon
-# wrapper appends "<iso> <status ...>" lines; we surface the last line's status).
-_HEAL_HEARTBEAT_STATUS_RE = re.compile(r"^\S+\s+(.+)$")
+# The heal-daemon heartbeat log: the wrapper appends "<iso> <status ...>" lines each
+# cycle. A daemon launchctl still lists as "loaded" but whose last heartbeat is older
+# than this window is WEDGED (not firing on its interval) — so the status pane gates
+# the loaded->OK mapping on freshness, the same way the guardian row does.
+_HEAL_HEARTBEAT_FRESH_S = heal.HEAL_INTERVAL_S * 5  # ~10 min at the 120s default
 
 _P = TypeVar("_P")
 
@@ -757,18 +760,39 @@ def _status_probe_spine() -> net_status.SpineInfo:
     return net_status.SpineInfo(on_tailnet=on_tailnet, tb5_up=tb5_up)
 
 
-def _daemon_last_result() -> str | None:
-    """Best-effort: the status word from the last net-heal heartbeat line, or None."""
-    hb = heal._HEAL_HEARTBEAT_FILE
-    try:
-        text = hb.read_text(encoding="utf-8")
-    except OSError:
-        return None
+def _parse_daemon_heartbeat(
+    text: str, *, now: datetime | None = None
+) -> tuple[str | None, int | None, bool | None]:
+    """Parse the last heal heartbeat line into (last_status, age_seconds, fresh).
+
+    Empty log -> (None, None, None). When the last line has no parseable ISO
+    timestamp the status is still surfaced but age/fresh are None (fail-open: never
+    fabricate a stale reading). ``fresh`` is whether the heartbeat is younger than
+    ``_HEAL_HEARTBEAT_FRESH_S``; a loaded daemon with a stale heartbeat is WEDGED.
+    """
+    if now is None:
+        now = datetime.now()
     lines = [ln for ln in text.splitlines() if ln.strip()]
     if not lines:
+        return (None, None, None)
+    line = lines[-1].strip()
+    parts = line.split(maxsplit=1)
+    rest = parts[1] if len(parts) > 1 else ""
+    try:
+        hb = datetime.strptime(parts[0], "%Y-%m-%dT%H:%M:%S")
+    except ValueError:
+        return (line, None, None)
+    age = int((now - hb).total_seconds())
+    return (rest, age, age <= _HEAL_HEARTBEAT_FRESH_S)
+
+
+def _daemon_last_result() -> str | None:
+    """Best-effort: the status word from the last net-heal heartbeat line, or None."""
+    try:
+        text = heal._HEAL_HEARTBEAT_FILE.read_text(encoding="utf-8")
+    except OSError:
         return None
-    m = _HEAL_HEARTBEAT_STATUS_RE.match(lines[-1].strip())
-    return m.group(1) if m else None
+    return _parse_daemon_heartbeat(text)[0]
 
 
 def _status_probe_daemon() -> net_status.DaemonInfo:
@@ -780,7 +804,14 @@ def _status_probe_daemon() -> net_status.DaemonInfo:
     loaded, _ = _heal_launchctl(
         ["print", f"system/{heal.HEAL_DAEMON_LABEL}"], check=True
     )
-    return net_status.DaemonInfo(loaded=loaded, last_result=_daemon_last_result())
+    try:
+        text = heal._HEAL_HEARTBEAT_FILE.read_text(encoding="utf-8")
+    except OSError:
+        text = ""
+    last, age, fresh = _parse_daemon_heartbeat(text)
+    return net_status.DaemonInfo(
+        loaded=loaded, last_result=last, age_seconds=age, fresh=fresh
+    )
 
 
 def _status_probe_identity() -> IdentityDiagnosis:

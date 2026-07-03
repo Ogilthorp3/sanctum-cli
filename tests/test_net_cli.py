@@ -680,3 +680,62 @@ def test_net_status_all_probes_fail_renders_all_unknown() -> None:
     assert result.exit_code == 0, result.stdout
     for label in ("Posture", "Spine", "Heal daemon", "Identity", "Topology", "Guardian"):
         assert label in result.stdout
+
+
+# ─── heal-daemon heartbeat parsing (MUST-FIX): timestamp + freshness ──
+#
+# `_daemon_last_result` USED to regex only the status word and discard the ISO
+# timestamp, so a wedged daemon looked GREEN. The parser now keeps the timestamp
+# and computes the heartbeat age, so `_status_probe_daemon` can feed
+# age_seconds/fresh into the pure row. `_parse_daemon_heartbeat` is the pure core.
+
+
+def test_parse_daemon_heartbeat_extracts_status_and_age() -> None:
+    from datetime import datetime
+
+    from sanctum_cli.commands.net import _parse_daemon_heartbeat
+
+    # A fresh heartbeat 90s before "now".
+    hb_time = datetime(2026, 7, 2, 12, 0, 0)
+    now = datetime(2026, 7, 2, 12, 1, 30)  # +90s
+    text = "2026-07-02T11:58:00 healed spine=up rc=0\n" + f"{hb_time.strftime('%Y-%m-%dT%H:%M:%S')} healed spine=up rc=0\n"
+    last, age, fresh = _parse_daemon_heartbeat(text, now=now)
+    assert last == "healed spine=up rc=0"
+    assert age == 90
+    assert fresh is True
+
+
+def test_parse_daemon_heartbeat_stale_is_not_fresh() -> None:
+    from datetime import datetime
+
+    from sanctum_cli.commands.net import _parse_daemon_heartbeat
+
+    now = datetime(2026, 7, 2, 14, 0, 0)
+    text = "2026-07-02T12:00:00 healed spine=up rc=0\n"  # 2h old
+    last, age, fresh = _parse_daemon_heartbeat(text, now=now)
+    assert last == "healed spine=up rc=0"
+    assert age == 7200
+    assert fresh is False
+
+
+def test_parse_daemon_heartbeat_no_timestamp_yields_unknown_age() -> None:
+    from datetime import datetime
+
+    from sanctum_cli.commands.net import _parse_daemon_heartbeat
+
+    # A malformed line with no parseable ISO timestamp → status still surfaced, but
+    # age/fresh unknown (fail-open: we never fabricate a stale reading).
+    now = datetime(2026, 7, 2, 14, 0, 0)
+    text = "garbage-with-no-timestamp healed\n"
+    _last, age, fresh = _parse_daemon_heartbeat(text, now=now)
+    assert age is None
+    assert fresh is None
+
+
+def test_parse_daemon_heartbeat_empty_is_none() -> None:
+    from datetime import datetime
+
+    from sanctum_cli.commands.net import _parse_daemon_heartbeat
+
+    last, age, fresh = _parse_daemon_heartbeat("", now=datetime(2026, 7, 2, 14, 0, 0))
+    assert last is None and age is None and fresh is None
