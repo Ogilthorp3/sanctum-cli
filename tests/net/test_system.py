@@ -71,6 +71,43 @@ def test_make_real_runner_without_gateway_returns_empty_fw() -> None:
     probe.assert_not_called()
 
 
+def test_make_real_runner_serves_fw_ports_and_wan_kind() -> None:
+    with (
+        patch(
+            "sanctum_cli.net.system.firewalla_ports_and_wan_via_ssh",
+            return_value=([("eth0", 1000), ("eth3", 2500)], "pppoe"),
+        ),
+        patch("sanctum_cli.net.system.real_runner", return_value=""),
+    ):
+        runner = system.make_real_runner(fw_gateway="10.0.0.1", fw_key="/tmp/k")
+        # fw_ports is emitted as the "name<TAB>mbps" rows _probe_hops splits on.
+        assert runner(("fw_ports",)) == "eth0\t1000\neth3\t2500"
+        assert runner(("wan_kind",)) == "pppoe"
+
+
+def test_make_real_runner_caches_ports_wan_single_probe() -> None:
+    with (
+        patch(
+            "sanctum_cli.net.system.firewalla_ports_and_wan_via_ssh",
+            return_value=([("eth0", 1000)], "dhcp"),
+        ) as probe,
+        patch("sanctum_cli.net.system.real_runner", return_value=""),
+    ):
+        runner = system.make_real_runner(fw_gateway="10.0.0.1", fw_key="/tmp/k")
+        runner(("fw_ports",))
+        runner(("wan_kind",))
+    # One SSH round-trip serves both tags (separate cache from the wan_ip/mac probe).
+    assert probe.call_count == 1
+
+
+def test_make_real_runner_without_gateway_returns_empty_ports_wan() -> None:
+    with patch("sanctum_cli.net.system.firewalla_ports_and_wan_via_ssh") as probe:
+        runner = system.make_real_runner(fw_gateway=None, fw_key="/tmp/k")
+        assert runner(("fw_ports",)) == ""
+        assert runner(("wan_kind",)) == ""
+    probe.assert_not_called()
+
+
 def test_firewalla_wan_via_ssh_parses_mac_and_ip() -> None:
     def fake_run(cmd, **kwargs):
         return subprocess.CompletedProcess(cmd, 0, stdout="aa:bb:cc:dd:ee:ff\n9.9.9.9\n", stderr="")

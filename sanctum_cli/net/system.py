@@ -410,19 +410,39 @@ def live_throughput(
 
 
 def make_real_runner(*, fw_gateway: str | None, fw_key: str | None) -> Runner:
-    """A Runner that serves fw_wan_ip/fw_wan_mac from one cached Firewalla SSH
-    probe (only if a gateway + key are available) and delegates all other tags
-    to real_runner."""
-    cache: dict[str, tuple[str, str]] = {}
+    """A Runner that serves the Firewalla tags from cached SSH probes and
+    delegates every other tag to real_runner.
+
+    ``fw_wan_ip`` / ``fw_wan_mac`` come from one cached :func:`firewalla_wan_via_ssh`
+    round-trip; ``fw_ports`` / ``wan_kind`` come from ONE separate cached
+    :func:`firewalla_ports_and_wan_via_ssh` round-trip (both tags share it, so the
+    speedtest reads both facts in a single SSH). Every Firewalla probe is gated on
+    a gateway + key being available — otherwise the tag returns ``""`` and the
+    caller fail-softs (no FW hops, no PPPoE band)."""
+    wan_cache: dict[str, tuple[str, str]] = {}
+    ports_cache: dict[str, tuple[list[tuple[str, int]], str]] = {}
 
     def runner(tag: tuple[str, ...]) -> str:
         if tag in (("fw_wan_ip",), ("fw_wan_mac",)):
-            if "fw" not in cache:
-                cache["fw"] = (
+            if "fw" not in wan_cache:
+                wan_cache["fw"] = (
                     firewalla_wan_via_ssh(fw_gateway, fw_key) if fw_gateway and fw_key else ("", "")
                 )
-            ip, mac = cache["fw"]
+            ip, mac = wan_cache["fw"]
             return ip if tag == ("fw_wan_ip",) else mac
+        if tag in (("fw_ports",), ("wan_kind",)):
+            if "fw" not in ports_cache:
+                ports_cache["fw"] = (
+                    firewalla_ports_and_wan_via_ssh(fw_gateway, fw_key)
+                    if fw_gateway and fw_key
+                    else ([], "")
+                )
+            ports, wan_kind = ports_cache["fw"]
+            if tag == ("wan_kind",):
+                return wan_kind
+            # Serialize the port hops back into the "name<TAB>mbps" rows that
+            # commands.net._probe_hops splits on.
+            return "\n".join(f"{name}\t{mbps}" for name, mbps in ports)
         return real_runner(tag)
 
     return runner
