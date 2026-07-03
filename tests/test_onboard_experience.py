@@ -451,7 +451,7 @@ def test_interactive_ai_chapter_verified_key_persists_and_recap_says_connected(
 # and must NEVER turn a completed onboarding into a failure when it can't.
 
 def test_first_hello_absent_script_is_a_silent_skip(
-    tmp_path: "Path", monkeypatch: "pytest.MonkeyPatch"
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """No sanctum-first-hello.py installed → silent skip, no output, no raise."""
     monkeypatch.setenv("HOME", str(tmp_path))  # a home with no ~/.sanctum/bin script
@@ -462,7 +462,7 @@ def test_first_hello_absent_script_is_a_silent_skip(
 
 
 def test_first_hello_runs_script_and_passes_the_name(
-    tmp_path: "Path", monkeypatch: "pytest.MonkeyPatch"
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Script present → announces + invokes it with SANCTUM_USER_NAME set."""
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -480,7 +480,7 @@ def test_first_hello_runs_script_and_passes_the_name(
 
 
 def test_first_hello_never_breaks_onboarding_when_script_raises(
-    tmp_path: "Path", monkeypatch: "pytest.MonkeyPatch"
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A finicky TTS / crashing script is suppressed — onboarding stays complete."""
     monkeypatch.setenv("HOME", str(tmp_path))
