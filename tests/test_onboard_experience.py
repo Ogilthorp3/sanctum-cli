@@ -455,6 +455,7 @@ def test_first_hello_absent_script_is_a_silent_skip(
 ) -> None:
     """No sanctum-first-hello.py installed → silent skip, no output, no raise."""
     monkeypatch.setenv("HOME", str(tmp_path))  # a home with no ~/.sanctum/bin script
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)  # env-independent home
     with patch("sanctum_cli.commands.onboard.console") as mock_console:
         onboard._run_first_hello("Bert")  # must not raise
     # Nothing printed — a haus with no First Hello installed just stays quiet.
@@ -466,6 +467,11 @@ def test_first_hello_runs_script_and_passes_the_name(
 ) -> None:
     """Script present → announces + invokes it with SANCTUM_USER_NAME set."""
     monkeypatch.setenv("HOME", str(tmp_path))
+    # Pin home directly, not just via $HOME: _run_first_hello resolves the script
+    # through Path.home(), and relying on the env alone made this test flake once
+    # in a full-suite run when home resolved to a script-less dir. Pinning makes
+    # it hermetic regardless of ambient process state.
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
     script = tmp_path / ".sanctum" / "bin" / "sanctum-first-hello.py"
     script.parent.mkdir(parents=True)
     script.write_text("#!/usr/bin/env python3\n")
@@ -484,6 +490,7 @@ def test_first_hello_never_breaks_onboarding_when_script_raises(
 ) -> None:
     """A finicky TTS / crashing script is suppressed — onboarding stays complete."""
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)  # env-independent home
     script = tmp_path / ".sanctum" / "bin" / "sanctum-first-hello.py"
     script.parent.mkdir(parents=True)
     script.write_text("#!/usr/bin/env python3\n")
