@@ -149,6 +149,61 @@ def test_iface_is_wifi_unknown_iface_returns_none() -> None:
     assert system.iface_is_wifi("en9", listing) is None
 
 
+# ─── parse_fw_ports (pure) ───────────────────────────────────────────
+
+
+def test_parse_fw_ports_from_sys_class_net_speed_lines() -> None:
+    # The remote emits one "name<TAB>mbps" row per link-up WAN/LAN port
+    # (read from /sys/class/net/<dev>/speed). A -1 / 0 / unknown speed is dropped.
+    blob = "eth0\t1000\neth3\t2500\n"
+    assert system.parse_fw_ports(blob) == [("eth0", 1000), ("eth3", 2500)]
+
+
+def test_parse_fw_ports_drops_unknown_and_malformed() -> None:
+    # -1 (link down, per the kernel), a blank speed, and a junk row are all dropped.
+    blob = "eth0\t1000\neth1\t-1\neth2\t\ngarbage-line\neth3\t2500\n"
+    assert system.parse_fw_ports(blob) == [("eth0", 1000), ("eth3", 2500)]
+
+
+def test_parse_fw_ports_empty_returns_empty_list() -> None:
+    assert system.parse_fw_ports("") == []
+    assert system.parse_fw_ports("\n\n") == []
+
+
+def test_parse_fw_ports_tolerates_ethtool_speed_rows() -> None:
+    # A remote that shells `ethtool <dev>` may emit "name<TAB>2500Mb/s" style;
+    # the parser reads the leading integer of the Mbps field either way.
+    blob = "eth0\t1000Mb/s\neth3\t2500Mb/s\n"
+    assert system.parse_fw_ports(blob) == [("eth0", 1000), ("eth3", 2500)]
+
+
+# ─── parse_wan_kind (pure) ───────────────────────────────────────────
+
+
+def test_parse_wan_kind_pppoe_from_ppp_iface() -> None:
+    # `ip link show type ppp` output naming a pppN iface -> pppoe.
+    out = "3: ppp0: <POINTOPOINT,MULTICAST,NOARP,UP,LOWER_UP> mtu 1492 qdisc fq_codel\n"
+    assert system.parse_wan_kind(out) == "pppoe"
+
+
+def test_parse_wan_kind_pppoe_bare_token() -> None:
+    assert system.parse_wan_kind("pppoe\n") == "pppoe"
+
+
+def test_parse_wan_kind_dhcp() -> None:
+    assert system.parse_wan_kind("dhcp\n") == "dhcp"
+
+
+def test_parse_wan_kind_static() -> None:
+    assert system.parse_wan_kind("static\n") == "static"
+
+
+def test_parse_wan_kind_empty_or_unknown_returns_empty() -> None:
+    assert system.parse_wan_kind("") == ""
+    assert system.parse_wan_kind("   \n") == ""
+    assert system.parse_wan_kind("something-else\n") == ""
+
+
 def test_parse_speedtest_cli_json() -> None:
     blob = '{"download": {"bandwidth": 987500000}, "upload": {"bandwidth": 123000000}}'
     # bandwidth is bytes/sec -> *8/1e6 = Mbps

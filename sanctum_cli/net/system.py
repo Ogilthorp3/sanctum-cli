@@ -170,6 +170,51 @@ def parse_link_speed_mbps(text: str) -> int | None:
     return None
 
 
+_FW_PORT_MBPS = re.compile(r"^(\d+)")
+
+
+def parse_fw_ports(blob: str) -> list[tuple[str, int]]:
+    """Parse the Firewalla port probe into (portname, link-Mbps) rows.
+
+    The remote emits one ``name<TAB>mbps`` row per WAN/LAN port, reading the
+    link rate from ``/sys/class/net/<dev>/speed`` (or the leading integer of an
+    ``ethtool`` speed field, e.g. ``2500Mb/s``). A row whose speed is missing,
+    non-positive (the kernel reports ``-1`` for a link-down iface), or malformed
+    is dropped — only known, up ports become hops. Order is preserved.
+    """
+    ports: list[tuple[str, int]] = []
+    for line in blob.splitlines():
+        parts = line.split("\t")
+        if len(parts) != 2:
+            continue
+        name = parts[0].strip()
+        m = _FW_PORT_MBPS.match(parts[1].strip())
+        if not name or m is None:
+            continue
+        mbps = int(m.group(1))
+        if mbps > 0:
+            ports.append((name, mbps))
+    return ports
+
+
+def parse_wan_kind(text: str) -> str:
+    """Classify the WAN uplink kind from a probe blob → ``pppoe``/``dhcp``/``static``/``""``.
+
+    PPPoE is detected first (it is the load-bearing signal — it drives the
+    CPU-bound advice band): a ``pppN`` interface in ``ip link show type ppp``
+    output, or a bare ``pppoe`` token. Otherwise a bare ``dhcp`` / ``static``
+    token classifies the addressing method. An empty, whitespace-only, or
+    unrecognized blob returns ``""`` (undetermined — no band emitted).
+    """
+    low = text.lower()
+    if "pppoe" in low or re.search(r"\bppp\d+\b", low):
+        return "pppoe"
+    for token in ("dhcp", "static"):
+        if re.search(rf"\b{token}\b", low):
+            return token
+    return ""
+
+
 def iface_is_wifi(iface: str, hardware_ports: str) -> bool | None:
     """True if `iface` is the Wi-Fi port per `networksetup -listallhardwareports`.
 
