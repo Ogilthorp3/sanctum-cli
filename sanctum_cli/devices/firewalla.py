@@ -68,8 +68,11 @@ _DEFAULT_BRIDGE_URL = "http://127.0.0.1:1984"
 
 # The durable key-auth host:port for the SSH fallback transport. The key path
 # itself is resolved from instance.yaml (``firewalla.ssh_key``) — never
-# hardcoded — so a contributor points it at their own box.
-_SSH_HOST = "firewalla.local"
+# hardcoded — so a contributor points it at their own box. The host defaults
+# to the Firewalla mDNS product name (network-relative, works on the beta
+# user's LAN too), overridable via env for a renamed box or a static IP.
+_SSH_HOST_ENV = "SANCTUM_FIREWALLA_SSH_HOST"
+_SSH_HOST = os.environ.get(_SSH_HOST_ENV, "firewalla.local")
 _SSH_PORT = 22
 _SSH_PROBE_TIMEOUT_S = 1.0
 
