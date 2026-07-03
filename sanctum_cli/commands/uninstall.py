@@ -43,18 +43,27 @@ from rich.prompt import Confirm
 
 console = Console()
 
+# (service, account). Names verified against the real write sites — the old
+# list had drifted, so some keys SURVIVED 'uninstall': 'gemini-api-key' was
+# never written (it's google-ai-api-key) and 'b2-application-key-id' should be
+# 'b2-account-id'. 'firewalla-bridge-token' is a FILE (~/.sanctum/secrets), not
+# a Keychain entry, so it's dropped here. The restic passphrase
+# (sanctum-backup-key) is deliberately PRESERVED: uninstall keeps the cloud
+# bucket + ~/.sanctum, and that passphrase is the only thing that decrypts the
+# preserved backups — revoking it would strand them.
 KEYCHAIN_SERVICES = [
-    "sanctum/openrouter-api-key",
-    "sanctum/openrouter-mgmt-key",
-    "sanctum/openrouter-mgmt-key-backup",
-    "sanctum/anthropic-api-key",
-    "sanctum/gemini-api-key",
-    "sanctum/firewalla-bridge-token",
-    "sanctum/r2-account-id",
-    "sanctum/r2-access-key-id",
-    "sanctum/r2-secret-access-key",
-    "sanctum/b2-application-key-id",
-    "sanctum/b2-application-key",
+    ("openrouter-api-key", "sanctum"),
+    ("openrouter-mgmt-key", "sanctum"),
+    ("openrouter-mgmt-key-backup", "sanctum"),
+    ("anthropic-api-key", "sanctum"),
+    ("google-ai-api-key", "sanctum"),   # was gemini-api-key (never written)
+    ("r2-account-id", "sanctum"),
+    ("r2-access-key-id", "sanctum"),
+    ("r2-secret-access-key", "sanctum"),
+    ("b2-account-id", "sanctum"),        # was b2-application-key-id
+    ("b2-application-key", "sanctum"),
+    ("bell-hub-admin", "admin"),         # default device-admin entries
+    ("orbi-admin", "admin"),
 ]
 
 
@@ -138,12 +147,13 @@ def _bootout_and_delete_launchagents() -> list[str]:
 
 
 def _revoke_keychain_entries() -> list[str]:
-    """Delete every known sanctum Keychain entry. Returns list of services
-    actually deleted (some may not exist on a partial install)."""
+    """Delete every known sanctum Keychain entry, each under its PAIRED account
+    (not a hardcoded 'sanctum' — device-admin entries live under 'admin').
+    Returns the services actually deleted (some may not exist on a partial
+    install)."""
     deleted = []
-    for service in KEYCHAIN_SERVICES:
-        # `-a sanctum` for account; the service name is the full path.
-        if revoke_keychain_entry("sanctum", service.removeprefix("sanctum/")):
+    for service, account in KEYCHAIN_SERVICES:
+        if revoke_keychain_entry(account, service):
             deleted.append(service)
     return deleted
 

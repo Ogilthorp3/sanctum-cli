@@ -416,6 +416,13 @@ def keys_backup_top(
     keys_backup_cmd.keys_backup_command(out=out, yes=yes)
 
 
+@keys_app.command("restore", help="Restore Keychain entries from an encrypted `keys backup` bundle.")
+def keys_restore_top(
+    path: Annotated[Path, typer.Argument(help="The encrypted bundle to restore from.")],
+) -> None:
+    keys_backup_cmd.keys_restore_command(path=path)
+
+
 @app.command("code", help="Forced Claude routing — coding-oriented prompt.")
 def code_top(
     prompt: Annotated[
