@@ -20,7 +20,6 @@ from sanctum_cli.net.status import (
     build_status_report,
 )
 
-
 # ─── input fixtures (the six subsystem value objects) ─────────────────
 
 
