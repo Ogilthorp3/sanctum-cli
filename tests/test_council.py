@@ -1020,6 +1020,20 @@ class TestSayTurn:
             seen["messages"] = messages
             yield "Both, I checked."
 
+        # Hermetic tools: the real agent_list/logs_tail read LIVE host state whose
+        # size drifts with the running-agent count — agent_list alone measured
+        # 9991 bytes on a busy box, past FINDINGS_MAX_BYTES (8000), so
+        # _flatten_findings truncated logs_tail out of the prompt and this test
+        # flaked. Stub run_tool with small deterministic results so it exercises
+        # the FLATTENING/accumulation logic, not the host. (This test asserts on
+        # the voice prompt, not audit lines, so stubbing run_tool whole is safe.)
+        monkeypatch.setattr(
+            cc.council_tools,
+            "run_tool",
+            lambda name, params, **kw: cc.council_tools.ToolResult(
+                content=f"{name} ran", is_error=False
+            ),
+        )
         monkeypatch.setattr(cc, "_stream", fake_stream)
         transcript = cc.Transcript()
         cc._say_turn(seat, transcript, "agents and logs?")
