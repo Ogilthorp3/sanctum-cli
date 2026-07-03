@@ -2247,7 +2247,19 @@ def _op_write_item(*, title: str, value: str) -> None:
     default suite. Any failure raises (the caller swallows it); the daily
     drift-sync re-pushes from 1P later regardless, so a transient op miss is not
     fatal to custody.
+
+    SECURITY — the credential NEVER rides on argv. A value passed as an
+    ``op item ... credential=<value>`` argument is visible to any same-box ``ps``
+    for the (sub-second, same-uid) life of the process. Instead we feed ``op`` a
+    JSON item template on **stdin**: ``op item create`` reads a piped template via
+    the trailing ``-`` sentinel, and ``op item edit`` auto-consumes a piped
+    template — so the secret travels only through the child's stdin pipe, never
+    the command line. (The ``op read`` existence probe carries only the item REF,
+    not the value.) Best-effort/off-argv is the actionable half of the onboard
+    argv audit; the guaranteed-tier ``security -w`` argv is a separate, documented
+    same-uid trade-off left untouched.
     """
+    import json
     import subprocess
 
     op_bin = shutil.which("op")
@@ -2257,7 +2269,7 @@ def _op_write_item(*, title: str, value: str) -> None:
     ref = f"op://{_OP_VAULT}/{title}/credential"
     # `op item edit` updates an existing item; if it is absent, create it. We probe
     # existence with `op read` (cheap, service-account mode is sub-second) so we
-    # don't depend on edit-vs-create error strings.
+    # don't depend on edit-vs-create error strings. The ref carries no secret.
     exists = (
         subprocess.run(
             [op_bin, "read", ref],
@@ -2268,19 +2280,38 @@ def _op_write_item(*, title: str, value: str) -> None:
         ).returncode
         == 0
     )
+    # The secret rides ONLY inside this JSON template on stdin — never argv. A
+    # single CONCEALED field labelled `credential` keeps `op read
+    # op://<vault>/<title>/credential` (the probe above) resolving.
+    template = json.dumps(
+        {
+            "title": title,
+            "category": "PASSWORD",
+            "fields": [
+                {
+                    "id": "credential",
+                    "type": "CONCEALED",
+                    "label": "credential",
+                    "value": value,
+                }
+            ],
+        },
+        ensure_ascii=False,  # keep non-ASCII secrets literal in the utf-8 stdin stream
+    )
     if exists:
-        cmd = [op_bin, "item", "edit", title, f"credential={value}", "--vault", _OP_VAULT]
+        # `op item edit <item>` auto-reads a piped item template from stdin.
+        cmd = [op_bin, "item", "edit", title, "--vault", _OP_VAULT]
     else:
-        cmd = [
-            op_bin,
-            "item",
-            "create",
-            f"--title={title}",
-            "--category=password",
-            f"--vault={_OP_VAULT}",
-            f"credential={value}",
-        ]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120, check=False)
+        # Trailing `-` tells `op item create` to read the template from stdin.
+        cmd = [op_bin, "item", "create", f"--vault={_OP_VAULT}", "-"]
+    proc = subprocess.run(
+        cmd,
+        input=template,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
     if proc.returncode != 0:
         msg = f"1Password write failed for {title!r}: {proc.stderr.strip() or 'unknown error'}"
         raise LocalError(msg)

@@ -25,6 +25,7 @@ design (we only emit the mapping it consumes).
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING, Any
 
 import yaml
@@ -129,6 +130,92 @@ def test_mirror_best_effort_op_failure_still_emits_mapping(
     # Must NOT raise even though the op write blew up.
     onboard._mirror_to_trifecta(service="bell-hub-admin", account="admin", secret="s3cret")
     assert len(map_calls) == 1
+
+
+# ── _op_write_item: the credential NEVER rides on argv (stdin only) ──
+
+
+class _FakeProc:
+    """Minimal stand-in for a ``subprocess.CompletedProcess``."""
+
+    def __init__(self, returncode: int = 0) -> None:
+        self.returncode = returncode
+        self.stdout = ""
+        self.stderr = ""
+
+
+def _run_op_write_capturing(
+    monkeypatch: pytest.MonkeyPatch, *, exists: bool, secret: str
+) -> list[dict[str, Any]]:
+    """Drive the REAL ``_op_write_item`` with only ``subprocess.run`` mocked.
+
+    The ``op read`` existence probe's return code selects the branch: rc 0 → the
+    item exists → ``edit``; rc != 0 → ``create``. Returns one record per
+    ``subprocess.run`` call: ``{"argv", "input"}``.
+    """
+    calls: list[dict[str, Any]] = []
+
+    def fake_run(argv: list[str], *args: Any, **kwargs: Any) -> _FakeProc:
+        calls.append({"argv": argv, "input": kwargs.get("input")})
+        # No shell — argv-not-shell is the boundary contract.
+        assert kwargs.get("shell", False) is False
+        if argv[1] == "read":  # existence probe
+            return _FakeProc(0 if exists else 1)
+        return _FakeProc(0)
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    monkeypatch.setattr("sanctum_cli.commands.onboard.shutil.which", lambda _b: "/usr/bin/op")
+
+    onboard._op_write_item(title="Sanctum - Bell Hub Admin", value=secret)
+    return calls
+
+
+def test_op_write_create_secret_off_argv_and_in_stdin(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CREATE path: the secret is absent from every argv and present in ``input=``.
+
+    A value on ``op item create ... credential=<value>`` argv would be visible to
+    any same-box ``ps`` for the life of the (sub-second) process. The fix pipes a
+    JSON item template on stdin instead (``op item create ... -``).
+    """
+    secret = "n0t-on-argv-$(whoami)-café-;rm -rf /"
+    calls = _run_op_write_capturing(monkeypatch, exists=False, secret=secret)
+
+    # Two calls: the `op read` existence probe, then the `op item create` write.
+    assert len(calls) == 2
+    assert calls[0]["argv"][1] == "read"
+    # The secret appears in NO argv token of ANY call.
+    for c in calls:
+        assert all(secret not in tok for tok in c["argv"])
+    write = calls[-1]
+    assert write["argv"][1:3] == ["item", "create"]
+    assert write["argv"][-1] == "-"  # stdin sentinel
+    # The secret rides ONLY in the piped stdin template.
+    assert write["input"] is not None
+    assert secret in write["input"]
+    template = json.loads(write["input"])
+    assert template["fields"][0]["label"] == "credential"
+    assert template["fields"][0]["value"] == secret
+
+
+def test_op_write_edit_secret_off_argv_and_in_stdin(monkeypatch: pytest.MonkeyPatch) -> None:
+    """EDIT path: the secret is absent from every argv and present in ``input=``.
+
+    When the item already exists the old code shelled ``op item edit <t>
+    credential=<value>`` — secret on argv. The fix feeds ``op item edit`` a piped
+    template on stdin instead, so the value never appears on the command line.
+    """
+    secret = "edit-path-secret-`id`-%25-ï"
+    calls = _run_op_write_capturing(monkeypatch, exists=True, secret=secret)
+
+    for c in calls:
+        assert all(secret not in tok for tok in c["argv"])
+    write = calls[-1]
+    assert write["argv"][1:3] == ["item", "edit"]
+    assert not any(tok.startswith("credential=") for tok in write["argv"])
+    assert write["input"] is not None
+    assert secret in write["input"]
+    template = json.loads(write["input"])
+    assert template["fields"][0]["value"] == secret
 
 
 # ── _haus_trifecta_present detection ─────────────────────────────────

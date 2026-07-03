@@ -20,16 +20,20 @@ ADDITIVE onboard gate:
    boundary; test the hostile input, not the happy path").** A captured admin
    password is a *caller-supplied string crossing into an external CLI* twice:
    the GUARANTEED Keychain tier (``security add-generic-password -w <value>``) and
-   the best-effort 1P mirror (``op item ... credential=<value>``). The contract is
-   argv-not-shell: the value MUST ride as ONE argv element so a password carrying
-   ``;``, ``$``, backticks, a leading ``--flag`` lookalike, ``%``, a space, AND a
-   non-ASCII char neither injects a shell command nor gets misread as a CLI flag.
-   We drive the REAL ``_keychain_write`` / ``_op_write_item`` (cheap subprocess
-   boundary — NOT mocked away per CLAUDE.md sub-rule 3) and mock ONLY
-   ``subprocess.run`` (the real socket/process), asserting on the exact argv the
-   boundary built. The expectation is derived from the boundary's own contract
-   (the value is the element after ``-w`` / the ``credential=`` token), NOT from
-   re-using the production string — a shared-assumption bug can't hide.
+   the best-effort 1P mirror (``op item create/edit`` fed a JSON template on
+   STDIN). The Keychain tier's contract is argv-not-shell: the value rides as ONE
+   argv element so a password carrying ``;``, ``$``, backticks, a leading
+   ``--flag`` lookalike, ``%``, a space, AND a non-ASCII char neither injects a
+   shell command nor gets misread as a CLI flag. The 1P tier's contract is
+   stronger — the value NEVER touches argv at all; it rides only inside the piped
+   stdin template, so no same-box ``ps`` can observe it. We drive the REAL
+   ``_keychain_write`` / ``_op_write_item`` (cheap subprocess boundary — NOT
+   mocked away per CLAUDE.md sub-rule 3) and mock ONLY ``subprocess.run`` (the
+   real socket/process), asserting on the exact argv/stdin the boundary built. The
+   expectation is derived from the boundary's own contract (the value is the
+   element after ``-w`` for Keychain / is absent from argv and present in
+   ``input=`` for op), NOT from re-using the production string — a
+   shared-assumption bug can't hide.
 
 Nothing here touches a real Keychain, ``op`` binary, ``sops``, SSH, a live device,
 or the host instance.yaml — every external call is a module-level seam.
@@ -38,6 +42,7 @@ or the host instance.yaml — every external call is a module-level seam.
 from __future__ import annotations
 
 import getpass
+import json
 import warnings
 from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
@@ -239,17 +244,19 @@ def test_keychain_write_passes_hostile_value_as_single_argv_element(
     assert "$HOME" not in argv  # the literal token never becomes its own argv element
 
 
-def test_op_mirror_passes_hostile_value_verbatim_in_credential_token(
+def test_op_mirror_keeps_hostile_value_off_argv_and_in_stdin(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The best-effort 1P tier: the hostile value rides verbatim in ``credential=<value>``.
+    """The best-effort 1P tier: the hostile value NEVER touches argv — it rides stdin.
 
     Drives the REAL ``_op_write_item`` with ONLY ``subprocess.run`` mocked (the
-    ``op read`` existence probe returns 'absent' → the create path). The captured
-    value is bound INSIDE the ``credential=`` token, so a value that itself
-    contains ``--vault Evil`` cannot be reinterpreted as separate ``op`` flags.
+    ``op read`` existence probe returns 'absent' → the create path). The credential
+    is fed to ``op`` as a JSON item template on stdin (``op item create ... -``), so
+    a same-box ``ps`` can never observe it and a value that itself contains
+    ``--vault Evil`` cannot be reinterpreted as separate ``op`` flags. This pins the
+    fix that moved the secret off the process command line.
     """
-    calls: list[list[str]] = []
+    calls: list[dict[str, Any]] = []
 
     class _Rec:
         def __init__(self, rc: int) -> None:
@@ -258,7 +265,7 @@ def test_op_mirror_passes_hostile_value_verbatim_in_credential_token(
             self.stdout = ""
 
     def fake_run(argv: list[str], *a: Any, **k: Any) -> _Rec:
-        calls.append(argv)
+        calls.append({"argv": argv, "input": k.get("input")})
         assert k.get("shell", False) is False
         if argv[1] == "read":  # existence probe → report absent so we hit `create`
             return _Rec(1)
@@ -269,15 +276,24 @@ def test_op_mirror_passes_hostile_value_verbatim_in_credential_token(
 
     onboard._op_write_item(title="Sanctum - Bell Hub Admin", value=HOSTILE_PASSWORD)
 
-    create = calls[-1]
-    assert create[1:3] == ["item", "create"]  # `op item create ...`
-    cred_tokens = [a for a in create if a.startswith("credential=")]
-    # Exactly one ``credential=`` token, carrying the value verbatim (single element).
-    assert cred_tokens == [f"credential={HOSTILE_PASSWORD}"]
-    # The hostile ``--vault Evil`` inside the password did NOT become its own flag:
-    # the only ``--vault`` is the real one we set to the Sanctum vault.
+    # The secret appears in NO argv element of ANY call (probe or write).
+    for c in calls:
+        assert all(HOSTILE_PASSWORD not in tok for tok in c["argv"])
+    # The hostile ``--vault Evil`` inside the password did NOT become its own flag,
+    # and no bare ``credential=<value>`` argv token survives anywhere.
+    create = calls[-1]["argv"]
+    assert create[1:3] == ["item", "create"]  # `op item create ... -`
+    assert create[-1] == "-"  # trailing stdin sentinel
     assert create.count("--vault=Sanctum") == 1
     assert "Evil" not in create
+    assert not any(tok.startswith("credential=") for tok in create)
+    # The value rides verbatim inside the piped stdin template (and ONLY there).
+    piped = calls[-1]["input"]
+    assert piped is not None
+    assert HOSTILE_PASSWORD in piped
+    template = json.loads(piped)
+    cred_fields = [f for f in template["fields"] if f["label"] == "credential"]
+    assert [f["value"] for f in cred_fields] == [HOSTILE_PASSWORD]
 
 
 def test_store_device_secret_threads_hostile_value_through_both_tiers(
