@@ -7,8 +7,9 @@ import socket
 import subprocess
 import time
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any, TypeVar
 
 import typer
 from rich.console import Console
@@ -21,7 +22,19 @@ from sanctum_cli.devices import intents, rails, registry, sagemcom
 from sanctum_cli.devices import orbi as orbi_provider
 from sanctum_cli.devices.base import Capability, Creds, DeviceError, NetContext, OpResult
 from sanctum_cli.errors import ExitCode, LocalError, SanctumError
-from sanctum_cli.net import detect, heal, playbooks, render, safety, speedtest, system, verify
+from sanctum_cli.net import (
+    detect,
+    heal,
+    playbooks,
+    render,
+    safety,
+    speedtest,
+    system,
+    verify,
+)
+from sanctum_cli.net import (
+    status as net_status,
+)
 from sanctum_cli.net.types import SpeedReport, Verdict
 
 if TYPE_CHECKING:
@@ -29,7 +42,8 @@ if TYPE_CHECKING:
 
     from sanctum_cli.devices.base import DeviceProvider
     from sanctum_cli.net.detect import HttpProbe, Runner
-    from sanctum_cli.net.link import CommandRunner
+    from sanctum_cli.net.link import CommandRunner, IdentityDiagnosis
+    from sanctum_cli.net.types import TopologyReport
 
 console = Console()
 err_console = Console(stderr=True)
@@ -704,6 +718,234 @@ def net_heal(
     # wrapper's no-loop counter keys on this token (NOT the human prose), so it
     # accrues the MAX_HEAL_ATTEMPTS cap instead of resetting on the word "healed".
     _emit_heal_result("reverted")
+
+
+# ─── status (one-glance whole-node network roll-up) ──────────────────
+#
+# `sanctum net status` collapses what today takes 3-4 commands (+ an SSH to the
+# Firewalla) into ONE read-only pane. Each subsystem is gathered behind its own
+# module-level probe seam (so tests patch them with zero live calls); each seam is
+# wrapped by `_safe_probe` so a raised probe → that row degrades to UNKNOWN and the
+# pane still renders (fail-closed per row, never a crash). The gathered value
+# objects feed the pure `net_status.build_status_report` assembler; the result is
+# rendered as an apple-like rich panel. READ-ONLY: no mutation, no sudo.
+
+# The Firewalla trust-guardian heartbeat file (epoch seconds) + its freshness
+# window. FRESH when the heartbeat is younger than this; STALE otherwise.
+_GUARDIAN_HEARTBEAT_PATH = "/home/pi/.sanctum/trust-guardian/heartbeat"
+_GUARDIAN_FRESH_S = 25 * 60  # 25 minutes
+_GUARDIAN_SSH_TIMEOUT_S = 8
+
+# The heal-daemon heartbeat log: the wrapper appends "<iso> <status ...>" lines each
+# cycle. A daemon launchctl still lists as "loaded" but whose last heartbeat is older
+# than this window is WEDGED (not firing on its interval) — so the status pane gates
+# the loaded->OK mapping on freshness, the same way the guardian row does.
+_HEAL_HEARTBEAT_FRESH_S = heal.HEAL_INTERVAL_S * 5  # ~10 min at the 120s default
+
+_P = TypeVar("_P")
+
+
+def _status_probe_posture() -> heal.PostureDiagnosis:
+    """Probe + diagnose the node's L3 posture (reuses the heal pure core)."""
+    runner = _build_heal_runner()
+    posture = heal.probe_posture(run=runner)
+    return heal.diagnose_posture(posture, overlap=heal.overlap_for(posture))
+
+
+def _status_probe_spine() -> net_status.SpineInfo:
+    """Read the never-strand spine (tailnet / TB5) from ifconfig (reuses heal)."""
+    from sanctum_cli.net.link import _real_run
+
+    on_tailnet, tb5_up = heal._spine_from_ifconfig(_real_run(["ifconfig"]))
+    return net_status.SpineInfo(on_tailnet=on_tailnet, tb5_up=tb5_up)
+
+
+def _parse_daemon_heartbeat(
+    text: str, *, now: datetime | None = None
+) -> tuple[str | None, int | None, bool | None]:
+    """Parse the last heal heartbeat line into (last_status, age_seconds, fresh).
+
+    Empty log -> (None, None, None). When the last line has no parseable ISO
+    timestamp the status is still surfaced but age/fresh are None (fail-open: never
+    fabricate a stale reading). ``fresh`` is whether the heartbeat is younger than
+    ``_HEAL_HEARTBEAT_FRESH_S``; a loaded daemon with a stale heartbeat is WEDGED.
+    """
+    if now is None:
+        now = datetime.now()
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    if not lines:
+        return (None, None, None)
+    line = lines[-1].strip()
+    parts = line.split(maxsplit=1)
+    rest = parts[1] if len(parts) > 1 else ""
+    try:
+        hb = datetime.strptime(parts[0], "%Y-%m-%dT%H:%M:%S")
+    except ValueError:
+        return (line, None, None)
+    age = int((now - hb).total_seconds())
+    return (rest, age, age <= _HEAL_HEARTBEAT_FRESH_S)
+
+
+def _daemon_last_result() -> str | None:
+    """Best-effort: the status word from the last net-heal heartbeat line, or None."""
+    try:
+        text = heal._HEAL_HEARTBEAT_FILE.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    return _parse_daemon_heartbeat(text)[0]
+
+
+def _status_probe_daemon() -> net_status.DaemonInfo:
+    """Is the com.sanctum.net-heal LaunchDaemon loaded? + its last-known result.
+
+    Read-only: `launchctl print system/<label>` returns 0 when the daemon is
+    loaded, non-zero otherwise. The last-known result comes from the daemon's own
+    heartbeat log (never a live heal)."""
+    loaded, _ = _heal_launchctl(
+        ["print", f"system/{heal.HEAL_DAEMON_LABEL}"], check=True
+    )
+    try:
+        text = heal._HEAL_HEARTBEAT_FILE.read_text(encoding="utf-8")
+    except OSError:
+        text = ""
+    last, age, fresh = _parse_daemon_heartbeat(text)
+    return net_status.DaemonInfo(
+        loaded=loaded, last_result=last, age_seconds=age, fresh=fresh
+    )
+
+
+def _status_probe_identity() -> IdentityDiagnosis:
+    """Probe + diagnose the node's on-network Wi-Fi identity (reuses the link core)."""
+    from sanctum_cli.net.link import _real_run, diagnose_identity, probe_identity
+
+    return diagnose_identity(probe_identity(run=_real_run))
+
+
+def _status_probe_topology() -> TopologyReport:
+    """Classify NAT topology (reuses the `sanctum net` detector)."""
+    runner, http = _build_runner(), _build_http()
+    return detect.detect(runner=runner, http=http, firewalla_present=_firewalla_present())
+
+
+def _status_probe_guardian() -> net_status.GuardianInfo:
+    """Best-effort: read the Firewalla trust-guardian heartbeat age over the existing
+    SSH seam. UNKNOWN (reachable=False) when the FW is unreachable / no key — never
+    a crash, never a block. FRESH when the heartbeat is younger than the window."""
+    gw = detect.parse_default_gateway(system.real_runner(("route",)))
+    key_path = _firewalla_key_path()
+    if not gw or not key_path.exists():
+        return net_status.GuardianInfo(reachable=False, fresh=None, age_seconds=None)
+    epoch = _firewalla_guardian_epoch(gw, str(key_path))
+    if epoch is None:
+        return net_status.GuardianInfo(reachable=False, fresh=None, age_seconds=None)
+    age = max(0, int(time.time()) - epoch)
+    return net_status.GuardianInfo(
+        reachable=True, fresh=age < _GUARDIAN_FRESH_S, age_seconds=age
+    )
+
+
+def _firewalla_guardian_epoch(gateway: str, key: str, user: str = "pi") -> int | None:
+    """SSH to the Firewalla (key-only, read-only) and read the guardian heartbeat epoch.
+
+    Mirrors ``system.firewalla_wan_via_ssh``'s hardened transport (BatchMode,
+    publickey-only, accept-new, bounded connect). Returns the epoch int, or None on
+    any failure (unreachable, no file, unparseable) — best-effort, never raises."""
+    argv = [
+        "ssh",
+        "-i",
+        key,
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "PreferredAuthentications=publickey",
+        "-o",
+        "StrictHostKeyChecking=accept-new",
+        "-o",
+        "ConnectTimeout=5",
+        f"{user}@{gateway}",
+        f"cat {_GUARDIAN_HEARTBEAT_PATH} 2>/dev/null",
+    ]
+    try:
+        proc = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=_GUARDIAN_SSH_TIMEOUT_S,
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError, ValueError):
+        return None
+    m = re.search(r"\b(\d{9,})\b", proc.stdout)
+    return int(m.group(1)) if m else None
+
+
+def _safe_probe(probe: Callable[[], _P]) -> _P | None:
+    """Run a probe seam; any raise / failure → None (fail-closed → UNKNOWN row).
+
+    This is the per-row guard the pane's never-crash contract rests on: one failing
+    subsystem probe degrades ONLY its own row to UNKNOWN, never the whole pane."""
+    try:
+        return probe()
+    except Exception:
+        return None
+
+
+_STATUS_ROW_STYLE = {
+    net_status.RowStatus.OK: ("green", "✓"),
+    net_status.RowStatus.ATTENTION: ("yellow", "!"),
+    net_status.RowStatus.DOWN: ("red", "✗"),
+    net_status.RowStatus.UNKNOWN: ("dim", "?"),
+}
+
+_OVERALL_STYLE = {"GREEN": "green", "ATTENTION": "yellow", "DEGRADED": "red"}
+
+
+def _render_status(report: net_status.StatusReport) -> None:
+    """Render the roll-up as an apple-like rich panel (one glance, read-only)."""
+    from rich.panel import Panel
+    from rich.table import Table
+
+    table = Table.grid(padding=(0, 2))
+    table.add_column(justify="right", no_wrap=True)  # glyph
+    table.add_column(no_wrap=True)  # label
+    table.add_column(no_wrap=True)  # status word
+    table.add_column(overflow="fold")  # detail
+    for row in report.rows:
+        style, glyph = _STATUS_ROW_STYLE[row.status]
+        table.add_row(
+            f"[{style}]{glyph}[/]",
+            f"[bold]{escape(row.label)}[/]",
+            f"[{style}]{escape(row.status.name)}[/]",
+            f"[dim]{escape(row.detail)}[/]",
+        )
+    overall_style = _OVERALL_STYLE.get(report.overall, "dim")
+    title = f"Network status — [{overall_style}]{escape(report.overall)}[/]"
+    console.print(Panel(table, title=title, title_align="left", border_style=overall_style))
+
+
+@net_app.command(
+    "status",
+    help="One-glance whole-node network health roll-up (read-only, no changes).",
+)
+def net_status_cmd() -> None:
+    """Collapse posture + spine + heal-daemon + identity + topology + Firewalla
+    guardian into ONE read-only pane with a single overall verdict.
+
+    Each subsystem is probed behind its own guarded seam: a probe that fails or
+    raises degrades ONLY its own row to UNKNOWN — the pane always renders (never a
+    crash, never a block). The Firewalla trust-guardian read is best-effort over the
+    existing SSH seam and shows UNKNOWN when the box is unreachable or no key is
+    present. Nothing here mutates anything or needs sudo."""
+    report = net_status.build_status_report(
+        posture=_safe_probe(_status_probe_posture),
+        spine=_safe_probe(_status_probe_spine),
+        daemon=_safe_probe(_status_probe_daemon),
+        identity=_safe_probe(_status_probe_identity),
+        topology=_safe_probe(_status_probe_topology),
+        guardian=_safe_probe(_status_probe_guardian),
+    )
+    _render_status(report)
 
 
 # ─── hub (network-gear provider surface) ─────────────────────────────

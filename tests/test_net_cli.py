@@ -543,3 +543,249 @@ def test_net_heal_install_non_root_prints_sudo_hint_no_write(
     # Non-root: nothing written to the system paths.
     assert not wrapper.exists()
     assert not plist.exists()
+
+
+# ─── net status (Task 3 — one-glance roll-up pane) ───────────────────
+#
+# The status handler gathers each subsystem behind a module-level probe seam
+# (each wrapped so a raised error degrades that row to UNKNOWN — never a crash),
+# then calls the pure `build_status_report` assembler and renders an apple-like
+# pane. Tests patch the seams so NO live networksetup/ipconfig/route/ping/ssh/
+# launchctl is ever touched. The seams return the same subsystem value objects
+# the pure assembler consumes.
+
+
+def _stable_identity_diag():
+    from sanctum_cli.net.link import IdentityDiagnosis, IdentityProbe
+
+    probe = IdentityProbe(
+        iface="en1", ssid="Manoir", current_mac="d0:11:e5:1c:88:59",
+        hardware_mac="d0:11:e5:1c:88:59", security="WPA3", associated=True,
+        router_arp_verified=True, gateway_reachable=True,
+    )
+    return IdentityDiagnosis("IDENTITY_STABLE", "on hardware MAC", "ok", probe)
+
+
+def _quarantined_identity_diag():
+    from sanctum_cli.net.link import IdentityDiagnosis, IdentityProbe
+
+    probe = IdentityProbe(
+        iface="en1", ssid="Manoir", current_mac="32:a6:f4:de:54:cf",
+        hardware_mac="d0:11:e5:1c:88:59", security="WPA3", associated=True,
+        router_arp_verified=False, gateway_reachable=False,
+    )
+    return IdentityDiagnosis("IDENTITY_QUARANTINED", "rotating, gw dead", "pin it", probe)
+
+
+def _healthy_posture_diag():
+    from sanctum_cli.net.heal import HealAction, PostureDiagnosis
+
+    posture = heal.NetPosture(
+        iface="en1", config_method="DHCP", ip="192.168.2.20",
+        subnet="255.255.255.0", gateway="192.168.2.1", gateway_reachable=True,
+        associated=True, on_tailnet=True, tb5_up=True,
+    )
+    return PostureDiagnosis(
+        "HEALTHY", "healthy", "", HealAction("none", safe=True, detail="no action"), posture
+    )
+
+
+def _single_nat_topology():
+    from sanctum_cli.net.types import Nat, TopologyReport
+
+    return TopologyReport(
+        firewalla_present=True, firewalla_wan_mac="20:6d:31:51:67:82",
+        firewalla_wan_mtu=1500, nat=Nat.SINGLE, gateway_ip="192.168.2.1",
+        isp="bell", public_ip="1.2.3.4", applicable=False, reason="optimal",
+    )
+
+
+def _patch_all_green_status():
+    """Patch every status probe seam to a healthy value. Returns the context managers."""
+    from sanctum_cli.net.status import DaemonInfo, GuardianInfo, SpineInfo
+
+    return [
+        patch("sanctum_cli.commands.net._status_probe_posture", return_value=_healthy_posture_diag()),
+        patch("sanctum_cli.commands.net._status_probe_spine", return_value=SpineInfo(on_tailnet=True, tb5_up=True)),
+        patch("sanctum_cli.commands.net._status_probe_daemon", return_value=DaemonInfo(loaded=True, last_result="healed")),
+        patch("sanctum_cli.commands.net._status_probe_identity", return_value=_stable_identity_diag()),
+        patch("sanctum_cli.commands.net._status_probe_topology", return_value=_single_nat_topology()),
+        patch("sanctum_cli.commands.net._status_probe_guardian", return_value=GuardianInfo(reachable=True, fresh=True, age_seconds=120)),
+    ]
+
+
+def test_net_status_all_green_renders_every_subsystem_and_verdict() -> None:
+    from contextlib import ExitStack
+
+    with ExitStack() as stack:
+        for cm in _patch_all_green_status():
+            stack.enter_context(cm)
+        result = runner.invoke(app, ["net", "status"])
+    assert result.exit_code == 0, result.stdout
+    out = result.stdout
+    # Every subsystem label appears in the pane.
+    for label in ("Posture", "Spine", "Heal daemon", "Identity", "Topology", "Guardian"):
+        assert label in out, f"{label} missing from pane:\n{out}"
+    # The overall verdict is surfaced.
+    assert "GREEN" in out
+
+
+def test_net_status_heal_daemon_down_shows_degraded() -> None:
+    from contextlib import ExitStack
+
+    from sanctum_cli.net.status import DaemonInfo
+
+    patches = _patch_all_green_status()
+    # Override the daemon seam to a not-loaded daemon.
+    patches[2] = patch(
+        "sanctum_cli.commands.net._status_probe_daemon",
+        return_value=DaemonInfo(loaded=False, last_result=None),
+    )
+    with ExitStack() as stack:
+        for cm in patches:
+            stack.enter_context(cm)
+        result = runner.invoke(app, ["net", "status"])
+    assert result.exit_code == 0, result.stdout
+    assert "DEGRADED" in result.stdout
+
+
+def test_net_status_identity_quarantined_shows_degraded() -> None:
+    from contextlib import ExitStack
+
+    patches = _patch_all_green_status()
+    patches[3] = patch(
+        "sanctum_cli.commands.net._status_probe_identity",
+        return_value=_quarantined_identity_diag(),
+    )
+    with ExitStack() as stack:
+        for cm in patches:
+            stack.enter_context(cm)
+        result = runner.invoke(app, ["net", "status"])
+    assert result.exit_code == 0, result.stdout
+    out = result.stdout
+    assert "DEGRADED" in out
+    assert "IDENTITY_QUARANTINED" in out
+
+
+def test_net_status_guardian_unreachable_is_unknown_not_crash() -> None:
+    from contextlib import ExitStack
+
+    from sanctum_cli.net.status import GuardianInfo
+
+    patches = _patch_all_green_status()
+    patches[5] = patch(
+        "sanctum_cli.commands.net._status_probe_guardian",
+        return_value=GuardianInfo(reachable=False, fresh=None, age_seconds=None),
+    )
+    with ExitStack() as stack:
+        for cm in patches:
+            stack.enter_context(cm)
+        result = runner.invoke(app, ["net", "status"])
+    assert result.exit_code == 0, result.stdout
+    # Best-effort guardian: unknown does NOT drag the node to DEGRADED.
+    assert "GREEN" in result.stdout
+
+
+def test_net_status_raised_probe_error_degrades_to_unknown_not_crash() -> None:
+    """A probe seam that RAISES must be caught → that row renders UNKNOWN, and the
+    pane still renders (never a crash / non-zero exit)."""
+    from contextlib import ExitStack
+
+    def _boom() -> object:
+        raise RuntimeError("probe blew up")
+
+    patches = _patch_all_green_status()
+    # Make the posture probe raise. The handler must swallow it → UNKNOWN row.
+    patches[0] = patch("sanctum_cli.commands.net._status_probe_posture", side_effect=_boom)
+    with ExitStack() as stack:
+        for cm in patches:
+            stack.enter_context(cm)
+        result = runner.invoke(app, ["net", "status"])
+    assert result.exit_code == 0, result.stdout
+    out = result.stdout
+    # The pane still rendered every row (including the crashed one).
+    assert "Posture" in out
+    # The crashed subsystem shows UNKNOWN and did not take the whole pane down.
+    assert "UNKNOWN" in out.upper()
+    # The healthy remainder still rendered.
+    assert "Spine" in out and "Guardian" in out
+
+
+def test_net_status_all_probes_fail_renders_all_unknown() -> None:
+    """Every probe raising still yields a full pane of UNKNOWN rows (fail-closed per
+    row, never a crash)."""
+    from contextlib import ExitStack
+
+    def _boom() -> object:
+        raise RuntimeError("no network")
+
+    seams = (
+        "_status_probe_posture", "_status_probe_spine", "_status_probe_daemon",
+        "_status_probe_identity", "_status_probe_topology", "_status_probe_guardian",
+    )
+    with ExitStack() as stack:
+        for seam in seams:
+            stack.enter_context(patch(f"sanctum_cli.commands.net.{seam}", side_effect=_boom))
+        result = runner.invoke(app, ["net", "status"])
+    assert result.exit_code == 0, result.stdout
+    for label in ("Posture", "Spine", "Heal daemon", "Identity", "Topology", "Guardian"):
+        assert label in result.stdout
+
+
+# ─── heal-daemon heartbeat parsing (MUST-FIX): timestamp + freshness ──
+#
+# `_daemon_last_result` USED to regex only the status word and discard the ISO
+# timestamp, so a wedged daemon looked GREEN. The parser now keeps the timestamp
+# and computes the heartbeat age, so `_status_probe_daemon` can feed
+# age_seconds/fresh into the pure row. `_parse_daemon_heartbeat` is the pure core.
+
+
+def test_parse_daemon_heartbeat_extracts_status_and_age() -> None:
+    from datetime import datetime
+
+    from sanctum_cli.commands.net import _parse_daemon_heartbeat
+
+    # A fresh heartbeat 90s before "now".
+    hb_time = datetime(2026, 7, 2, 12, 0, 0)
+    now = datetime(2026, 7, 2, 12, 1, 30)  # +90s
+    text = "2026-07-02T11:58:00 healed spine=up rc=0\n" + f"{hb_time.strftime('%Y-%m-%dT%H:%M:%S')} healed spine=up rc=0\n"
+    last, age, fresh = _parse_daemon_heartbeat(text, now=now)
+    assert last == "healed spine=up rc=0"
+    assert age == 90
+    assert fresh is True
+
+
+def test_parse_daemon_heartbeat_stale_is_not_fresh() -> None:
+    from datetime import datetime
+
+    from sanctum_cli.commands.net import _parse_daemon_heartbeat
+
+    now = datetime(2026, 7, 2, 14, 0, 0)
+    text = "2026-07-02T12:00:00 healed spine=up rc=0\n"  # 2h old
+    last, age, fresh = _parse_daemon_heartbeat(text, now=now)
+    assert last == "healed spine=up rc=0"
+    assert age == 7200
+    assert fresh is False
+
+
+def test_parse_daemon_heartbeat_no_timestamp_yields_unknown_age() -> None:
+    from datetime import datetime
+
+    from sanctum_cli.commands.net import _parse_daemon_heartbeat
+
+    # A malformed line with no parseable ISO timestamp → status still surfaced, but
+    # age/fresh unknown (fail-open: we never fabricate a stale reading).
+    now = datetime(2026, 7, 2, 14, 0, 0)
+    text = "garbage-with-no-timestamp healed\n"
+    _last, age, fresh = _parse_daemon_heartbeat(text, now=now)
+    assert age is None
+    assert fresh is None
+
+
+def test_parse_daemon_heartbeat_empty_is_none() -> None:
+    from datetime import datetime
+
+    from sanctum_cli.commands.net import _parse_daemon_heartbeat
+
+    last, age, fresh = _parse_daemon_heartbeat("", now=datetime(2026, 7, 2, 14, 0, 0))
+    assert last is None and age is None and fresh is None
