@@ -306,10 +306,12 @@ def test_full_onboard_ha_green_gate_records_verified_pairing(
 
     out = " ".join(result.stdout.split())
     assert result.exit_code == 0, out
-    # The verified pairing landed; the token is masked in output.
+    # The verified pairing landed; the token is masked in output. With no HA_GREEN_URL /
+    # HA_GREEN_MAC set, the recorded pairing uses the GENERIC default host and an EMPTY
+    # device_mac — never one operator's LAN IP or MAC baked into a stranger's config.
     data = yaml.safe_load(inst.read_text(encoding="utf-8"))
-    assert data["services"]["ha_green"]["host"] == "10.0.0.3"
-    assert data["services"]["ha_green"]["device_mac"] == "20:F8:3B:02:3A:C8"
+    assert data["services"]["ha_green"]["host"] == "homeassistant.local"
+    assert data["services"]["ha_green"]["device_mac"] == ""
     assert token_file.read_text(encoding="utf-8").strip() == "OWNER-TOKEN-XYZ"
     assert (token_file.stat().st_mode & 0o777) == 0o600
     assert "OWNER-TOKEN-XYZ" not in result.stdout  # masked prompt

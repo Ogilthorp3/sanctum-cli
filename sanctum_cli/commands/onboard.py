@@ -301,7 +301,21 @@ def _run_data_chapter(
     )
     if needs_setup:
         console.print(f"\n  [bold]Cloud setup ({backend})[/]")
-        _dispatch_cloud_setup(backend, no_open=no_open)
+        try:
+            _dispatch_cloud_setup(backend, no_open=no_open)
+        except UserError as exc:
+            # Backups need `restic`; a fresh Mac often lacks it. Skip the whole chapter
+            # gracefully instead of hard-crashing mid-onboard — the beta user reaches the
+            # finish line, then adds backups later via `sanctum cloud setup`. (Only the
+            # missing-restic case is swallowed; every other setup error still surfaces.)
+            if "restic" in str(exc).lower():
+                console.print(
+                    "\n  [yellow]restic not installed — skipping the backup chapter.[/]"
+                    "\n  [dim]Install it later (brew install restic), then run "
+                    "`sanctum cloud setup` to enable backups.[/]"
+                )
+                return CanaryOutcome.SKIPPED
+            raise
     else:
         console.print(
             f"\n  [bold]Cloud target already configured ({rcp.target})[/] — skipping setup."
@@ -1482,8 +1496,8 @@ def _run_firewalla_compat() -> bool:
 
 
 # ── HA Green (Home Assistant appliance) gate ─────────────────────────
-# The haus runs a Home Assistant Green at a static LAN IP (10.0.0.3, MAC
-# 20:F8:3B:02:3A:C8). It is a Bearer-(owner-)token REST box exactly like the
+# A Home Assistant Green at a stable LAN address (default homeassistant.local;
+# HA_GREEN_URL to override). It is a Bearer-(owner-)token REST box exactly like the
 # Firewalla bridge, so this gate MIRRORS _run_firewalla_pairing: detect on the LAN
 # → verify with the owner token (GET /api/ → "API running.") → record the verified
 # pairing + the token (0600 secrets file) → report the Tailscale remote-access
@@ -1495,9 +1509,10 @@ def _run_firewalla_compat() -> bool:
 # sanctum_cli.devices.ha_green the tests monkeypatch, so no live HA / Tailscale is
 # touched in the suite.
 
-#: The Green's known LAN MAC (a Firewalla DHCP reservation) — recorded in the
-#: persisted services block for the audit trail. A fixed haus fact, not prompted.
-_HA_GREEN_MAC = "20:F8:3B:02:3A:C8"
+#: The Green's LAN MAC, recorded in the persisted services block for the audit trail.
+#: Per-operator — NEVER ship one operator's MAC into another's instance.yaml. From env
+#: HA_GREEN_MAC, else "" (the services block simply omits an unknown MAC).
+_HA_GREEN_MAC = os.environ.get("HA_GREEN_MAC", "")
 
 
 def set_ha_green(
@@ -1568,7 +1583,7 @@ def _report_ha_remote_access(node_present: bool) -> None:
     if node_present:
         console.print(
             f"  [green]✓[/] remote access ready — Tailscale node "
-            f"[bold]{ha_green._TAILNET_NODE}.{ha_green._TAILNET_SUFFIX}[/] is joined"
+            f"[bold]{ha_green.tailnet_fqdn()}[/] is joined"
         )
     else:
         console.print(
@@ -1601,7 +1616,7 @@ def _run_ha_green(*, yes: bool) -> bool:
     every token attempt is rejected — so the recap reads "skipped" rather than a
     false "paired" (design spec §2/§11; HONEST-VERIFY). Flow:
 
-    1. detect on the LAN (a real TCP connect to 10.0.0.3:8123);
+    1. detect on the LAN (a real TCP connect to the resolved HA_GREEN_URL host);
     2. if the token already on disk verifies (``api_running``) → record + report
        remote access, no prompt (a re-run on a configured haus is idempotent);
     3. else offer to capture the long-lived OWNER token (masked), verify the

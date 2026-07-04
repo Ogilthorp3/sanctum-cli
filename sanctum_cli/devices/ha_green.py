@@ -1,7 +1,7 @@
 """HA Green provider — the Home Assistant appliance on the DeviceProvider contract.
 
-The haus runs a **Home Assistant Green** (HAOS appliance) at a static LAN IP
-(``10.0.0.3``, a Firewalla DHCP reservation; MAC ``20:F8:3B:02:3A:C8``). It is
+A **Home Assistant Green** (HAOS appliance) sits at a stable LAN address (default
+``homeassistant.local``; override with ``HA_GREEN_URL``). It is
 driven through the uniform :class:`~sanctum_cli.devices.base.DeviceProvider`
 surface exactly like the Firewalla box — a **Bearer-token HTTP** transport — so
 ``sanctum net ha-green`` and the ``sanctum onboard`` HA-Green chapter read it the
@@ -9,7 +9,7 @@ same way every other brand is read.
 
 ACCESS MODEL (encoded honestly — this is the load-bearing nuance):
 
-* the **REST API** at ``http://10.0.0.3:8123`` accepts the long-lived *owner*
+* the **REST API** (default ``http://homeassistant.local:8123``) accepts the long-lived *owner*
   token (``Authorization: Bearer <token>``). ``GET /api/`` returns
   ``{"message": "API running."}`` — the canonical "Core is up and the token is
   good" oracle this provider verifies against; ``GET /api/config`` carries the
@@ -30,7 +30,7 @@ Protocol mandates distinguishing "no body" from "transport/auth down" (``get``).
 
 Remote access rides a **Tailscale add-on** that joins the tailnet as node
 ``homeassistant`` (``tag:sanctum-host``), reachable at
-``http://homeassistant.tail7c6d11.ts.net:8123``. :func:`tailscale_node_present`
+``http://homeassistant.<your-tailnet>.ts.net:8123``. :func:`tailscale_node_present`
 is a read-only fingerprint (one ``tailscale status`` shell-out) the status
 surface + onboard chapter report.
 
@@ -79,12 +79,14 @@ if TYPE_CHECKING:
 _HA_URL_ENV = "HA_GREEN_URL"
 _HA_TOKEN_ENV = "HA_GREEN_TOKEN"
 _HA_TOKEN_FILE = Path.home() / ".sanctum/secrets/ha-token"
-_DEFAULT_HA_URL = "http://10.0.0.3:8123"
+# Generic default = Home Assistant's stock mDNS hostname; correct for any operator's
+# stock HA. Override with HA_GREEN_URL for a fixed IP. (Never ship one operator's LAN IP.)
+_DEFAULT_HA_URL = "http://homeassistant.local:8123"
 
-# The LAN fingerprint host:port (a DHCP reservation on the Firewalla). Used by the
-# TCP-connect presence probe when the URL cannot be parsed; normally the host:port
-# come from the resolved base URL so an HA_GREEN_URL override probes the right box.
-_HA_HOST = "10.0.0.3"
+# The LAN fingerprint host:port. Used by the TCP-connect presence probe when the URL
+# cannot be parsed; normally the host:port come from the resolved base URL so an
+# HA_GREEN_URL override probes the right box.
+_HA_HOST = "homeassistant.local"
 _HA_PORT = 8123
 _PORT_PROBE_TIMEOUT_S = 1.0
 
@@ -98,9 +100,40 @@ _CONFIG_PATH = "/api/config"
 _API_RUNNING_MESSAGE = "API running."
 
 # Remote-access tailnet facts. The Tailscale add-on joins the tailnet as this node
-# (``tag:sanctum-host``); the suffix is the haus tailnet's MagicDNS domain.
+# (``tag:sanctum-host``). The MagicDNS suffix is per-operator (each tailnet has its own
+# tailXXXX.ts.net) — NEVER hardcode one operator's, or it leaks to another + prints a
+# wrong address. Resolve it from env or the local `tailscale status`; "" when unknown.
 _TAILNET_NODE = "homeassistant"
-_TAILNET_SUFFIX = "tail7c6d11.ts.net"
+_TAILNET_SUFFIX_ENV = "HA_GREEN_TAILNET_SUFFIX"
+
+
+def _tailnet_suffix() -> str:
+    """The local machine's Tailscale MagicDNS suffix (e.g. ``tail1a2b3c.ts.net``), or "".
+
+    Env override first, else the live ``tailscale status --json`` MagicDNSSuffix. Best-effort:
+    returns "" (never a hardcoded tailnet, never None) so callers can't leak or crash.
+    """
+    env = os.environ.get(_TAILNET_SUFFIX_ENV, "").strip()
+    if env:
+        return env
+    try:
+        import json as _json
+        import subprocess as _sp
+
+        out = _sp.run(
+            ["tailscale", "status", "--json"], capture_output=True, text=True, timeout=4
+        )
+        if out.returncode == 0:
+            return (_json.loads(out.stdout).get("MagicDNSSuffix") or "").strip()
+    except Exception:
+        pass
+    return ""
+
+
+def tailnet_fqdn(node: str = _TAILNET_NODE) -> str:
+    """``node.suffix`` when the tailnet suffix is known, else just ``node`` — no leak, no crash."""
+    suffix = _tailnet_suffix()
+    return f"{node}.{suffix}" if suffix else node
 
 # HTTP timeout for REST calls (seconds).
 _HTTP_TIMEOUT_S = 15
@@ -234,7 +267,7 @@ def _get_api_json_strict(path: str) -> dict[str, Any] | None:
     except httpx.HTTPError as exc:  # transport down: unreachable / timeout / reset
         msg = f"HA Green unreachable for GET {path!r}: {exc}"
         raise DeviceError(
-            msg, fix="check the Green is powered + on the LAN (HA_GREEN_URL, default 10.0.0.3:8123)"
+            msg, fix="check the Green is powered + on the LAN (set HA_GREEN_URL, default homeassistant.local:8123)"
         ) from exc
     if resp.status_code in (401, 403):  # HA rejected the bearer token
         msg = f"HA Green rejected the token for GET {path!r} (HTTP {resp.status_code})"
@@ -262,7 +295,7 @@ def _url_host_port(url: str | None = None) -> tuple[str, int]:
 
     Keeps the TCP presence probe pointed at whatever box ``HA_GREEN_URL`` names (so
     a tailnet override probes the right host) without ever raising on a malformed
-    URL — a parse miss yields the documented ``10.0.0.3:8123``.
+    URL — a parse miss yields the default ``homeassistant.local:8123``.
     """
     parts = urlsplit(url if url is not None else _ha_url())
     host = parts.hostname or _HA_HOST

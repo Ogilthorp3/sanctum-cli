@@ -15,6 +15,7 @@ is fully unit-testable without a live network. The verdict / plan functions
 from __future__ import annotations
 
 import ipaddress
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,14 +41,15 @@ _LINK_ACTIVE_RE = re.compile(r"LinkStatusActive\s*:\s*(TRUE|FALSE)", re.IGNORECA
 # guards against (a naive substring check reports total loss as reachable).
 _PING_LOSS_RE = re.compile(r"([0-9]+(?:\.[0-9]+)?)%\s*packet loss")
 
-# An IPv4 inet line from `ifconfig`, e.g. "\tinet 100.107.112.118 --> ...".
+# An IPv4 inet line from `ifconfig`, e.g. "\tinet 100.x.y.z --> ...".
 _INET_RE = re.compile(r"\binet\s+(\d{1,3}(?:\.\d{1,3}){3})\b")
 
-# The Tailscale tailnet lives in the 100.64.0.0/10 CGNAT range; the TB5 bridge is
-# the 10.0.5.0/24 point-to-point link (bert@10.0.5.1). Both are the never-strand
-# spine: an out-of-band path that survives a LAN renumber / gateway death.
-_TAILNET_NET = ipaddress.ip_network("100.64.0.0/10")
-_TB5_PREFIX = "10.0.5."
+# The Tailscale tailnet lives in the 100.64.0.0/10 CGNAT range (ip-allow: RFC-6598, generic); a wired out-of-band
+# bridge (e.g. a Thunderbolt point-to-point link) is the other never-strand spine —
+# an OOB path that survives a LAN renumber / gateway death. The bridge subnet is
+# per-operator (default is the reference 10.0.5.0/24); override with SANCTUM_OOB_PREFIX.
+_TAILNET_NET = ipaddress.ip_network("100.64.0.0/10")  # ip-allow: RFC-6598 CGNAT range Tailscale uses for ALL tailnets (product-generic)
+_TB5_PREFIX = os.environ.get("SANCTUM_OOB_PREFIX", "10.0.5.")
 
 # no-loop guard: after this many heal attempts (persisted across daemon runs) we
 # stop and alert a human rather than re-flapping the interface forever.
@@ -152,7 +154,7 @@ def _first_group(pattern: re.Pattern[str], text: str) -> str:
 def _spine_from_ifconfig(all_ifconfig: str) -> tuple[bool, bool]:
     """Pure: (on_tailnet, tb5_up) from the full `ifconfig` dump.
 
-    ``on_tailnet`` is a 100.64.0.0/10 (Tailscale CGNAT) inet present on any
+    ``on_tailnet`` is a 100.64.0.0/10 (Tailscale CGNAT; ip-allow: RFC-6598 generic) inet present on any
     interface; ``tb5_up`` is a 10.0.5.x inet (the TB5 bridge). Both are read
     from real inet lines, so a stray "100." elsewhere in the text cannot spoof
     the spine into looking alive.
@@ -394,7 +396,7 @@ def plan_heal(
 
 
 def posture_cidr(posture: NetPosture) -> str:
-    """The node's own network as a CIDR (e.g. ``10.0.0.10/255.255.255.0``), or "".
+    """The node's own network as a CIDR (e.g. ``10.x.y.z/255.255.255.0``), or "".
 
     Feeds :func:`overlap_for`. Fail-closed: any missing / unparseable field yields
     "" (which :func:`overlap_for` treats as no overlap), so we never invent a

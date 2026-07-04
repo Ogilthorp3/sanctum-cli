@@ -1761,8 +1761,7 @@ def ha_green_status() -> None:
     lan_mark = "[green]reachable ✓[/]" if lan_up else "[red]unreachable ✗[/]"
     api_mark = f"[green]up ✓[/] (version {escape(version or '?')})" if api_up else "[red]down ✗[/]"
     tail_mark = (
-        f"[green]joined ✓[/] ({escape(ha_green_provider._TAILNET_NODE)}."
-        f"{escape(ha_green_provider._TAILNET_SUFFIX)})"
+        f"[green]joined ✓[/] ({escape(ha_green_provider.tailnet_fqdn())})"
         if tailnet_up
         else "[yellow]not joined ✗[/]"
     )
