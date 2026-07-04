@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.1] - 2026-07-03
+
+Pre-beta clean-install pass — removes operator-specific state that shipped as
+defaults (or into a fresh operator's config) and stops onboarding crashing
+without `restic`.
+
+### Fixed
+
+- `sanctum onboard` no longer hard-fails (`EXIT=1`) on a machine without
+  `restic`: the "Your Data" backup chapter now skips gracefully. Only the
+  missing-`restic` case is swallowed; every other setup error still surfaces.
+
+### Changed
+
+- HA Green defaults are generic, not one operator's LAN (host -> `homeassistant.local`,
+  override `HA_GREEN_URL`); the Tailscale suffix resolves from local `tailscale status`
+  (never hardcoded); the HA device MAC comes from `HA_GREEN_MAC` (default empty, no
+  longer written into another operator's `instance.yaml`); OOB bridge subnet via
+  `SANCTUM_OOB_PREFIX`.
+
+
 ## [0.10.2] - 2026-06-19
 
 A follow-up personal-infra sweep that caught functional defaults and
