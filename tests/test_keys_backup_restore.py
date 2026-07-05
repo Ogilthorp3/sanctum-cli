@@ -8,8 +8,6 @@ from __future__ import annotations
 
 import subprocess
 
-import pytest
-
 from sanctum_cli.commands import keys_backup as kb
 
 

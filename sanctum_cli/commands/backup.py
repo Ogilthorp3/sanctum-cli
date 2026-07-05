@@ -87,7 +87,7 @@ def _load_password(cfg: config.Config) -> str:
     )
 
 
-def _restic_env(cfg: config.Config, repo: "_Repo") -> dict[str, str]:
+def _restic_env(cfg: config.Config, repo: _Repo) -> dict[str, str]:
     """Env for a restic invocation against ``repo``: RESTIC_PASSWORD plus the
     cloud-backend credentials restic needs to actually reach the repo. Without
     the cloud creds, run/verify/restore/snapshots against b2:/s3:/r2: repos

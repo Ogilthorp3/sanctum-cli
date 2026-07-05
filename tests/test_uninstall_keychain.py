@@ -1,8 +1,8 @@
 """Uninstall Keychain-revoke correctness (deep-audit M9)."""
 from __future__ import annotations
 
-from sanctum_cli.commands import uninstall
 from sanctum_cli.backends import b2
+from sanctum_cli.commands import uninstall
 
 
 def test_revoke_list_matches_real_write_sites_and_preserves_restic():
