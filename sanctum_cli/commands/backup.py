@@ -109,10 +109,10 @@ def _restic_env(cfg: config.Config, repo: _Repo) -> dict[str, str]:
         )
     elif path.startswith(("s3:", "r2:")):
         env["AWS_ACCESS_KEY_ID"] = keychain.read(
-            account=_r2.KEYCHAIN_ACCOUNT, service=_r2.KEYCHAIN_SERVICE_R2_ACCESS_KEY
+            account=_b2.KEYCHAIN_ACCOUNT, service=_r2.KEYCHAIN_SERVICE_R2_ACCESS_KEY
         )
         env["AWS_SECRET_ACCESS_KEY"] = keychain.read(
-            account=_r2.KEYCHAIN_ACCOUNT, service=_r2.KEYCHAIN_SERVICE_R2_SECRET
+            account=_b2.KEYCHAIN_ACCOUNT, service=_r2.KEYCHAIN_SERVICE_R2_SECRET
         )
         env["AWS_DEFAULT_REGION"] = "auto"
     return env
