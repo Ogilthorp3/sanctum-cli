@@ -30,6 +30,7 @@ import shutil
 import sys
 import tempfile
 import threading
+from datetime import UTC, datetime
 from pathlib import Path
 
 from aiohttp import web
@@ -42,15 +43,22 @@ from sanctum_cli.mesh.adapters import (
     make_promote,
 )
 from sanctum_cli.mesh.artifact import build_manifest
-from sanctum_cli.mesh.identity import MeshIdentityStore
-from sanctum_cli.mesh.tracker import HttpTrackerTransport, TrackerRegistry, build_tracker_app
+from sanctum_cli.mesh.identity import LoadedIdentity, MeshIdentityStore
+from sanctum_cli.mesh.tracker import (
+    CommunityOutcome,
+    HttpTrackerTransport,
+    TrackerRegistry,
+    build_tracker_app,
+)
 from sanctum_cli.mesh.types import ArtifactRef, ChampionManifest, Verdict
 from sanctum_cli.mesh.verify import EvalGate, Sandbox, SandboxResult, adopt
 
 _HOST = "127.0.0.1"
 _PORT = 8791  # off the default 8765 so a running tracker doesn't collide
+_PORT2 = 8792  # a second tracker (community-configured) for the community leg
 _ADDR = "100.99.99.99"  # a plausible tailnet addr for this drill node
 _BASELINE = 0.881
+_COMMUNITY_INVITE = "https://signal.group/#sanctum-mesh-drill"
 
 _passes = 0
 _fails = 0
@@ -101,14 +109,27 @@ class _StubSandbox(Sandbox):
 # ─── the real loopback tracker, served in a background thread ────────────────
 
 
-def _serve_tracker(registry: TrackerRegistry, ready: threading.Event) -> None:
+def _serve_tracker(registry: TrackerRegistry, port: int, ready: threading.Event) -> None:
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     runner = web.AppRunner(build_tracker_app(registry))
     loop.run_until_complete(runner.setup())
-    loop.run_until_complete(web.TCPSite(runner, _HOST, _PORT).start())
+    loop.run_until_complete(web.TCPSite(runner, _HOST, port).start())
     ready.set()
     loop.run_forever()
+
+
+def _request_community(client: HttpTrackerTransport, identity: LoadedIdentity) -> CommunityOutcome:
+    """Sign a fresh challenge and ask the tracker for the community invite (real crypto).
+
+    Mirrors ``sanctum mesh community``: the message is the EXACT string the tracker
+    rebuilds — ``community-request:<pubkey>:<ts>`` UTF-8 encoded — with ``ts`` a
+    tz-aware ISO-8601 UTC instant passed verbatim so the Ed25519 signature verifies.
+    """
+    ts = datetime.now(UTC).isoformat()
+    message = f"community-request:{identity.pubkey}:{ts}"
+    signature = identity.sign(message.encode("utf-8"))
+    return client.community(identity.pubkey, ts, signature)
 
 
 def main() -> int:
@@ -125,7 +146,7 @@ def _run(tmp: Path) -> int:
     # ── stand up the REAL tracker over loopback HTTP ─────────────────────────
     registry = TrackerRegistry()
     ready = threading.Event()
-    threading.Thread(target=_serve_tracker, args=(registry, ready), daemon=True).start()
+    threading.Thread(target=_serve_tracker, args=(registry, _PORT, ready), daemon=True).start()
     ready.wait(timeout=5.0)
     print(f"[1] Real loopback tracker up on http://{_HOST}:{_PORT}")
 
@@ -229,6 +250,29 @@ def _run(tmp: Path) -> int:
     # invariant: exactly one promotion across the whole drill (the happy path)
     _check("INVARIANT — exactly one promotion total; every rejection kept the local champion",
            len(promoted) == 1, f"promotions={len(promoted)}")
+
+    # ── COMMUNITY GATE — a seeded contributor unlocks the invite; a fresh one is refused
+    print("\n[6] community gate — a seeded contributor unlocks the Signal invite; "
+          "a fresh identity is refused")
+    registry2 = TrackerRegistry(signal_invite=_COMMUNITY_INVITE)
+    ready2 = threading.Event()
+    threading.Thread(target=_serve_tracker, args=(registry2, _PORT2, ready2), daemon=True).start()
+    ready2.wait(timeout=5.0)
+    community_client = HttpTrackerTransport(f"http://{_HOST}:{_PORT2}")
+    # our drill identity becomes a real contributor once it announces a champion here
+    community_client.register(identity.identity, _ADDR)
+    community_client.announce(manifest, _ADDR)
+
+    seeded = _request_community(community_client, identity)
+    _check("seeded contributor → signed /community returns the real Signal invite",
+           seeded.reason == "ok" and seeded.invite == _COMMUNITY_INVITE,
+           f"reason={seeded.reason!r}, invite={seeded.invite!r}")
+
+    fresh = MeshIdentityStore(signer, path=tmp / "identity-fresh").ensure("fresh-haus")
+    refused = _request_community(community_client, fresh)
+    _check("fresh never-seeded identity → refused 'not_a_contributor' (no invite leaked)",
+           refused.reason == "not_a_contributor" and refused.invite is None,
+           f"reason={refused.reason!r}")
 
     print(f"\n{_passes} passed, {_fails} failed")
     return 0 if _fails == 0 else 1
