@@ -13,7 +13,7 @@ from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING
 
 from sanctum_cli.devices.base import NetContext
-from sanctum_cli.discovery.types import Candidate, DiscoveredDevice, HausInventory
+from sanctum_cli.gear.types import Candidate, DiscoveredDevice, HausInventory
 
 if TYPE_CHECKING:
     from sanctum_cli.devices.base import Runner
@@ -81,7 +81,7 @@ def build_default_scan(net: NetContext) -> HausInventory:  # pragma: no cover - 
     """
     from sanctum_cli.commands import onboard  # for _NETWORK_GEAR_KINDS + eligible kinds
     from sanctum_cli.devices import registry
-    from sanctum_cli.discovery import sources
+    from sanctum_cli.gear import sources
 
     def fingerprint(ip: str, *, runner: Runner | None) -> tuple[str, str, float] | None:
         probe_net = NetContext(gateway_ip=ip, runner=runner)

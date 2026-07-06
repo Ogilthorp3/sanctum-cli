@@ -1,6 +1,6 @@
 from sanctum_cli.devices.base import NetContext
-from sanctum_cli.discovery.scan import discover_haus
-from sanctum_cli.discovery.types import Candidate
+from sanctum_cli.gear.scan import discover_haus
+from sanctum_cli.gear.types import Candidate
 
 
 class _FakeProvider:

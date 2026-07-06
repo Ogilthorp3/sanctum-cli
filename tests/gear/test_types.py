@@ -1,4 +1,4 @@
-from sanctum_cli.discovery.types import Candidate, DiscoveredDevice, HausInventory
+from sanctum_cli.gear.types import Candidate, DiscoveredDevice, HausInventory
 
 
 def test_candidate_merges_hints_and_dedupes_by_ip():

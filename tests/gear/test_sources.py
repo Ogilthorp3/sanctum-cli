@@ -1,4 +1,4 @@
-from sanctum_cli.discovery.sources import arp_cache, router_clients, ssdp
+from sanctum_cli.gear.sources import arp_cache, router_clients, ssdp
 
 
 def _runner(output: str):

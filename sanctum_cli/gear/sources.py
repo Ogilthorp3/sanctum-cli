@@ -12,7 +12,7 @@ import re
 import socket
 from typing import TYPE_CHECKING
 
-from sanctum_cli.discovery.types import Candidate
+from sanctum_cli.gear.types import Candidate
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
