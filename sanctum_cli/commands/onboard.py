@@ -43,13 +43,17 @@ from rich.text import Text
 from sanctum_cli import config, recipes
 from sanctum_cli.backends import b2, gdrive, r2
 from sanctum_cli.commands import backup as backup_cmd
+from sanctum_cli.commands import net as net_cmd
+from sanctum_cli.devices.base import NetContext as _NetContext
 from sanctum_cli.errors import LocalError, SanctumError, UserError
-from sanctum_cli.net import heal, link
+from sanctum_cli.gear.scan import build_default_scan, discover_haus
+from sanctum_cli.net import heal, link, system
 from sanctum_cli.onboard_experience import chapter_banner, green_check, recap_card
 from sanctum_cli.providers.base import HealthSnapshot
 
 if TYPE_CHECKING:
     from sanctum_cli.devices.base import DeviceProvider, NetContext
+    from sanctum_cli.gear.types import HausInventory
 
 console = Console()
 
@@ -108,6 +112,7 @@ RECIPE_GATES: dict[str, tuple[str, ...]] = {
         "ai-providers",
         "firewalla-pairing",
         "firewalla-compat",
+        "haus-scan",
         "network-gear",
         "wifi-identity",
         "ha-green",
@@ -191,6 +196,7 @@ _GATE_LABELS: dict[str, str] = {
     "ai-providers": "AI providers",
     "firewalla-pairing": "Firewalla pairing",
     "firewalla-compat": "Firewalla compatibility",
+    "haus-scan": "Haus hardware scan",
     "network-gear": "Network gear",
     "wifi-identity": "Wi-Fi identity (stable MAC)",
     "ha-green": "HA Green (Home Assistant)",
@@ -220,6 +226,8 @@ def _run_gate(gate: str, *, yes: bool) -> bool:
         return _run_firewalla_pairing(yes=yes)
     if gate == "firewalla-compat":
         return _run_firewalla_compat()
+    if gate == "haus-scan":
+        return _run_haus_scan(yes=yes)
     if gate == "network-gear":
         return _run_network_gear(yes=yes)
     if gate == "wifi-identity":
@@ -2521,6 +2529,121 @@ def store_device_secret(*, service: str, account: str, secret: str) -> None:
     # onboarding must never block on absent 1Password/SOPS haus tooling.
     with contextlib.suppress(Exception):
         _mirror_to_trifecta(service=service, account=account, secret=secret)
+
+
+# ── Haus hardware auto-detect (haus-scan gate) ────────────────────────
+# The haus-scan gate DISCOVERS network gear across the LAN — passive ARP + SSDP
+# candidates unioned with the always-known gateway — fingerprints each candidate
+# through the device registry, and offers to pair every recognized box INLINE,
+# pre-seeded with its DISCOVERED ip (not just the gateway). It reuses the exact
+# pairing primitives the network-gear gate uses (store_device_secret →
+# _probe_device → set_device_reference), so a device paired here is honest-verified
+# (a real read-only auth-probe against its own ip) and persisted identically.
+# Fail-open: any discovery failure configures nothing and NEVER blocks onboarding —
+# the manual pairing gates remain reachable. Every boundary (discovery, the
+# provider resolve, the consent prompt) is a module-level seam the tests replace,
+# so no live scan / socket / subprocess runs under pytest.
+
+
+def _recognize_nothing(ip: str, *, runner: object) -> tuple[str, str, float] | None:
+    """A fingerprint that matches nothing — the passive-only (no-consent) scan.
+
+    Consent gates the ACTIVE probes; without it the scan surfaces only the tally of
+    unrecognized hosts (via ``discover_haus``), never an authenticated fingerprint of
+    a stranger. Matches the ``Fingerprint`` seam shape ``(ip, *, runner)``.
+    """
+    del ip, runner  # intentionally unused: this fingerprint recognizes nothing
+    return None
+
+
+def _discover_haus_for_onboard(net: _NetContext, *, allow_active: bool) -> HausInventory:
+    """Real discovery wiring for the gate (a seam so tests inject an inventory).
+
+    With consent (``allow_active``) it runs the real ARP + SSDP + registry scan;
+    without it, a passive-only pass that recognizes nothing but still tallies the
+    unrecognized hosts — so a decline probes no stranger yet reports honestly.
+    """
+    if not allow_active:
+        return discover_haus(net, allow_active=False, sources=[], fingerprint=_recognize_nothing)
+    # Real ARP/SSDP/httpx scan at the onboard boundary; the pure counting logic is
+    # exercised by discover_haus's unit tests.
+    return build_default_scan(net)  # pragma: no cover - live network scan
+
+
+def _consent_active_scan(yes: bool) -> bool:
+    """Prompt once for consent to actively fingerprint LAN candidates (skip under --yes)."""
+    if yes:
+        return False
+    return bool(Confirm.ask("  scan the LAN to find your gear (a few gentle probes)?", default=True))
+
+
+def _provider_for(kind: str, ip: str) -> DeviceProvider:  # pragma: no cover - live registry resolve
+    """Resolve the provider for a discovered ``kind`` at ``ip`` (for the auth-probe)."""
+    from sanctum_cli.devices import registry
+
+    return registry.resolve(kind, _NetContext(gateway_ip=ip, runner=system.real_runner))
+
+
+def _run_haus_scan(*, yes: bool) -> bool:
+    """Discover haus gear and offer to pair each found device inline.
+
+    Fail-open: a discovery failure configures nothing but never blocks onboarding
+    (the manual pairing gates remain reachable). Honest-verify: a device is only
+    "paired ✓" after a real auth-probe against its DISCOVERED ip. Interactive by
+    design, so ``--yes`` SKIPS it (a scripted run against a closed stdin would hang);
+    a passive/declined run probes no stranger. Returns True iff at least one device
+    was actually PAIRED, so the recap reads "skipped" rather than a false "paired".
+    """
+    if yes:
+        console.print("  [yellow]skipped[/] — interactive discovery; run 'sanctum onboard' attended.")
+        return False
+
+    allow_active = _consent_active_scan(yes)
+    net = _net_context()
+    try:
+        inventory = _discover_haus_for_onboard(net, allow_active=allow_active)
+    except Exception:  # discovery is additive; a failed scan must never crash onboarding
+        console.print("  [dim]discovery unavailable — continuing to manual pairing.[/]")
+        return False
+
+    if not inventory.devices:
+        extra = f" ({inventory.unrecognized_count} unrecognized)" if inventory.unrecognized_count else ""
+        console.print(f"  [dim]no configurable gear found{extra} — continuing.[/]")
+        return False
+
+    console.print(f"  Found {inventory.recognized_count} configurable device(s):")
+    for dev in inventory.devices:
+        console.print(f"    [bold]{dev.kind}[/] ({dev.brand}) at {dev.ip}")
+    if inventory.unrecognized_count:
+        console.print(f"    [dim]+ {inventory.unrecognized_count} unrecognized device(s)[/]")
+
+    paired_any = False
+    for dev in inventory.devices:
+        if not Confirm.ask(f"  pair the {dev.kind} ({dev.brand}) at {dev.ip} now?", default=True):
+            console.print(f"  [dim]skipped {dev.kind}[/]")
+            continue
+        service, account = net_cmd.device_keychain_ref(dev.kind)
+        if not service or not account:
+            console.print(f"  [yellow]skipped {dev.kind}[/] — no Keychain reference")
+            continue
+        password = Prompt.ask(f"  {dev.kind} admin password", password=True).strip()
+        store_device_secret(service=service, account=account, secret=password)
+        provider = _provider_for(dev.kind, dev.ip)
+        probe_net = _NetContext(gateway_ip=dev.ip, runner=system.real_runner)
+        if not _probe_device(provider, net=probe_net, account=account, service=service, secret=password):
+            _revoke_device_secret(service=service, account=account)
+            console.print(f"  [red]✗[/] {dev.kind} not paired — the admin password was rejected")
+            continue
+        set_device_reference(
+            kind=dev.kind,
+            brand=dev.brand,
+            host=dev.ip,  # <-- the DISCOVERED ip, not the gateway
+            keychain_service=service,
+            keychain_account=account,
+        )
+        console.print(f"  [green]✓[/] {dev.kind} paired — {dev.brand} at {dev.ip}")
+        paired_any = True
+    return paired_any
 
 
 def _run_network_gear(*, yes: bool) -> bool:
