@@ -425,6 +425,34 @@ def test_detect_zero_when_not_orbi(monkeypatch: pytest.MonkeyPatch) -> None:
     assert orbi.OrbiProvider.detect(net) == 0.0
 
 
+# ── _probe_is_orbi: real read-only fingerprint (injected http_get seam) ──
+#
+# The fingerprint GETs the unauthenticated NETGEAR ``currentsetting.htm`` banner
+# and matches a ``Model=RB*`` line. The http_get seam is injected so no socket
+# opens; the default getter (httpx) is exercised only at the live boundary. Pure
+# read — no mutation, no auth.
+
+
+def test_probe_is_orbi_matches_currentsetting_model_banner() -> None:
+    from sanctum_cli.devices import orbi
+
+    body = "Firmware=V2.7.3.22\nModel=RBR750\nRegionTag=..."  # Orbi currentsetting.htm
+    assert orbi._probe_is_orbi("10.0.0.1", http_get=lambda url: body) is True
+
+
+def test_probe_is_orbi_false_on_foreign_or_dead() -> None:
+    from sanctum_cli.devices import orbi
+
+    assert (
+        orbi._probe_is_orbi("192.168.2.1", http_get=lambda url: "XMO_INVALID_SESSION_ERR") is False
+    )
+
+    def boom(url):
+        raise OSError("refused")
+
+    assert orbi._probe_is_orbi("192.168.2.1", http_get=boom) is False
+
+
 # ── registration + lifecycle ──────────────────────────────────────────
 
 

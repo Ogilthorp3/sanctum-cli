@@ -32,6 +32,8 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+import httpx
+
 from sanctum_cli import keychain
 from sanctum_cli.devices import registry
 from sanctum_cli.devices.base import (
@@ -45,6 +47,7 @@ from sanctum_cli.devices.base import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from collections.abc import Set as AbstractSet
 
 # The admin password lives in the login Keychain under this (account, service)
@@ -107,17 +110,47 @@ def _make_client(creds: Creds) -> Any:
     )
 
 
-def _probe_is_orbi(gateway_ip: str) -> bool:  # noqa: ARG001 - probe is mocked in tests
+# Read-only fingerprint constants. NETGEAR Orbi exposes an unauthenticated
+# ``currentsetting.htm`` whose ``Model=RBR/RBS/RBK...`` banner (router / satellite
+# / kit) is a positive tell that costs one short-timeout GET and mutates nothing.
+#
+# NOTE (live-confirm — spec open item #2): ``currentsetting.htm`` + the ``Model=RB*``
+# markers are stable across NETGEAR firmware but are confirmed against Bert's live
+# Orbi during the attended smoke. The SHAPE (injected ``http_get`` seam + marker
+# constants) is what this locks; a wrong constant is a one-line + fixture change.
+_FINGERPRINT_TIMEOUT_S = 2.0
+_ORBI_URL = "http://{ip}/currentsetting.htm"
+_ORBI_MARKERS = ("Model=RBR", "Model=RBS", "Model=RBK")  # router / satellite / kit banners
+
+
+def _default_orbi_get(url: str) -> str:
+    """GET the unauthenticated NETGEAR currentsetting banner (or "" on error)."""
+    try:
+        resp = httpx.get(url, timeout=_FINGERPRINT_TIMEOUT_S)
+    except (httpx.HTTPError, OSError):
+        return ""
+    return resp.text
+
+
+def _probe_is_orbi(
+    gateway_ip: str,
+    *,
+    http_get: Callable[[str], str] = _default_orbi_get,
+) -> bool:
     """Read-only fingerprint: does the gateway look like a NETGEAR Orbi?
 
-    A real implementation would issue an *unauthenticated* HTTP/SOAP probe to the
-    gateway and match the NETGEAR/Orbi model banner (the ``currentsetting.htm``
-    ``Model=RBR...`` line, or the SOAP ``GetInfo`` device class). It is a pure
-    read — no mutation, no auth — and is the seam tests monkeypatch so ``detect``
-    never opens a socket. Conservative default: assume *not* Orbi unless the probe
-    positively says so.
+    NETGEAR Orbi exposes an unauthenticated ``currentsetting.htm`` with a
+    ``Model=RBR/RBS/RBK...`` banner. Pure read — no mutation, no auth. The
+    ``http_get`` seam is injected so tests never open a socket; the default getter
+    (httpx) is exercised only at the live boundary. Conservative default: assume
+    *not* Orbi unless a model banner is positively seen.
     """
-    return False
+    body = ""
+    try:
+        body = http_get(_ORBI_URL.format(ip=gateway_ip))
+    except Exception:  # a probe must never raise into detect()
+        return False
+    return any(marker in body for marker in _ORBI_MARKERS)
 
 
 class OrbiProvider:
