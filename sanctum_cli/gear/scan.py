@@ -88,7 +88,10 @@ def build_default_scan(net: NetContext) -> HausInventory:  # pragma: no cover - 
         for kind, _label in onboard._NETWORK_GEAR_KINDS:
             with contextlib.suppress(Exception):
                 provider = registry.resolve(kind, probe_net)
-                if type(provider).detect(probe_net) > 0:
+                # resolve() already scored detect() for each provider of this kind;
+                # a NON-generic result IS the match — don't re-probe (that doubled the
+                # httpx probes per candidate, tens of seconds on a busy ARP cache).
+                if not isinstance(provider, registry.GenericReadOnlyProvider):
                     return (kind, type(provider).brand, 1.0)
         return None
 

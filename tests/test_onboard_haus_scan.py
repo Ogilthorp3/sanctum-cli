@@ -56,6 +56,17 @@ def test_haus_scan_pairs_discovered_device_with_its_ip(monkeypatch, _no_side_eff
     assert _no_side_effects["orbi"] == {"brand": "orbi", "host": "10.0.0.5"}  # PAIRED WITH DISCOVERED IP
 
 
+def test_haus_scan_declined_pairs_nothing(monkeypatch, _no_side_effects):
+    # Declining the LAN scan → no discovery-based pairing. (The un-probed gateway that
+    # HausInventory counts as "unrecognized" is reported as "declined", not as a device.)
+    monkeypatch.setattr(onboard, "_consent_active_scan", lambda yes: False)
+    monkeypatch.setattr(
+        onboard, "_discover_haus_for_onboard", lambda net, allow_active: HausInventory([], 1)
+    )
+    assert onboard._run_haus_scan(yes=False) is False
+    assert _no_side_effects == {}  # nothing paired
+
+
 def test_haus_scan_failopen_when_discovery_raises(monkeypatch):
     def boom(net, allow_active):
         raise OSError("scan blew up")

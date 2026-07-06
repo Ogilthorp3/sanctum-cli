@@ -2608,8 +2608,13 @@ def _run_haus_scan(*, yes: bool) -> bool:
         return False
 
     if not inventory.devices:
-        extra = f" ({inventory.unrecognized_count} unrecognized)" if inventory.unrecognized_count else ""
-        console.print(f"  [dim]no configurable gear found{extra} — continuing.[/]")
+        if not allow_active:
+            # Declined the LAN scan → we probed nothing (not even the gateway), so
+            # don't report the un-probed gateway as an "unrecognized" device.
+            console.print("  [dim]scan declined — continuing to manual pairing.[/]")
+        else:
+            extra = f" ({inventory.unrecognized_count} unrecognized)" if inventory.unrecognized_count else ""
+            console.print(f"  [dim]no configurable gear found{extra} — continuing.[/]")
         return False
 
     console.print(f"  Found {inventory.recognized_count} configurable device(s):")
