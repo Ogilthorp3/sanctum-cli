@@ -151,6 +151,7 @@ testpaths = ["tests"]
 filterwarnings = ["error"]
 markers = [
   "no_haus_stub: opt out of the autouse haus-present stub (gate's own tests).",
+  "integration: hits a live boundary (VM / eval harness / tracker); excluded from make check.",
 ]
 
 [tool.coverage.run]

@@ -40,6 +40,7 @@ __all__ = [
     "build_manifest",
     "content_hash",
     "verify_manifest",
+    "verify_signature",
 ]
 
 _HASH_PREFIX = "sha256:"
@@ -140,6 +141,11 @@ def verify_manifest(
     """
     if content_hash(artifact_path) != manifest.content_hash:
         return False
+    return verify_fn(manifest.producer_pubkey, _signing_message(manifest), manifest.signature)
+
+
+def verify_signature(manifest: ChampionManifest, verify_fn: VerifyFn) -> bool:
+    """Check only the signature over the canonical bytes (hash-independent gate)."""
     return verify_fn(manifest.producer_pubkey, _signing_message(manifest), manifest.signature)
 
 
