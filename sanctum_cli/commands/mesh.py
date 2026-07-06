@@ -240,15 +240,22 @@ def join_mesh(
     identity = store.ensure(label)
     addr = status.self_addr
     registered = False
+    peers: list[str] = []
+    champions: list[str] = []
     if status.up and addr is not None:
         registered = directory.register(identity.identity, addr)
+        # Reach the tracker for peers/champions ONLY once the tailnet is really up —
+        # otherwise a "tailnet down" (the actionable problem) would be masked behind
+        # a tracker-unreachable error from these two calls.
+        peers = directory.peers()
+        champions = [m.content_hash for m in directory.catalog()]
     return JoinReport(
         tailnet_up=status.up,
         identity_fingerprint=fingerprint(identity.pubkey),
         addr=addr,
         registered=registered,
-        peers=directory.peers(),
-        champions=[m.content_hash for m in directory.catalog()],
+        peers=peers,
+        champions=champions,
     )
 
 

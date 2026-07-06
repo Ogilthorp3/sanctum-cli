@@ -249,6 +249,28 @@ def test_join_tailnet_down_does_not_claim_joined(
     assert directory.register_calls == []
 
 
+def test_join_tailnet_down_skips_tracker_reads(tmp_path: Path) -> None:
+    # A down tailnet must NOT reach the tracker for peers/catalog — otherwise the
+    # actionable "tailnet down" would be masked behind a tracker-unreachable error.
+    store = _make_store(tmp_path)
+
+    class _BoomDirectory(FakeDirectory):
+        def peers(self) -> list[str]:
+            raise AssertionError("peers must not be queried when the tailnet is down")
+
+        def catalog(self) -> list[ChampionManifest]:
+            raise AssertionError("catalog must not be queried when the tailnet is down")
+
+    directory = _BoomDirectory(register_ack=True)
+    report = mesh_cmd.join_mesh(
+        store=store, directory=directory, run=_runner_down(), label="haus-x"
+    )
+    assert report.tailnet_up is False
+    assert report.peers == []
+    assert report.champions == []
+    assert directory.register_calls == []
+
+
 def test_join_registration_declined_is_not_joined(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

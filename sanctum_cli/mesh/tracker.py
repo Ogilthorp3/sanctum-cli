@@ -224,7 +224,7 @@ class HttpTrackerTransport:
                 f"mesh tracker returned no 'champions' list from {self._base}/catalog",
                 fix="the tracker is misbehaving; check its version and logs",
             )
-        return [ChampionManifest.from_dict(d) for d in champions]
+        return [self._manifest_from(d, "/catalog") for d in champions]
 
     def announce(self, manifest: ChampionManifest, addr: str) -> None:
         """Advertise that ``addr`` seeds ``manifest`` (raises on any non-2xx)."""
@@ -245,11 +245,28 @@ class HttpTrackerTransport:
             return ArtifactRef(
                 content_hash=str(data["content_hash"]),
                 seeders=[str(s) for s in data["seeders"]],
-                manifest=ChampionManifest.from_dict(data["manifest"]),
+                manifest=self._manifest_from(data["manifest"], "/find"),
             )
         except (KeyError, TypeError) as exc:
             raise LocalError(
                 f"mesh tracker returned a malformed find hit from {self._base}/find",
+                fix="the tracker is misbehaving; check its version and logs",
+            ) from exc
+
+    def _manifest_from(self, payload: Any, where: str) -> ChampionManifest:
+        """Rebuild a manifest from the OPEN tracker's JSON, honest-verify style.
+
+        The tracker is untrusted, so a missing field, a bad ``kind`` enum, or a
+        wrong-typed value must surface as a clean :class:`LocalError` — never a
+        raw ``KeyError``/``ValueError``/``TypeError`` leaking past the CLI's
+        ``except SanctumError`` (which would crash ``status``/``pull``/the
+        onboard join gate on a misbehaving tracker).
+        """
+        try:
+            return ChampionManifest.from_dict(payload)
+        except (KeyError, ValueError, TypeError) as exc:
+            raise LocalError(
+                f"mesh tracker returned a malformed manifest from {self._base}{where}",
                 fix="the tracker is misbehaving; check its version and logs",
             ) from exc
 

@@ -475,3 +475,47 @@ def test_handler_peers_and_catalog_report_registry_state() -> None:
     catalog_resp = asyncio.run(handlers.catalog(_StubRequest()))  # type: ignore[arg-type]
     champions = _body(catalog_resp)["champions"]
     assert [c["content_hash"] for c in champions] == ["sha256:a"]
+
+
+# ─── malformed manifests from the OPEN (untrusted) tracker → clean raise ─────
+
+_BAD_MANIFEST = {
+    "content_hash": "sha256:" + "a" * 64,
+    "kind": "evil_kind",  # not a valid ArtifactKind → ValueError in from_dict
+    "base_model": "m",
+    "eval_scores": {},
+    "size_bytes": 1,
+    "producer_pubkey": "pk",
+    "signature": "sig",
+}
+
+
+def test_catalog_raises_localerror_on_malformed_manifest(
+    transport_factory: Callable[..., HttpTrackerTransport],
+) -> None:
+    # The tracker is untrusted; a bad manifest (invalid `kind` enum) must surface
+    # as a clean LocalError, never a raw ValueError leaking past the CLI.
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"champions": [_BAD_MANIFEST]})
+
+    client = transport_factory(handler=handler)
+    with pytest.raises(LocalError):
+        client.catalog()
+
+
+def test_find_raises_localerror_on_malformed_manifest(
+    transport_factory: Callable[..., HttpTrackerTransport],
+) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "content_hash": _BAD_MANIFEST["content_hash"],
+                "seeders": ["100.64.0.1"],
+                "manifest": _BAD_MANIFEST,
+            },
+        )
+
+    client = transport_factory(handler=handler)
+    with pytest.raises(LocalError):
+        client.find(str(_BAD_MANIFEST["content_hash"]))

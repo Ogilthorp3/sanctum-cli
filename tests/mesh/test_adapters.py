@@ -493,6 +493,19 @@ def test_vm_airgap_runner_ships_then_probes_and_maps(
     assert calls[1][0] == "ssh"
 
 
+def test_vm_airgap_runner_raises_localerror_when_vm_down(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # A down/unreachable VM (rsync/ssh non-zero) must fail CLOSED as a clean
+    # LocalError — never a raw CalledProcessError, never a silent "no egress".
+    def fake_run(argv: list[str], **_kw: object) -> subprocess.CompletedProcess[str]:
+        raise subprocess.CalledProcessError(255, argv, stderr="ssh: connect: Connection refused")
+
+    monkeypatch.setattr(adapters.subprocess, "run", fake_run)
+    with pytest.raises(LocalError):
+        adapters.vm_airgap_runner(tmp_path / "adapter", host="dead-vm")
+
+
 @pytest.mark.integration
 def test_real_runner_smoke(tmp_path: Path) -> None:  # pragma: no cover
     # Executable documentation of the live path. DESELECTED from `make check` by

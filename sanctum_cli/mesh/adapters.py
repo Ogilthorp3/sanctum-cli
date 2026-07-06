@@ -387,23 +387,35 @@ def vm_airgap_runner(
     exercised by the 2-box acceptance test, NOT by ``make check``.
     """
     prompts = list(probe_prompts) if probe_prompts is not None else list(_DEFAULT_PROBE_PROMPTS)
-    subprocess.run(
-        ["rsync", "-a", "--delete", f"{adapter_path}/", f"{host}:{remote_dir}/"],
-        check=True,
-    )
     request = json.dumps({"adapter_dir": remote_dir, "prompts": prompts})
-    proc = subprocess.run(
-        ["ssh", host, "unshare", "-n", "sanctum-mesh-probe", "--json", request],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    report = json.loads(proc.stdout)
-    return SandboxProbe(
-        completed=bool(report["completed"]),
-        egress_attempted=bool(report["egress_attempted"]),
-        notes=str(report.get("notes", "")),
-    )
+    try:
+        subprocess.run(
+            ["rsync", "-a", "--delete", f"{adapter_path}/", f"{host}:{remote_dir}/"],
+            capture_output=True,
+            check=True,
+        )
+        proc = subprocess.run(
+            ["ssh", host, "unshare", "-n", "sanctum-mesh-probe", "--json", request],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        report = json.loads(proc.stdout)
+        return SandboxProbe(
+            completed=bool(report["completed"]),
+            egress_attempted=bool(report["egress_attempted"]),
+            notes=str(report.get("notes", "")),
+        )
+    except (subprocess.CalledProcessError, OSError, ValueError, KeyError, TypeError) as exc:
+        # A down/unreachable VM, a missing helper, or a garbled probe report must
+        # fail CLOSED as a clean LocalError — never a raw traceback, and never a
+        # silent "clean, no egress". The sandbox gate then rejects; the local
+        # champion stays authoritative. (Mirrors mlx_eval_runner's exit handling.)
+        raise LocalError(
+            f"air-gapped sandbox probe failed on {host}: {exc}",
+            fix="ensure mesh.sandbox_host is a reachable VM with the sanctum-mesh-probe "
+            "helper and a working 'unshare -n'; run the probe there by hand to see the error",
+        ) from exc
 
 
 # ─── promote seam ────────────────────────────────────────────────────────
