@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
@@ -300,9 +301,11 @@ def _invoke_family_onboard_interactive(input_text: str) -> tuple[int, str]:
         # HA Green is a later interactive gate (own tests); mock it so a real TCP
         # probe to 10.0.0.3 never runs and it never consumes this gate's stdin.
         patch("sanctum_cli.commands.onboard._run_ha_green"),
-        # Network-resilience is the last interactive gate (own tests); mock it so a
-        # real posture probe / DHCP flip / daemon install never runs here.
+        # Network-resilience + mesh-join are later interactive gates (own tests); mock
+        # them so a real posture probe / DHCP flip / daemon install / tailnet + tracker
+        # join never runs here and neither consumes this helper's stdin.
         patch("sanctum_cli.commands.onboard._run_network_resilience"),
+        patch("sanctum_cli.commands.onboard._run_mesh_join"),
     ):
         result = runner.invoke(app, ["onboard", "--recipe", "family"], input=input_text)
     return result.exit_code, " ".join(result.stdout.split())
@@ -704,3 +707,103 @@ def test_orchestrator_canary_verified_renders_verified(
     out = _onboard_out_with_canary(onboard.CanaryOutcome.VERIFIED, full_instance_yaml, monkeypatch)
     assert "verified by restore canary" in out.lower(), out
     assert "verified" in _data_recap_status(out) or "✓" in _data_recap_status(out), out
+
+
+# ── Mesh-join gate (join the open Sanctum mesh) ───────────────────────
+#
+# The onboard-time front door to `sanctum mesh join`, mirroring the
+# network-resilience gate: registered in RECIPE_GATES / _CHAPTER_GATES /
+# _GATE_LABELS, dispatched via _run_gate, SKIPPABLE under --yes, and
+# HONEST-VERIFY (a True result derives from the REAL JoinReport.joined —
+# tailnet up AND the tracker ack'd — never "the step ran"). Every mesh
+# boundary is a module-level seam the test patches, so no live tailnet /
+# tracker / VM is ever touched.
+
+
+def test_mesh_join_gate_registered_after_network_resilience() -> None:
+    """Registered in every recipe that has network-resilience, and AFTER it."""
+    for r in ("family", "operator", "code"):
+        gates = onboard.RECIPE_GATES[r]
+        assert "mesh-join" in gates, r
+        # Additive: mesh-join sits AFTER network-resilience (fixed order).
+        assert gates.index("mesh-join") > gates.index("network-resilience"), r
+    # Registered in the "Your Network" chapter + the label map + real recipes only.
+    assert "mesh-join" in onboard._CHAPTER_GATES["Your Network"]
+    assert "mesh-join" in onboard._GATE_LABELS
+    assert set(onboard.RECIPE_GATES) <= set(recipes.BUILTINS)
+
+
+def test_mesh_join_gate_wired_into_dispatch_loop() -> None:
+    """The 'mesh-join' branch is actually dispatched — registration alone is not enough."""
+    src = inspect.getsource(onboard._run_gate)
+    assert 'gate == "mesh-join"' in src
+    assert "_run_mesh_join(yes=yes)" in src
+
+
+def test_run_mesh_join_yes_skips_without_touching_mesh(monkeypatch: pytest.MonkeyPatch) -> None:
+    """--yes SKIPS cleanly: no builder / join_mesh call, returns False (no side effects)."""
+    from sanctum_cli.commands import mesh as mesh_cmd
+
+    touched: list[str] = []
+    monkeypatch.setattr(mesh_cmd, "_build_command_runner", lambda: touched.append("run"))
+    monkeypatch.setattr(mesh_cmd, "_build_identity_store", lambda: touched.append("store"))
+    monkeypatch.setattr(mesh_cmd, "_build_directory", lambda: touched.append("dir"))
+    monkeypatch.setattr(
+        mesh_cmd, "join_mesh", lambda **kw: pytest.fail("join must not run under --yes")
+    )
+    assert onboard._run_mesh_join(yes=True) is False
+    assert touched == []  # short-circuits before importing/using any mesh seam
+
+
+def _fake_join_report(*, joined: bool, tailnet_up: bool = True, registered: bool = True):
+    from sanctum_cli.commands.mesh import JoinReport
+
+    return JoinReport(
+        tailnet_up=tailnet_up,
+        identity_fingerprint="mldsa:abc123def4567890",
+        addr="100.64.0.5" if tailnet_up else None,
+        registered=registered,
+        peers=["100.64.0.9", "100.64.0.10"],
+        champions=["sha256:" + "a" * 64],
+    )
+
+
+def _patch_mesh_seams(monkeypatch: pytest.MonkeyPatch, report: object) -> None:
+    """Patch the mesh builders + join_mesh so no live tailnet / tracker is touched."""
+    from sanctum_cli.commands import mesh as mesh_cmd
+
+    monkeypatch.setattr(mesh_cmd, "_build_command_runner", lambda: (lambda argv: ""))
+    monkeypatch.setattr(mesh_cmd, "_build_identity_store", lambda: object())
+    monkeypatch.setattr(mesh_cmd, "_build_directory", lambda: object())
+    monkeypatch.setattr(mesh_cmd, "join_mesh", lambda **kw: report)
+    monkeypatch.setattr(mesh_cmd, "_persist_mesh_config", lambda *a, **k: None)
+
+
+def test_run_mesh_join_real_join_returns_true(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A REAL join (JoinReport.joined: tailnet up AND tracker ack'd) → green check, True."""
+    _patch_mesh_seams(monkeypatch, _fake_join_report(joined=True))
+    assert onboard._run_mesh_join(yes=False) is True
+
+
+def test_run_mesh_join_tailnet_down_returns_false(monkeypatch: pytest.MonkeyPatch) -> None:
+    """HONEST-VERIFY: tailnet not up → not joined, returns False (no false 'joined')."""
+    _patch_mesh_seams(
+        monkeypatch, _fake_join_report(joined=False, tailnet_up=False, registered=False)
+    )
+    assert onboard._run_mesh_join(yes=False) is False
+
+
+def test_run_mesh_join_tracker_unreachable_is_a_clean_skip(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A down/misbehaving tracker (the real client RAISES) → forgiving skip, False, no crash."""
+    from sanctum_cli.commands import mesh as mesh_cmd
+    from sanctum_cli.errors import LocalError
+
+    monkeypatch.setattr(mesh_cmd, "_build_command_runner", lambda: (lambda argv: ""))
+    monkeypatch.setattr(mesh_cmd, "_build_identity_store", lambda: object())
+    monkeypatch.setattr(mesh_cmd, "_build_directory", lambda: object())
+
+    def _raise(**_kw: object) -> object:
+        raise LocalError("mesh tracker unreachable", fix="check the tracker is running")
+
+    monkeypatch.setattr(mesh_cmd, "join_mesh", _raise)
+    assert onboard._run_mesh_join(yes=False) is False

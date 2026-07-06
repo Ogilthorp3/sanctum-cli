@@ -498,3 +498,92 @@ def test_fingerprint_is_stable_and_masks_key() -> None:
     assert fp.startswith("mldsa:")
     assert "fakepub:abc" not in fp  # never leak the key material
     assert mesh_cmd.fingerprint("fakepub:abc") == fp  # deterministic
+
+
+# ─── unit: the Task-8 adapter builders (real wiring, no live boundary) ────
+#
+# The command-level tests above monkeypatch the four builders with fakes. These
+# lock the OTHER side: the builders now assemble the REAL adapters (Ed25519 signer,
+# HTTP tracker, autoresearch eval-gate, VM air-gap sandbox) — construction touches
+# no network / crypto secret / VM. The autouse `_isolate_instance` fixture points
+# config at a fresh (absent) instance.yaml, so every `mesh.*` key reads its default.
+
+
+def test_build_identity_store_returns_real_store() -> None:
+    """`_build_identity_store` wires a MeshIdentityStore over the Ed25519 signer."""
+    from sanctum_cli.mesh.identity import MeshIdentityStore as _Store
+
+    store = mesh_cmd._build_identity_store()
+    assert isinstance(store, _Store)
+
+
+def test_build_directory_returns_http_tracker_no_network(tmp_path: Path) -> None:
+    """`_build_directory` returns an HttpTrackerTransport; construction does NO I/O."""
+    from sanctum_cli.mesh.tracker import HttpTrackerTransport
+
+    directory = mesh_cmd._build_directory()
+    assert isinstance(directory, HttpTrackerTransport)
+    directory.close()  # no request was ever made; just release the lazy client
+
+
+def test_build_directory_honors_configured_tracker_url(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A configured `mesh.tracker_url` overrides the loopback default."""
+    inst = tmp_path / "instance.yaml"
+    inst.write_text("mesh:\n  tracker_url: http://tracker.example:9999\n", encoding="utf-8")
+    monkeypatch.setenv("SANCTUM_INSTANCE_FILE", str(inst))
+    assert mesh_cmd._resolve_tracker_url() == "http://tracker.example:9999"
+
+
+def test_build_adopt_seams_wires_real_adapter_types() -> None:
+    """`_build_adopt_seams` bundles the real verify → eval → sandbox → promote seams."""
+    from sanctum_cli.commands.mesh import AdoptSeams
+    from sanctum_cli.mesh.adapters import (
+        AutoresearchEvalGate,
+        BoundManifestVerifier,
+        VmAirgapSandbox,
+    )
+
+    seams = mesh_cmd._build_adopt_seams()
+    assert isinstance(seams, AdoptSeams)
+    assert isinstance(seams.verifier, BoundManifestVerifier)
+    assert isinstance(seams.eval_gate, AutoresearchEvalGate)
+    assert isinstance(seams.sandbox, VmAirgapSandbox)
+    assert callable(seams.promote)
+
+
+def test_build_vm_runner_raises_when_sandbox_host_unset(tmp_path: Path) -> None:
+    """Fail-closed: with `mesh.sandbox_host` unset the runner RAISES when CALLED
+    (never silently passing the sandbox gate) — and the check is deferred to
+    invocation, so building the seam alone is fine."""
+    from sanctum_cli.errors import LocalError
+
+    runner_fn = mesh_cmd._build_vm_runner()  # building is fine — no host needed yet
+    with pytest.raises(LocalError) as exc:
+        runner_fn(tmp_path / "champ")
+    assert "mesh.sandbox_host is not configured" in exc.value.message
+
+
+def test_build_vm_runner_passes_configured_host_on_invocation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With `mesh.sandbox_host` set, the closure calls vm_airgap_runner with that host."""
+    from sanctum_cli.mesh.adapters import SandboxProbe
+
+    inst = tmp_path / "instance.yaml"
+    inst.write_text("mesh:\n  sandbox_host: vm-airgap.tailnet\n", encoding="utf-8")
+    monkeypatch.setenv("SANCTUM_INSTANCE_FILE", str(inst))
+
+    seen: dict[str, object] = {}
+
+    def _fake_runner(path: Path, *, host: str) -> SandboxProbe:
+        seen["path"] = path
+        seen["host"] = host
+        return SandboxProbe(completed=True, egress_attempted=False, notes="")
+
+    monkeypatch.setattr(mesh_cmd, "vm_airgap_runner", _fake_runner)
+    runner_fn = mesh_cmd._build_vm_runner()
+    probe = runner_fn(tmp_path / "champ")
+    assert probe.completed is True
+    assert seen == {"path": tmp_path / "champ", "host": "vm-airgap.tailnet"}

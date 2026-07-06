@@ -43,7 +43,7 @@ from rich.text import Text
 from sanctum_cli import config, recipes
 from sanctum_cli.backends import b2, gdrive, r2
 from sanctum_cli.commands import backup as backup_cmd
-from sanctum_cli.errors import LocalError, UserError
+from sanctum_cli.errors import LocalError, SanctumError, UserError
 from sanctum_cli.net import heal, link
 from sanctum_cli.onboard_experience import chapter_banner, green_check, recap_card
 from sanctum_cli.providers.base import HealthSnapshot
@@ -112,6 +112,7 @@ RECIPE_GATES: dict[str, tuple[str, ...]] = {
         "wifi-identity",
         "ha-green",
         "network-resilience",
+        "mesh-join",
     ),
     # The Apple arc is UNIVERSAL — the recipe only chooses the backup scope, so the
     # "You" (identity) and "Your AI" chapters run on every recipe. operator/code are
@@ -125,12 +126,14 @@ RECIPE_GATES: dict[str, tuple[str, ...]] = {
         "ai-providers",
         "wifi-identity",
         "network-resilience",
+        "mesh-join",
     ),
     "code": (
         "identity-setup",
         "ai-providers",
         "wifi-identity",
         "network-resilience",
+        "mesh-join",
     ),
 }
 
@@ -177,6 +180,7 @@ _CHAPTER_GATES: dict[str, tuple[str, ...]] = {
         "wifi-identity",
         "ha-green",
         "network-resilience",
+        "mesh-join",
     ),
 }
 
@@ -191,6 +195,7 @@ _GATE_LABELS: dict[str, str] = {
     "wifi-identity": "Wi-Fi identity (stable MAC)",
     "ha-green": "HA Green (Home Assistant)",
     "network-resilience": "Network resilience (self-heal)",
+    "mesh-join": "Sanctum mesh (join the swarm)",
 }
 
 
@@ -223,6 +228,8 @@ def _run_gate(gate: str, *, yes: bool) -> bool:
         return _run_ha_green(yes=yes)
     if gate == "network-resilience":
         return _run_network_resilience(yes=yes)
+    if gate == "mesh-join":
+        return _run_mesh_join(yes=yes)
     return False
 
 
@@ -1850,6 +1857,86 @@ def _run_network_resilience(*, yes: bool) -> bool:
     )
     _install_net_heal_daemon()
     return True
+
+
+# ── Mesh-join gate (join the open Sanctum mesh) ───────────────────────
+# The onboard-time front door to ``sanctum mesh join``. It brings THIS node onto
+# the open Sanctum mesh: ensure the tailnet is up, mint the mesh identity (once),
+# and register with the discovery tracker — reusing the exact pure orchestration
+# (``mesh.join_mesh``) and the real adapters the ``sanctum mesh join`` command
+# uses, so the CLI and the gate can never drift. SKIPPABLE and HONEST-VERIFY, the
+# same doctrine as network-resilience: ``--yes`` skips cleanly (no tailnet / identity
+# / tracker touch), and a green check is emitted ONLY when the join is REAL
+# (``JoinReport.joined`` — the tailnet is up AND the tracker ack'd the registration),
+# never from "the step ran". A tracker that is down (the real client RAISES) or a
+# tailnet that is not up configures nothing and reads "skipped". Non-blocking: the
+# backup already succeeded, so a miss never fails the run.
+
+
+def _run_mesh_join(*, yes: bool) -> bool:
+    """Mesh-join gate — join the open Sanctum mesh (skippable, honest-verify).
+
+    Returns True ONLY on a genuinely verified join: ``JoinReport.joined`` — the
+    tailnet reads ``Running`` AND the discovery tracker really ack'd the registration.
+    Returns False when ``--yes`` skips (no probe/mint/register), the join flow could
+    not run (a down/misbehaving tracker RAISES a :class:`SanctumError` from the real
+    HTTP client — caught here as a clean skip, never a crash), the tailnet is not up,
+    or the tracker declined the registration (HONEST-VERIFY: no false "joined") — so
+    the recap reads "skipped" rather than a false "configured" (design spec §2/§11).
+
+    Interactive-context step, so ``--yes`` SKIPS it. The step is non-blocking: the
+    backup already succeeded, so a miss never fails the run.
+    """
+    if yes:
+        console.print(
+            "  [yellow]skipped[/] — interactive step; run `sanctum onboard` without "
+            "--yes to join the open Sanctum mesh"
+        )
+        return False
+
+    # Local import (mirrors the net gate's lazy sibling-command import): reuse the
+    # exact join orchestration + real adapters the `sanctum mesh join` command uses.
+    from sanctum_cli.commands import mesh as mesh_cmd
+
+    label = mesh_cmd._resolve_label()
+    try:
+        run = mesh_cmd._build_command_runner()
+        store = mesh_cmd._build_identity_store()
+        directory = mesh_cmd._build_directory()
+        report = mesh_cmd.join_mesh(store=store, directory=directory, run=run, label=label)
+    except SanctumError as exc:
+        # A down/misbehaving tracker (the real client raises) or an unbuildable seam:
+        # nothing joined — surface it as a forgiving skip, never a crashed onboarding.
+        console.print(f"  [yellow]![/] mesh join could not run — {escape(exc.message)}")
+        if exc.fix:
+            console.print(f"  [dim]→ {escape(exc.fix)}[/]")
+        return False
+
+    # Best-effort config cache so a re-run reuses this node's label (never fails join).
+    mesh_cmd._persist_mesh_config(label, report.addr)
+
+    # HONEST-VERIFY: claim "joined" only from the real outcome — tailnet up AND ack'd.
+    if report.joined:
+        console.print(
+            f"  [green]✓[/] joined the Sanctum mesh as "
+            f"[bold]{escape(report.identity_fingerprint)}[/] "
+            f"({len(report.peers)} peers, {len(report.champions)} champions to pull)."
+        )
+        return True
+
+    if not report.tailnet_up:
+        console.print(
+            "  [yellow]![/] tailnet not up (no live `tailscale status` == Running) — "
+            "nothing joined. Bring your tailnet up (`tailscale up`), then re-run "
+            "`sanctum onboard` (or `sanctum mesh join`)."
+        )
+    else:
+        console.print(
+            "  [yellow]![/] mesh discovery did not ack the registration — nothing "
+            "joined. Check the tracker, then re-run `sanctum onboard` (or "
+            "`sanctum mesh join`)."
+        )
+    return False
 
 
 # ── Wi-Fi identity gate (SERVER auto-enroll on the home SSID) ─────────

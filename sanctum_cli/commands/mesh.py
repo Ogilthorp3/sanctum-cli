@@ -18,10 +18,10 @@ Every external dependency is an injected seam behind a module-level builder
 (:func:`_build_command_runner` / :func:`_build_identity_store` /
 :func:`_build_directory` / :func:`_build_adopt_seams`), so the whole CLI is
 unit-tested with fakes and touches no live tailnet / tracker / VM. The real
-ML-DSA signer, HTTP tracker, eval-gate, and VM-sandbox adapters are wired into
-those builders in Task 8; until then the non-``CommandRunner`` builders raise a
-clear :class:`~sanctum_cli.errors.LocalError` — the pure orchestration and
-honest-verify proven here stay unchanged when the adapters land.
+Ed25519 (interim ML-DSA) signer, HTTP tracker, autoresearch eval-gate, and
+VM-air-gap sandbox adapters are wired into those builders here (Task 8); the
+pure orchestration and honest-verify proven with fakes stay unchanged behind
+them.
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ import json
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
-from pathlib import Path  # noqa: TC003 - Typer evaluates the annotation at decoration time
+from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Protocol
 
 import typer
@@ -41,14 +41,27 @@ from rich.markup import escape
 
 from sanctum_cli import config
 from sanctum_cli.errors import ExitCode, LocalError, SanctumError, UserError
+from sanctum_cli.mesh.adapters import (
+    AutoresearchEvalGate,
+    BoundManifestVerifier,
+    Ed25519Signer,
+    LocalArtifactStore,
+    VmAirgapSandbox,
+    make_promote,
+    mlx_eval_runner,
+    vm_airgap_runner,
+)
+from sanctum_cli.mesh.identity import MeshIdentityStore
 from sanctum_cli.mesh.seed import seed as seed_local
+from sanctum_cli.mesh.tracker import HttpTrackerTransport
 from sanctum_cli.mesh.types import ArtifactKind, Verdict
 from sanctum_cli.mesh.verify import adopt
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from sanctum_cli.mesh.identity import LoadedIdentity, MeshIdentityStore
+    from sanctum_cli.mesh.adapters import SandboxProbe, VmRunner
+    from sanctum_cli.mesh.identity import LoadedIdentity
     from sanctum_cli.mesh.types import ArtifactRef, ChampionManifest, MeshIdentity
     from sanctum_cli.mesh.verify import EvalGate, ManifestVerifier, Sandbox
 
@@ -73,11 +86,7 @@ CommandRunner = Callable[[list[str]], str]
 _TS_BINARY = "tailscale"
 _DEFAULT_BASELINE = 0.881
 _DEFAULT_BASELINE_METRIC = "tiered"
-_ADAPTERS_PENDING = (
-    "mesh adapters are not wired yet (Task 8: ML-DSA signer / HTTP tracker / "
-    "eval-gate / VM sandbox). The mesh orchestration is complete and unit-tested; "
-    "the real network/crypto boundary lands with the adapters."
-)
+_DEFAULT_TRACKER_URL = "http://127.0.0.1:8765"
 
 console = Console()
 err_console = Console(stderr=True)
@@ -344,6 +353,68 @@ def _resolve_baseline() -> float:
         return _DEFAULT_BASELINE
 
 
+def _resolve_tracker_url() -> str:
+    """The mesh discovery/tracker URL: ``mesh.tracker_url`` → the loopback default.
+
+    Layer-1 defaults to a loopback tracker (:data:`_DEFAULT_TRACKER_URL`); a shared
+    Sanctum tracker URL is set via ``mesh.tracker_url`` in instance.yaml. Constructing
+    the client over this URL does NO network I/O — the first request is the boundary.
+    """
+    raw = config.instance_value("mesh.tracker_url", _DEFAULT_TRACKER_URL)
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip()
+    return _DEFAULT_TRACKER_URL
+
+
+def _resolve_artifact_dir() -> Path:
+    """The local artifact store dir: ``mesh.artifact_dir`` → ``~/.sanctum/mesh/artifacts``."""
+    raw = config.instance_value("mesh.artifact_dir")
+    if isinstance(raw, str) and raw.strip():
+        return Path(raw.strip()).expanduser()
+    return Path.home() / ".sanctum" / "mesh" / "artifacts"
+
+
+def _resolve_identity_dir() -> Path | None:
+    """Optional identity-dir override: ``mesh.identity_dir`` → ``None`` (store default).
+
+    ``None`` lets :class:`~sanctum_cli.mesh.identity.MeshIdentityStore` use its own
+    default (``~/.sanctum/mesh/identity``) — we only override when explicitly set.
+    """
+    raw = config.instance_value("mesh.identity_dir")
+    if isinstance(raw, str) and raw.strip():
+        return Path(raw.strip()).expanduser()
+    return None
+
+
+def _record_champion(ref: ArtifactRef) -> None:
+    """Persist an adopted champion into instance.yaml's ``mesh`` block (best-effort).
+
+    Mirrors :func:`_persist_mesh_config`'s never-raise write pattern: records
+    ``mesh.champion`` (the content hash) + ``mesh.champion_base_model`` so the adopted
+    champion is durable across runs. A write failure never fails the adopt — the bytes
+    are already local (``make_promote`` verified them before calling this); this only
+    persists the pointer. Only the ``mesh`` block is touched, leaving the rest intact.
+    """
+    path = config.instance_path()
+    try:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError):
+        raw = {}
+    if not isinstance(raw, dict):
+        return
+    mesh_block = raw.get("mesh")
+    if not isinstance(mesh_block, dict):
+        mesh_block = {}
+    mesh_block["champion"] = ref.content_hash
+    mesh_block["champion_base_model"] = ref.manifest.base_model
+    raw["mesh"] = mesh_block
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    except OSError:
+        return
+
+
 def _persist_mesh_config(label: str, addr: str | None) -> None:
     """Persist ``mesh.label`` (+ last ``mesh.addr``) into instance.yaml (best-effort).
 
@@ -393,18 +464,60 @@ def _build_command_runner() -> CommandRunner:
 
 
 def _build_identity_store() -> MeshIdentityStore:
-    """The mesh identity store, bound to the real ML-DSA signer (Task 8)."""
-    raise LocalError(_ADAPTERS_PENDING, fix="wire the mesh adapters (Task 8), then re-run")
+    """The mesh identity store, bound to the real Ed25519 (interim ML-DSA) signer.
+
+    The signing target is ML-DSA-65 (post-quantum); :class:`Ed25519Signer` is the
+    interim real-crypto signer behind the same seam. The identity dir defaults to
+    the store's own ``~/.sanctum/mesh/identity`` unless ``mesh.identity_dir`` is set.
+    """
+    return MeshIdentityStore(Ed25519Signer(), path=_resolve_identity_dir())
 
 
 def _build_directory() -> MeshDirectory:
-    """The discovery/tracker client (Task 8's HTTP-tracker adapter)."""
-    raise LocalError(_ADAPTERS_PENDING, fix="wire the mesh adapters (Task 8), then re-run")
+    """The discovery/tracker client (the HTTP-tracker adapter).
+
+    Construction does NO network I/O — :class:`HttpTrackerTransport` builds its httpx
+    client without issuing a request; the first real read/write is the boundary.
+    """
+    return HttpTrackerTransport(_resolve_tracker_url())
+
+
+def _build_vm_runner() -> VmRunner:
+    """The sandbox seam's isolated-run runner, bound to the configured air-gap VM.
+
+    Fail-closed: ``mesh.sandbox_host`` must name the air-gapped VM for a real pull.
+    The missing-host check happens on INVOCATION (inside the returned closure), not
+    at construction — so a ``pull`` of a champion that fails an earlier gate never
+    needs the host, and an unset host RAISES rather than silently passing the sandbox
+    gate (which would let unverified weights through).
+    """
+    host = config.instance_value("mesh.sandbox_host")
+
+    def _runner(adapter_path: Path) -> SandboxProbe:
+        if not isinstance(host, str) or not host.strip():
+            raise LocalError(
+                "mesh.sandbox_host is not configured",
+                fix="set mesh.sandbox_host to your air-gapped VM's address "
+                "(e.g. the VM's tailnet host) in instance.yaml",
+            )
+        return vm_airgap_runner(adapter_path, host=host.strip())
+
+    return _runner
 
 
 def _build_adopt_seams() -> AdoptSeams:
-    """The verify → eval → sandbox → promote seams for ``pull`` (Task 8)."""
-    raise LocalError(_ADAPTERS_PENDING, fix="wire the mesh adapters (Task 8), then re-run")
+    """The verify → eval → sandbox → promote seams for ``pull``, over one shared store.
+
+    All four seams resolve artifact bytes through a single
+    :class:`LocalArtifactStore` at :func:`_resolve_artifact_dir`, so the hash gate,
+    eval gate, sandbox, and promote all agree on where the champion's bytes live.
+    """
+    store = LocalArtifactStore(_resolve_artifact_dir())
+    verifier = BoundManifestVerifier(store, Ed25519Signer().verify)
+    eval_gate = AutoresearchEvalGate(store, mlx_eval_runner)
+    sandbox = VmAirgapSandbox(store, _build_vm_runner())
+    promote = make_promote(store, record=_record_champion)
+    return AdoptSeams(verifier=verifier, eval_gate=eval_gate, sandbox=sandbox, promote=promote)
 
 
 # ─── printing (every ✓/✗ derived from a real outcome) ────────────────────
