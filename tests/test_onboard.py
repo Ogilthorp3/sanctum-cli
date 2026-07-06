@@ -269,6 +269,29 @@ def test_firewalla_compat_gate_listed_in_family_recipe() -> None:
     assert set(onboard.RECIPE_GATES) <= set(recipes.BUILTINS)
 
 
+def test_haus_scan_gate_registered_between_firewalla_compat_and_network_gear() -> None:
+    """haus-scan is recipe-listed data in the family order, in the right position.
+
+    It sits immediately AFTER firewalla-compat and BEFORE network-gear: discovery
+    runs first (find + pair across the LAN at each device's own ip), and the
+    gateway-only network-gear gate stays as the manual fallback right behind it.
+    """
+    gates = onboard.RECIPE_GATES["family"]
+    assert "haus-scan" in gates
+    assert gates.index("haus-scan") == gates.index("firewalla-compat") + 1
+    assert gates.index("haus-scan") == gates.index("network-gear") - 1
+    # Registered in the label map; every gate maps a real recipe.
+    assert "haus-scan" in onboard._GATE_LABELS
+    assert set(onboard.RECIPE_GATES) <= set(recipes.BUILTINS)
+
+
+def test_haus_scan_gate_wired_into_dispatch_loop() -> None:
+    """The 'haus-scan' branch is actually dispatched — registration alone is not enough."""
+    src = inspect.getsource(onboard._run_gate)
+    assert 'gate == "haus-scan"' in src
+    assert "_run_haus_scan(yes=yes)" in src
+
+
 # ── Family setup interview (family recipe) ────────────────────────────
 #
 # The interview seeds the screen-time registry (devices.yaml): names, roles,
