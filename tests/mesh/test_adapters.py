@@ -14,7 +14,8 @@ live here:
 The real runners (``mlx_eval_runner`` / ``vm_airgap_runner``) shell out; their
 argv-building + output-parsing glue is unit-tested with a fake ``subprocess``
 (hermetic). The live boundary itself is the ``@pytest.mark.integration`` e2e
-drill's job, not ``make check``'s — see ``test_real_runner_smoke`` (skipped).
+drill's job, not ``make check``'s — see ``test_real_runner_smoke`` (deselected
+by the ``-m 'not integration'`` in ``addopts``, not an unconditional skip).
 """
 
 from __future__ import annotations
@@ -45,10 +46,15 @@ if TYPE_CHECKING:
 
 # ─── shared fixtures / helpers ───────────────────────────────────────────
 
+# A real-shape sha256 hex id (64 lowercase hex chars). path_for now rejects
+# anything else, so helpers and refs default to a valid id.
+_HEX = "ab" * 32
+_SHA = "sha256:" + _HEX
+
 
 def _manifest(
     *,
-    content_hash: str = "sha256:abc",
+    content_hash: str = _SHA,
     producer: str = "ed25519:PRODUCER",
     signature: str = "sig:XYZ",
     base_model: str = "qwen3.6-35b-a3b-4bit",
@@ -65,7 +71,7 @@ def _manifest(
     )
 
 
-def _ref(*, content_hash: str = "sha256:abc", **kw: str) -> ArtifactRef:
+def _ref(*, content_hash: str = _SHA, **kw: str) -> ArtifactRef:
     manifest = _manifest(content_hash=content_hash, **kw)
     return ArtifactRef(content_hash=content_hash, seeders=["100.64.0.7"], manifest=manifest)
 
@@ -191,19 +197,37 @@ def test_verify_false_on_wrong_length_key() -> None:
 
 def test_path_for_strips_prefix_and_joins(tmp_path: Path) -> None:
     store = LocalArtifactStore(tmp_path)
-    assert store.path_for(_ref(content_hash="sha256:deadbeef")) == tmp_path / "deadbeef"
+    hex_id = "de" * 32
+    assert store.path_for(_ref(content_hash="sha256:" + hex_id)) == tmp_path / hex_id
 
 
 def test_path_for_does_not_require_existence(tmp_path: Path) -> None:
     store = LocalArtifactStore(tmp_path)
-    path = store.path_for(_ref(content_hash="sha256:cafe"))
-    assert path == tmp_path / "cafe"
+    hex_id = "ca" * 32
+    path = store.path_for(_ref(content_hash="sha256:" + hex_id))
+    assert path == tmp_path / hex_id
     assert not path.exists()
 
 
-def test_path_for_keeps_hash_without_prefix(tmp_path: Path) -> None:
+def test_path_for_raises_on_traversal_hash(tmp_path: Path) -> None:
+    # An untrusted peer manifest must not be able to escape the store dir.
     store = LocalArtifactStore(tmp_path)
-    assert store.path_for(_ref(content_hash="rawhex")) == tmp_path / "rawhex"
+    with pytest.raises(LocalError):
+        store.path_for(_ref(content_hash="sha256:../../../etc/passwd"))
+
+
+def test_path_for_raises_on_non_hex_hash(tmp_path: Path) -> None:
+    # 64 chars but not all hex (g/z are not hex digits).
+    store = LocalArtifactStore(tmp_path)
+    with pytest.raises(LocalError):
+        store.path_for(_ref(content_hash="sha256:" + "z" * 64))
+
+
+def test_path_for_raises_on_wrong_length_hex(tmp_path: Path) -> None:
+    # Valid hex chars but the wrong length for a sha256 id.
+    store = LocalArtifactStore(tmp_path)
+    with pytest.raises(LocalError):
+        store.path_for(_ref(content_hash="sha256:" + "a" * 63))
 
 
 # ─── BoundManifestVerifier ───────────────────────────────────────────────
@@ -229,6 +253,14 @@ def test_verify_hash_false_when_bytes_differ(tmp_path: Path) -> None:
 def test_verify_hash_false_when_artifact_missing(tmp_path: Path) -> None:
     # A missing artifact is a failed hash gate, not an exception.
     ref = _ref(content_hash="sha256:" + "1" * 64)
+    verifier = BoundManifestVerifier(LocalArtifactStore(tmp_path), RecordingVerifyFn(True))
+    assert verifier.verify_hash(ref) is False
+
+
+def test_verify_hash_false_on_malformed_hash(tmp_path: Path) -> None:
+    # A hostile/malformed content hash (path_for would raise) is a clean FAILED
+    # hash gate, never a crash out of adopt().
+    ref = _ref(content_hash="sha256:../../../etc/passwd")
     verifier = BoundManifestVerifier(LocalArtifactStore(tmp_path), RecordingVerifyFn(True))
     assert verifier.verify_hash(ref) is False
 
@@ -315,9 +347,10 @@ def test_eval_gate_honours_custom_metric(tmp_path: Path) -> None:
 
 def test_eval_gate_passes_resolved_path_and_base_model(tmp_path: Path) -> None:
     runner = FakeEvalRunner({"tiered": 0.9})
-    ref = _ref(content_hash="sha256:xyz", base_model="my-base")
+    hex_id = "11" * 32
+    ref = _ref(content_hash="sha256:" + hex_id, base_model="my-base")
     AutoresearchEvalGate(LocalArtifactStore(tmp_path), runner).score(ref)
-    assert runner.calls == [(tmp_path / "xyz", "my-base")]
+    assert runner.calls == [(tmp_path / hex_id, "my-base")]
 
 
 # ─── VmAirgapSandbox (glue) ──────────────────────────────────────────────
@@ -346,8 +379,9 @@ def test_sandbox_not_completed_is_not_ok(tmp_path: Path) -> None:
 
 def test_sandbox_passes_resolved_path(tmp_path: Path) -> None:
     runner = FakeVmRunner(SandboxProbe(completed=True, egress_attempted=False))
-    VmAirgapSandbox(LocalArtifactStore(tmp_path), runner).probe(_ref(content_hash="sha256:zzz"))
-    assert runner.calls == [tmp_path / "zzz"]
+    hex_id = "22" * 32
+    VmAirgapSandbox(LocalArtifactStore(tmp_path), runner).probe(_ref(content_hash="sha256:" + hex_id))
+    assert runner.calls == [tmp_path / hex_id]
 
 
 # ─── make_promote ────────────────────────────────────────────────────────
@@ -418,6 +452,27 @@ def test_mlx_eval_runner_raises_on_unparseable_output(
         adapters.mlx_eval_runner(tmp_path / "a", "base")
 
 
+def test_mlx_eval_runner_raises_localerror_on_nonzero_exit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # A harness that exits non-zero must surface as an attributable LocalError,
+    # NOT a raw CalledProcessError out of the eval gate. The fake honours
+    # `check=` so a regression that re-adds check=True would raise
+    # CalledProcessError and fail this test.
+    def fake_run(
+        argv: list[str], *, check: bool = False, **_kw: object
+    ) -> subprocess.CompletedProcess[str]:
+        if check:
+            raise subprocess.CalledProcessError(1, argv, output="", stderr="boom: model not found")
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr="boom: model not found")
+
+    monkeypatch.setattr(adapters.subprocess, "run", fake_run)
+    with pytest.raises(LocalError) as excinfo:
+        adapters.mlx_eval_runner(tmp_path / "a", "base")
+    assert not isinstance(excinfo.value, subprocess.CalledProcessError)
+    assert "boom: model not found" in str(excinfo.value)
+
+
 def test_vm_airgap_runner_ships_then_probes_and_maps(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -439,12 +494,10 @@ def test_vm_airgap_runner_ships_then_probes_and_maps(
 
 
 @pytest.mark.integration
-@pytest.mark.skip(
-    reason="live boundary: needs the mlx-finetune eval harness + air-gapped VM; "
-    "run in the 2-box e2e drill, not make check",
-)
 def test_real_runner_smoke(tmp_path: Path) -> None:  # pragma: no cover
-    # Executable documentation of the live path. Skipped so `make check` stays
-    # hermetic even though its pytest does not pass `-m "not integration"`.
+    # Executable documentation of the live path. DESELECTED from `make check` by
+    # the `-m 'not integration'` in addopts (not an unconditional skip) — it
+    # needs the mlx-finetune eval harness + air-gapped VM. Run it explicitly
+    # with `pytest -m integration` in the 2-box e2e drill.
     scores = adapters.mlx_eval_runner(tmp_path / "champion", "qwen3.6-35b-a3b-4bit")
     assert scores["tiered"] >= 0.0

@@ -29,6 +29,7 @@ hex strings and are never written to logs, reprs, or error messages.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 from collections.abc import Callable, Mapping
@@ -72,6 +73,11 @@ __all__ = [
 ]
 
 _HASH_PREFIX = "sha256:"
+# A real sha256 id after the prefix is stripped: exactly 64 lowercase hex chars.
+# path_for enforces this so an untrusted peer manifest cannot smuggle path
+# separators or `..` segments through content_hash (path-traversal defense).
+_SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
+_EVAL_STDERR_TAIL = 500  # chars of harness stderr surfaced on a non-zero exit
 
 
 # ─── crypto seam ─────────────────────────────────────────────────────────
@@ -135,9 +141,11 @@ class LocalArtifactStore:
 
     This is the single-box content store: the seeder and the puller are the same
     box, so the artifact bytes are already on disk. :meth:`path_for` maps a ref
-    to ``base / <sanitized content hash>`` — the ``sha256:`` prefix is stripped
-    and the remaining hex is used verbatim (a safe filename). It does **not**
-    require the file to exist; callers (the hash gate, promote) check.
+    to ``base / <content hash>`` — the ``sha256:`` prefix is stripped and the
+    remainder is **validated to be a real sha256 hex id** (``^[0-9a-f]{64}$``)
+    before it is joined onto ``base``, so an untrusted peer's ``content_hash``
+    cannot escape the store dir via path separators or ``..`` segments. It does
+    **not** require the file to exist; callers (the hash gate, promote) check.
 
     The cross-box P2P byte-fetch over the tailnet is out of scope for Layer-1
     single-box. An ``HttpArtifactFetcher`` drops in behind the same
@@ -150,8 +158,23 @@ class LocalArtifactStore:
         self._base = base
 
     def path_for(self, ref: ArtifactRef) -> Path:
-        """Return the local path for ``ref`` (existence not required)."""
-        return self._base / ref.content_hash.removeprefix(_HASH_PREFIX)
+        """Return the local path for ``ref`` (existence not required).
+
+        ``ref.content_hash`` comes from an untrusted peer manifest. After the
+        ``sha256:`` prefix is stripped, the remainder must match a real sha256
+        hex id (``^[0-9a-f]{64}$``); anything else — a wrong length, non-hex
+        chars, or a ``../…`` traversal payload — raises
+        :class:`~sanctum_cli.errors.LocalError` rather than resolving a path
+        outside the store dir.
+        """
+        hex_id = ref.content_hash.removeprefix(_HASH_PREFIX)
+        if not _SHA256_HEX.match(hex_id):
+            msg = f"malformed content hash {ref.content_hash!r}: not a sha256 id"
+            raise LocalError(
+                msg,
+                fix="a content hash must be 'sha256:' + 64 lowercase hex chars",
+            )
+        return self._base / hex_id
 
 
 # ─── manifest verifier seam (hash + signature) ───────────────────────────
@@ -164,7 +187,8 @@ class BoundManifestVerifier:
     pipeline can name which one rejected:
 
     * :meth:`verify_hash` — the local bytes reproduce ``ref.content_hash``
-      (a missing artifact is a failed hash gate, not an error);
+      (a missing artifact *or* a malformed/hostile content hash is a failed
+      hash gate, not an error);
     * :meth:`verify_signature` — hash-independent, via
       :func:`sanctum_cli.mesh.artifact.verify_signature`.
 
@@ -184,6 +208,10 @@ class BoundManifestVerifier:
             return artifact.content_hash(self._store.path_for(ref)) == ref.content_hash
         except FileNotFoundError:
             # No local artifact -> a failed hash gate, never an exception.
+            return False
+        except LocalError:
+            # A malformed/hostile content hash (path_for rejected it) is a
+            # clean FAILED hash gate, never a crash out of adopt().
             return False
 
     def verify_signature(self, ref: ArtifactRef) -> bool:
@@ -275,7 +303,17 @@ def mlx_eval_runner(
     ]
     if cases is not None:
         argv += ["--cases", ",".join(cases)]
-    proc = subprocess.run(argv, capture_output=True, text=True, check=True)
+    proc = subprocess.run(argv, capture_output=True, text=True)
+    if proc.returncode != 0:
+        # Fail with an attributable LocalError (not a raw CalledProcessError out
+        # of the eval gate): surface a trimmed tail of the harness's stderr.
+        tail = (proc.stderr or "").strip()[-_EVAL_STDERR_TAIL:]
+        msg = f"eval harness exited non-zero ({proc.returncode}): {tail or '<no stderr>'}"
+        raise LocalError(
+            msg,
+            fix="run ~/Projects/mlx-finetune/scripts/evaluate.py directly on the "
+            "adapter to see the full error",
+        )
     return {"tiered": _parse_aggregate_score(proc.stdout)}
 
 

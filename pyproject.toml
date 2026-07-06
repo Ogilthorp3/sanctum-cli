@@ -30,6 +30,10 @@ dependencies = [
   "httpx>=0.27",
   "anthropic>=0.40",
   "google-genai>=0.3",
+  # Production signing for the champion mesh (Ed25519 now, ML-DSA-65 next).
+  # Previously resolved only transitively via google-genai; the mesh makes it a
+  # first-class dependency (see sanctum_cli/mesh/adapters.py).
+  "cryptography>=42",
 ]
 
 [project.optional-dependencies]
@@ -146,7 +150,7 @@ ignore_missing_imports = true
 # ─── pytest ──────────────────────────────────────────────────────────
 [tool.pytest.ini_options]
 minversion = "8.0"
-addopts = "-ra --strict-markers --strict-config"
+addopts = "-ra --strict-markers --strict-config -m 'not integration'"
 testpaths = ["tests"]
 filterwarnings = ["error"]
 markers = [
