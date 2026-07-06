@@ -61,13 +61,12 @@ honest-verify, zero new dependencies.
   exposes a DHCP/client table yet, so `lister` is `None` in the MVP (YAGNI, not a TODO).
 - EcoFlow / Tuya discovery, auto-configure (write settings, not just pair), and an
   "unknown-roster" review UI are out of scope.
-- **Arc wiring:** `haus-scan` is registered + dispatchable via `_run_gate` and
-  characterized, but is deliberately **NOT** in `_CHAPTER_GATES["Your Network"]`, so
-  the narrated onboarding arc does not auto-run it yet. Rationale: the orchestrator
-  runs a gate only if it belongs to a chapter, and wiring it into the live "Your
-  Network" chapter would fire the real ARP/SSDP/httpx scan inside the interactive
-  onboard experience tests (which mock every chapter gate by name and cannot be
-  edited here). Wiring it into the arc is the follow-up the attended check unlocks.
+- **Arc wiring — DONE (live):** `haus-scan` is in `_CHAPTER_GATES["Your Network"]`
+  (right after `firewalla-compat`, before `network-gear`), so the narrated onboarding
+  arc actually runs it. The six full-arc test helpers that reach the chapter mock
+  `_run_haus_scan` — the same pattern `network-gear`/`ha-green` use, because it prompts
+  for scan-consent + does real ARP/SSDP/httpx and must not do so under test.
+  `make check` green: 1499 passed.
 
 ## The ONE attended check (spec open item #2)
 
@@ -81,7 +80,7 @@ together**:
 - Orbi: `_ORBI_URL` (`/currentsetting.htm`) + `_ORBI_MARKERS` (`Model=RBR/RBS/RBK`) in
   `devices/orbi.py`.
 
-A wrong constant is a one-line + fixture change, never a redesign. Once the fingerprints
-are confirmed live, wire `haus-scan` into `_CHAPTER_GATES["Your Network"]` (right after
-`firewalla-compat`) so the arc runs it, and update the interactive experience tests to
-mock `_run_haus_scan`.
+A wrong constant is a one-line + fixture change, never a redesign — and because the scan
+is **fail-open**, a wrong marker just means the arc reports "no configurable gear found"
+and continues (never a crash, never a false pairing). The gate is already wired into the
+live arc, so this attended run is the only thing between "built" and "field-confirmed".
