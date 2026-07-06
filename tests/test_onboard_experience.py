@@ -314,6 +314,7 @@ def _invoke_onboard_interactive(input_text: str) -> tuple[int, str]:
         patch("sanctum_cli.commands.onboard._run_family_setup", return_value=False),
         patch("sanctum_cli.commands.onboard._run_firewalla_pairing", return_value=False),
         patch("sanctum_cli.commands.onboard._run_firewalla_compat", return_value=False),
+        patch("sanctum_cli.commands.onboard._run_haus_scan", return_value=False),
         patch("sanctum_cli.commands.onboard._run_network_gear", return_value=False),
         patch("sanctum_cli.commands.onboard._run_ha_green", return_value=False),
         patch("sanctum_cli.commands.onboard._run_network_resilience", return_value=False),

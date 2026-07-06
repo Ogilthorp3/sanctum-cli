@@ -321,6 +321,9 @@ def _invoke_family_onboard_interactive(input_text: str) -> tuple[int, str]:
         # don't consume their stdin.
         patch("sanctum_cli.commands.onboard._run_firewalla_pairing"),
         patch("sanctum_cli.commands.onboard._run_ai_providers"),
+        # Haus-scan prompts for scan-consent before it self-skips; mock it so it
+        # neither prompts nor runs a real arp/SSDP/httpx scan in the interview tests.
+        patch("sanctum_cli.commands.onboard._run_haus_scan"),
         # HA Green is a later interactive gate (own tests); mock it so a real TCP
         # probe to 10.0.0.3 never runs and it never consumes this gate's stdin.
         patch("sanctum_cli.commands.onboard._run_ha_green"),

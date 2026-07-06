@@ -271,6 +271,7 @@ def _invoke_family_onboard_interactive(input_text: str) -> tuple[int, str]:
         patch("sanctum_cli.commands.onboard._run_family_setup"),
         patch("sanctum_cli.commands.onboard._run_firewalla_pairing"),
         patch("sanctum_cli.commands.onboard._run_network_gear"),
+        patch("sanctum_cli.commands.onboard._run_haus_scan"),
         # HA Green is a later interactive gate (own tests); mock it so a real TCP
         # probe to 10.0.0.3 never runs and it never consumes this chapter's stdin.
         patch("sanctum_cli.commands.onboard._run_ha_green"),

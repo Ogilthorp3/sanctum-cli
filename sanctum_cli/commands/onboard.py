@@ -181,6 +181,7 @@ _CHAPTER_GATES: dict[str, tuple[str, ...]] = {
     "Your Network": (
         "firewalla-pairing",
         "firewalla-compat",
+        "haus-scan",
         "network-gear",
         "wifi-identity",
         "ha-green",
