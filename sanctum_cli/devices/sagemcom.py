@@ -39,6 +39,8 @@ import contextlib
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, TypeVar
 
+import httpx
+
 from sanctum_cli import keychain
 from sanctum_cli.devices import registry
 from sanctum_cli.devices.base import (
@@ -52,7 +54,7 @@ from sanctum_cli.devices.base import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Coroutine
+    from collections.abc import Callable, Coroutine
     from collections.abc import Set as AbstractSet
 
 T = TypeVar("T")
@@ -162,16 +164,48 @@ def _make_client(creds: Creds) -> Any:
     )
 
 
-def _probe_is_sagemcom(gateway_ip: str) -> bool:  # noqa: ARG001 - probe is mocked in tests
+# Read-only fingerprint constants. An unauthenticated SAH JSON-req to a Sagemcom
+# hub is rejected with the ``XMO_INVALID_SESSION_ERR`` marker — a positive tell
+# that costs one short-timeout POST and mutates nothing.
+#
+# NOTE (live-confirm — spec open item #2): the exact URL path (``/cgi/json-req``)
+# and the marker are confirmed against Bert's live Bell F5697 during the attended
+# smoke. The SHAPE (injected ``http_post`` seam + marker constant) is what this
+# locks; a wrong constant is a one-line + fixture change, not a redesign.
+_FINGERPRINT_TIMEOUT_S = 2.0
+_SAGEMCOM_MARKER = "XMO_INVALID_SESSION_ERR"
+_SAH_LOGIN_URL = "http://{ip}/cgi/json-req"
+_SAH_PROBE_BODY = '{"request":{"id":0,"session-id":0,"method":"getValue","parameters":{}}}'
+
+
+def _default_sah_post(url: str, data: str) -> str:
+    """POST an unauthenticated SAH JSON-req; return the body (or "" on any error)."""
+    try:
+        resp = httpx.post(url, content=data, timeout=_FINGERPRINT_TIMEOUT_S)
+    except (httpx.HTTPError, OSError):
+        return ""
+    return resp.text
+
+
+def _probe_is_sagemcom(
+    gateway_ip: str,
+    *,
+    http_post: Callable[[str, str], str] = _default_sah_post,
+) -> bool:
     """Read-only fingerprint: does the gateway look like a Sagemcom hub?
 
-    Real implementation would issue an *unauthenticated* JSON-req and match the
-    ``XMO_INVALID_SESSION_ERR`` shape Sagemcom firmware returns (or read
-    ``ProductClass`` if a session exists). It is a pure read — no mutation — and
-    is the seam tests monkeypatch so ``detect`` never opens a socket. Conservative
-    default: assume *not* Sagemcom unless the probe positively says so.
+    An unauthenticated SAH JSON-req to a Sagemcom hub returns the
+    ``XMO_INVALID_SESSION_ERR`` shape. Pure read — no mutation, no auth. The
+    ``http_post`` seam is injected so tests never open a socket; the default
+    poster (httpx) is exercised only at the live boundary. Conservative default:
+    assume *not* Sagemcom unless the marker is positively seen.
     """
-    return False
+    body = ""
+    try:
+        body = http_post(_SAH_LOGIN_URL.format(ip=gateway_ip), _SAH_PROBE_BODY)
+    except Exception:  # a probe must never raise into detect()
+        return False
+    return _SAGEMCOM_MARKER in body
 
 
 class SagemcomHubProvider:

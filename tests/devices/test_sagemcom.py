@@ -548,3 +548,33 @@ def test_rollback_reports_failure_when_a_restore_write_is_rejected(
     res = p.rollback(snap)
     assert res.ok is False
     assert "XMO_NON_WRITABLE_PARAMETER_ERR" in res.detail
+
+
+# ── _probe_is_sagemcom: real read-only fingerprint (injected http_post seam) ──
+#
+# The fingerprint POSTs an UNAUTHENTICATED SAH JSON-req to the gateway and matches
+# the ``XMO_INVALID_SESSION_ERR`` shape Sagemcom firmware returns. The http_post
+# seam is injected so no socket opens; the default poster (httpx) is exercised only
+# at the live boundary. Pure read — no mutation, no auth.
+
+
+def test_probe_is_sagemcom_matches_invalid_session_shape() -> None:
+    # An unauthenticated SAH JSON-req to a Sagemcom hub returns this error shape.
+    from sanctum_cli.devices import sagemcom
+
+    body = '{"error":{"code":16777231,"description":"XMO_INVALID_SESSION_ERR"}}'
+    assert sagemcom._probe_is_sagemcom("192.168.2.1", http_post=lambda url, data: body) is True
+
+
+def test_probe_is_sagemcom_false_on_foreign_or_dead_gateway() -> None:
+    from sanctum_cli.devices import sagemcom
+
+    assert (
+        sagemcom._probe_is_sagemcom("10.0.0.1", http_post=lambda url, data: "<html>Orbi</html>")
+        is False
+    )
+
+    def boom(url, data):
+        raise OSError("refused")
+
+    assert sagemcom._probe_is_sagemcom("10.0.0.1", http_post=boom) is False
