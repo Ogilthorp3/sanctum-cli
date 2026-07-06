@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -27,6 +28,7 @@ import pytest
 from aiohttp import web
 
 from sanctum_cli.errors import LocalError
+from sanctum_cli.mesh import artifact
 from sanctum_cli.mesh.adapters import Ed25519Signer
 from sanctum_cli.mesh.tracker import (
     CommunityOutcome,
@@ -77,10 +79,29 @@ def _sign_challenge(signer: Ed25519Signer, private: str, public: str, ts: str) -
     return signer.sign(private, f"community-request:{public}:{ts}".encode())
 
 
-def _seeded_registry(public: str, *, signal_invite: str | None = None) -> TrackerRegistry:
-    """A registry where ``public`` has announced one champion (a contributor)."""
+def _self_signed_manifest(
+    signer: Ed25519Signer, public: str, private: str, *, content_hash: str = "sha256:comm"
+) -> ChampionManifest:
+    """A manifest REALLY self-signed by ``public`` — passes the announce-credit gate.
+
+    The signature covers the exact bytes :func:`artifact.verify_signature` checks
+    (``content_hash`` + the canonical manifest with the signature field stripped),
+    so ``verify_signature(manifest, signer.verify)`` holds and ``announce`` credits
+    the producer as a contributor.
+    """
+    base = _manifest(content_hash=content_hash, producer_pubkey=public)
+    signature = signer.sign(private, artifact._signing_message(base))
+    signed = replace(base, signature=signature)
+    assert artifact.verify_signature(signed, signer.verify)  # guard the helper itself
+    return signed
+
+
+def _seeded_registry(
+    signer: Ed25519Signer, public: str, private: str, *, signal_invite: str | None = None
+) -> TrackerRegistry:
+    """A registry where ``public`` has announced one SELF-SIGNED champion (a contributor)."""
     reg = TrackerRegistry(signal_invite=signal_invite)
-    reg.announce(_manifest("sha256:comm", producer_pubkey=public), "100.64.0.1")
+    reg.announce(_self_signed_manifest(signer, public, private), "100.64.0.1")
     return reg
 
 
@@ -217,34 +238,66 @@ def test_registry_list_peers_returns_copy() -> None:
 # ─── TrackerRegistry.community — the signed contribute-to-join gate ───────
 
 
-def test_registry_has_seeded_only_after_announce() -> None:
-    _signer, public, _private = _mint()
+def test_registry_announce_credits_producer_on_valid_self_signature() -> None:
+    # Fix 1: a validly self-signed announce CREDITS the producer as a contributor.
+    signer, public, private = _mint()
     reg = TrackerRegistry()
     assert reg.has_seeded(public) is False
-    reg.announce(_manifest("sha256:x", producer_pubkey=public), "100.64.0.1")
+    reg.announce(_self_signed_manifest(signer, public, private, content_hash="sha256:x"), "1.1.1.1")
     assert reg.has_seeded(public) is True
+
+
+def test_registry_announce_forged_signature_is_stored_but_not_credited() -> None:
+    # Fix 1: the tracker stays a dumb pointer — a forged/unsigned manifest is still
+    # STORED + FINDABLE, but it does NOT credit the announcer as a contributor.
+    _signer, public, _private = _mint()
+    reg = TrackerRegistry()
+    forged = _manifest("sha256:forge", producer_pubkey=public)  # bogus "sig:XYZ"
+    reg.announce(forged, "100.64.0.1")
+
+    # stored + findable (discovery is unaffected) …
+    assert reg.list_catalog() == [forged]
+    ref = reg.find("sha256:forge")
+    assert ref is not None
+    assert ref.seeders == ["100.64.0.1"]
+    # … but NOT credited: the producer never earns the contributor bit.
+    assert reg.has_seeded(public) is False
+
+
+def test_registry_community_not_a_contributor_after_forged_announce() -> None:
+    # Fix 1 end-to-end: a forged announce cannot buy the community invite — even a
+    # PROVEN owner is refused not_a_contributor because the announce did not credit.
+    signer, public, private = _mint()
+    reg = TrackerRegistry(signal_invite=_INVITE)
+    reg.announce(_manifest("sha256:forge", producer_pubkey=public), "100.64.0.1")  # forged sig
+    ts = datetime.now(UTC).isoformat()
+    sig = _sign_challenge(signer, private, public, ts)
+
+    outcome = reg.community(public, ts, sig)
+
+    assert outcome == CommunityOutcome(invite=None, reason="not_a_contributor")
 
 
 def test_registry_community_returns_invite_for_seeded_signed_fresh() -> None:
     signer, public, private = _mint()
-    reg = _seeded_registry(public, signal_invite=_INVITE)
+    reg = _seeded_registry(signer, public, private, signal_invite=_INVITE)
     ts = datetime.now(UTC).isoformat()
     sig = _sign_challenge(signer, private, public, ts)
 
-    outcome = reg.community(public, ts, sig, verify=signer.verify)
+    outcome = reg.community(public, ts, sig)
 
     assert outcome == CommunityOutcome(invite=_INVITE, reason="ok")
 
 
 def test_registry_community_bad_signature_even_for_seeded_pubkey() -> None:
     signer, public, private = _mint()
-    reg = _seeded_registry(public, signal_invite=_INVITE)
+    reg = _seeded_registry(signer, public, private, signal_invite=_INVITE)
     ts = datetime.now(UTC).isoformat()
     # A signature over a DIFFERENT message: the pubkey seeded, but ownership
     # is not proven for this challenge → reveal-nothing bad_signature.
     forged = signer.sign(private, b"community-request:someone-else:2000-01-01T00:00:00+00:00")
 
-    outcome = reg.community(public, ts, forged, verify=signer.verify)
+    outcome = reg.community(public, ts, forged)
 
     assert outcome == CommunityOutcome(invite=None, reason="bad_signature")
 
@@ -252,14 +305,14 @@ def test_registry_community_bad_signature_even_for_seeded_pubkey() -> None:
 def test_registry_community_bad_signature_hides_configured_and_contributor() -> None:
     # Fail-closed ordering: an unproven caller must not learn "configured" or
     # "not a contributor" — a bad sig is caught first, before either check.
-    signer, public, _private = _mint()
+    signer, public, private = _mint()
     other_signer, _other_pub, other_priv = _mint()
-    reg = _seeded_registry(public, signal_invite=_INVITE)
+    reg = _seeded_registry(signer, public, private, signal_invite=_INVITE)
     ts = datetime.now(UTC).isoformat()
     # Signed by the WRONG key → verify(public, …) fails.
     wrong_key_sig = _sign_challenge(other_signer, other_priv, public, ts)
 
-    outcome = reg.community(public, ts, wrong_key_sig, verify=signer.verify)
+    outcome = reg.community(public, ts, wrong_key_sig)
 
     assert outcome.reason == "bad_signature"
     assert outcome.invite is None
@@ -271,41 +324,70 @@ def test_registry_community_not_a_contributor_for_never_seeded() -> None:
     ts = datetime.now(UTC).isoformat()
     sig = _sign_challenge(signer, private, public, ts)
 
-    outcome = reg.community(public, ts, sig, verify=signer.verify)
+    outcome = reg.community(public, ts, sig)
+
+    assert outcome == CommunityOutcome(invite=None, reason="not_a_contributor")
+
+
+def test_registry_community_proven_non_contributor_does_not_leak_not_configured() -> None:
+    # Fix 3 (reveal order): a PROVEN, fresh caller who is NOT a contributor must be
+    # told not_a_contributor even when NO invite is configured — it must not learn
+    # whether a community exists (contributor check precedes config-existence).
+    signer, public, private = _mint()
+    reg = TrackerRegistry(signal_invite=None)  # proven, but never seeded AND no invite
+    ts = datetime.now(UTC).isoformat()
+    sig = _sign_challenge(signer, private, public, ts)
+
+    outcome = reg.community(public, ts, sig)
 
     assert outcome == CommunityOutcome(invite=None, reason="not_a_contributor")
 
 
 def test_registry_community_not_configured_when_invite_unset() -> None:
+    # A PROVEN contributor on a registry with no invite learns not_configured.
     signer, public, private = _mint()
-    reg = _seeded_registry(public, signal_invite=None)  # seeded, but no invite
+    reg = _seeded_registry(signer, public, private, signal_invite=None)  # seeded, no invite
     ts = datetime.now(UTC).isoformat()
     sig = _sign_challenge(signer, private, public, ts)
 
-    outcome = reg.community(public, ts, sig, verify=signer.verify)
+    outcome = reg.community(public, ts, sig)
+
+    assert outcome == CommunityOutcome(invite=None, reason="not_configured")
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\t\n"])
+def test_registry_community_empty_or_whitespace_invite_is_not_configured(blank: str) -> None:
+    # Fix 4: an empty/whitespace-only invite is normalized to "no community" →
+    # a proven contributor gets not_configured (never an empty invite string).
+    signer, public, private = _mint()
+    reg = _seeded_registry(signer, public, private, signal_invite=blank)
+    ts = datetime.now(UTC).isoformat()
+    sig = _sign_challenge(signer, private, public, ts)
+
+    outcome = reg.community(public, ts, sig)
 
     assert outcome == CommunityOutcome(invite=None, reason="not_configured")
 
 
 def test_registry_community_stale_when_now_far_in_future() -> None:
     signer, public, private = _mint()
-    reg = _seeded_registry(public, signal_invite=_INVITE)
+    reg = _seeded_registry(signer, public, private, signal_invite=_INVITE)
     ts = datetime.now(UTC).isoformat()
     sig = _sign_challenge(signer, private, public, ts)  # a real, valid signature
     far_future = datetime.now(UTC) + timedelta(hours=1)
 
-    outcome = reg.community(public, ts, sig, verify=signer.verify, now=far_future)
+    outcome = reg.community(public, ts, sig, now=far_future)
 
     assert outcome == CommunityOutcome(invite=None, reason="stale")
 
 
 def test_registry_community_stale_on_malformed_ts_fail_closed() -> None:
     signer, public, private = _mint()
-    reg = _seeded_registry(public, signal_invite=_INVITE)
+    reg = _seeded_registry(signer, public, private, signal_invite=_INVITE)
     ts = "not-a-timestamp"
     sig = _sign_challenge(signer, private, public, ts)  # signature is valid…
 
-    outcome = reg.community(public, ts, sig, verify=signer.verify)
+    outcome = reg.community(public, ts, sig)
 
     # …but the challenge instant is unparseable → fail-closed as stale.
     assert outcome == CommunityOutcome(invite=None, reason="stale")
@@ -313,12 +395,12 @@ def test_registry_community_stale_on_malformed_ts_fail_closed() -> None:
 
 def test_registry_community_fresh_within_skew_window_is_ok() -> None:
     signer, public, private = _mint()
-    reg = _seeded_registry(public, signal_invite=_INVITE)
+    reg = _seeded_registry(signer, public, private, signal_invite=_INVITE)
     ts = datetime.now(UTC).isoformat()
     sig = _sign_challenge(signer, private, public, ts)
     just_inside = datetime.now(UTC) + timedelta(seconds=90)  # < ±120 s
 
-    outcome = reg.community(public, ts, sig, verify=signer.verify, now=just_inside)
+    outcome = reg.community(public, ts, sig, now=just_inside)
 
     assert outcome.reason == "ok"
 
@@ -494,21 +576,27 @@ def test_client_community_returns_invite_on_200(
     assert transport.community("pub", "ts", "sig") == CommunityOutcome(invite=_INVITE, reason="ok")
 
 
-def test_client_community_sends_pubkey_ts_sig_query(
+def test_client_community_posts_pubkey_ts_signature_body(
     transport_factory: Callable[..., HttpTrackerTransport],
 ) -> None:
+    # Fix 2 (client leg): the signed credential is POSTed in the BODY — never a
+    # URL query — so it cannot leak into access logs / referrers.
     seen: dict[str, Any] = {}
 
     def capture(request: httpx.Request) -> httpx.Response:
+        seen["method"] = request.method
         seen["path"] = request.url.path
         seen["params"] = dict(request.url.params)
+        seen["body"] = json.loads(request.content)
         return httpx.Response(200, json={"invite": _INVITE})
 
     transport = transport_factory(handler=capture)
     transport.community("PUB", "TS", "SIG")
 
+    assert seen["method"] == "POST"
     assert seen["path"] == "/community"
-    assert seen["params"] == {"pubkey": "PUB", "ts": "TS", "sig": "SIG"}
+    assert seen["params"] == {}  # nothing in the query string
+    assert seen["body"] == {"pubkey": "PUB", "ts": "TS", "signature": "SIG"}
 
 
 @pytest.mark.parametrize("reason", ["bad_signature", "stale", "not_a_contributor"])
@@ -632,7 +720,7 @@ def test_build_tracker_app_wires_all_routes() -> None:
         ("GET", "/catalog"),
         ("POST", "/announce"),
         ("GET", "/find"),
-        ("GET", "/community"),
+        ("POST", "/community"),
     }
 
 
@@ -716,13 +804,15 @@ def test_handler_peers_and_catalog_report_registry_state() -> None:
 
 def test_handler_community_ok_returns_200_invite() -> None:
     signer, public, private = _mint()
-    reg = _seeded_registry(public, signal_invite=_INVITE)
-    handlers = TrackerHandlers(reg, verify=signer.verify)
+    reg = _seeded_registry(signer, public, private, signal_invite=_INVITE)
+    handlers = TrackerHandlers(reg)
     ts = datetime.now(UTC).isoformat()
     sig = _sign_challenge(signer, private, public, ts)
 
     resp = asyncio.run(
-        handlers.community(_StubRequest(query={"pubkey": public, "ts": ts, "sig": sig}))  # type: ignore[arg-type]
+        handlers.community(  # type: ignore[arg-type]
+            _StubRequest(json_body={"pubkey": public, "ts": ts, "signature": sig})
+        )
     )
 
     assert resp.status == 200
@@ -730,13 +820,15 @@ def test_handler_community_ok_returns_200_invite() -> None:
 
 
 def test_handler_community_bad_signature_returns_403() -> None:
-    signer, public, _private = _mint()
-    reg = _seeded_registry(public, signal_invite=_INVITE)
-    handlers = TrackerHandlers(reg, verify=signer.verify)
+    signer, public, private = _mint()
+    reg = _seeded_registry(signer, public, private, signal_invite=_INVITE)
+    handlers = TrackerHandlers(reg)
     ts = datetime.now(UTC).isoformat()
 
     resp = asyncio.run(
-        handlers.community(_StubRequest(query={"pubkey": public, "ts": ts, "sig": "00"}))  # type: ignore[arg-type]
+        handlers.community(  # type: ignore[arg-type]
+            _StubRequest(json_body={"pubkey": public, "ts": ts, "signature": "00"})
+        )
     )
 
     assert resp.status == 403
@@ -745,29 +837,34 @@ def test_handler_community_bad_signature_returns_403() -> None:
 
 def test_handler_community_not_configured_returns_404() -> None:
     signer, public, private = _mint()
-    reg = _seeded_registry(public, signal_invite=None)
-    handlers = TrackerHandlers(reg, verify=signer.verify)
+    reg = _seeded_registry(signer, public, private, signal_invite=None)
+    handlers = TrackerHandlers(reg)
     ts = datetime.now(UTC).isoformat()
     sig = _sign_challenge(signer, private, public, ts)
 
     resp = asyncio.run(
-        handlers.community(_StubRequest(query={"pubkey": public, "ts": ts, "sig": sig}))  # type: ignore[arg-type]
+        handlers.community(  # type: ignore[arg-type]
+            _StubRequest(json_body={"pubkey": public, "ts": ts, "signature": sig})
+        )
     )
 
     assert resp.status == 404
     assert _body(resp) == {"reason": "not_configured"}
 
 
-def test_handler_community_defaults_to_real_ed25519_verify() -> None:
-    # No injected verify → the default Ed25519Signer().verify is used end to end.
+def test_handler_community_reads_signed_body_end_to_end() -> None:
+    # The handler reads {pubkey, ts, signature} from the POST body (not the query)
+    # and proves ownership end to end with the registry's default Ed25519 verify.
     signer, public, private = _mint()
-    reg = _seeded_registry(public, signal_invite=_INVITE)
-    handlers = TrackerHandlers(reg)  # default verify
+    reg = _seeded_registry(signer, public, private, signal_invite=_INVITE)
+    handlers = TrackerHandlers(reg)
     ts = datetime.now(UTC).isoformat()
     sig = _sign_challenge(signer, private, public, ts)
 
     resp = asyncio.run(
-        handlers.community(_StubRequest(query={"pubkey": public, "ts": ts, "sig": sig}))  # type: ignore[arg-type]
+        handlers.community(  # type: ignore[arg-type]
+            _StubRequest(json_body={"pubkey": public, "ts": ts, "signature": sig})
+        )
     )
 
     assert resp.status == 200
