@@ -30,15 +30,19 @@ so a change on one side that the other does not follow shows up as a test break.
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import httpx
 from aiohttp import web
 
 from sanctum_cli.errors import LocalError
+from sanctum_cli.mesh.adapters import Ed25519Signer
 from sanctum_cli.mesh.types import ArtifactRef, ChampionManifest, MeshIdentity
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from types import TracebackType
 
     # Import-for-typing only: a runtime import would be circular (commands.mesh
@@ -46,7 +50,13 @@ if TYPE_CHECKING:
     # MeshDirectory without any runtime coupling — see ``_conformance`` below.
     from sanctum_cli.commands.mesh import MeshDirectory
 
+    # The Ed25519 verify seam shape: ``(pubkey, message, signature) -> ok``.
+    # Injectable so the community gate can be unit-tested with a fake, and so a
+    # PQ signer can drop in behind the same shape.
+    VerifyFn = Callable[[str, bytes, str], bool]
+
 __all__ = [
+    "CommunityOutcome",
     "HttpTrackerTransport",
     "TrackerHandlers",
     "TrackerRegistry",
@@ -56,6 +66,47 @@ __all__ = [
 
 _DEFAULT_HOST = "127.0.0.1"
 _DEFAULT_PORT = 8765
+
+# The signed community challenge is fresh within ±120 s of the tracker's clock —
+# a small window that bounds replay of a captured request (a tracker-issued nonce
+# is the stronger, deferred option).
+_COMMUNITY_SKEW_SECONDS = 120.0
+# The typed 403 refusals the client will accept back on the wire; anything else
+# in a 403 body is a misbehaving tracker (honest-verify raise).
+_COMMUNITY_REFUSALS = frozenset({"bad_signature", "stale", "not_a_contributor"})
+# 403 must pass through _send (a legitimate refusal body), unlike a 5xx (raise).
+_COMMUNITY_ALLOW_STATUS = frozenset({int(httpx.codes.FORBIDDEN)})
+
+
+@dataclass(frozen=True)
+class CommunityOutcome:
+    """The tracker's verdict on a ``/community`` request.
+
+    ``invite`` is the Signal group link on success (``reason == "ok"``) and
+    ``None`` on every refusal. ``reason`` is one of ``ok`` / ``bad_signature`` /
+    ``stale`` / ``not_a_contributor`` / ``not_configured`` — a typed outcome the
+    HTTP layer maps to a status code and the CLI maps to an honest message.
+    """
+
+    invite: str | None
+    reason: str
+
+
+def _challenge_is_stale(ts: str, now: datetime | None) -> bool:
+    """Return whether ``ts`` is outside the ±120 s freshness window (fail-closed).
+
+    ``ts`` must be an unambiguous ISO-8601 UTC instant — a malformed *or*
+    timezone-naive timestamp is treated as stale so it cannot slip past the
+    replay bound. ``now`` defaults to the tracker's current UTC clock.
+    """
+    reference = now if now is not None else datetime.now(UTC)
+    try:
+        parsed = datetime.fromisoformat(ts)
+    except (ValueError, TypeError):
+        return True
+    if parsed.tzinfo is None:
+        return True
+    return abs((reference - parsed).total_seconds()) > _COMMUNITY_SKEW_SECONDS
 
 
 # ─── the source of truth (pure, hermetic, no network import) ─────────────
@@ -71,11 +122,16 @@ class TrackerRegistry:
     are kept keyed by addr so a tracker can attribute who is at each address.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, signal_invite: str | None = None) -> None:
         self._peers: list[str] = []
         self._identities: dict[str, MeshIdentity] = {}
         self._catalog: dict[str, ChampionManifest] = {}
         self._seeders: dict[str, list[str]] = {}
+        # Every pubkey that has announced ≥ 1 champion — the contribute-to-join
+        # set the community gate reads. ``signal_invite`` is operator config (the
+        # Signal group link); ``None`` means no community is set up on this mesh.
+        self._seeded_pubkeys: set[str] = set()
+        self._signal_invite = signal_invite
 
     def register(self, pubkey: str, label: str, created: str, addr: str) -> bool:
         """Record ``(pubkey, label, created)`` at ``addr`` and ack (always True).
@@ -106,6 +162,51 @@ class TrackerRegistry:
         if addr not in seeders:
             seeders.append(addr)
         self._add_peer(addr)
+        # The producer is now a contributor: it has given a champion to the swarm.
+        self._seeded_pubkeys.add(manifest.producer_pubkey)
+
+    def has_seeded(self, pubkey: str) -> bool:
+        """Return whether ``pubkey`` has announced at least one champion.
+
+        A pubkey becomes a contributor the instant :meth:`announce` records a
+        manifest it produced — the mesh's contribute-to-join gate.
+        """
+        return pubkey in self._seeded_pubkeys
+
+    def community(
+        self,
+        pubkey: str,
+        ts: str,
+        signature: str,
+        *,
+        verify: VerifyFn,
+        now: datetime | None = None,
+    ) -> CommunityOutcome:
+        """Gate the Signal community on proven ownership + freshness + contribution.
+
+        The checks run in a **reveal-nothing** order: an unproven caller learns
+        only that its signature failed — never whether a community is configured
+        or who has seeded.
+
+        1. ``verify(pubkey, message, signature)`` over
+           ``community-request:<pubkey>:<ts>`` must hold → else ``bad_signature``;
+        2. ``ts`` must be a fresh ISO-8601 UTC instant within ±120 s of ``now``
+           (default :func:`datetime.now` UTC) → else ``stale`` (a malformed ``ts``
+           is ``stale`` too — fail-closed);
+        3. an invite must be configured → else ``not_configured``;
+        4. ``pubkey`` must have seeded ≥ 1 champion → else ``not_a_contributor``;
+        5. otherwise the configured invite with ``reason == "ok"``.
+        """
+        message = f"community-request:{pubkey}:{ts}"
+        if not verify(pubkey, message.encode("utf-8"), signature):
+            return CommunityOutcome(invite=None, reason="bad_signature")
+        if _challenge_is_stale(ts, now):
+            return CommunityOutcome(invite=None, reason="stale")
+        if self._signal_invite is None:
+            return CommunityOutcome(invite=None, reason="not_configured")
+        if not self.has_seeded(pubkey):
+            return CommunityOutcome(invite=None, reason="not_a_contributor")
+        return CommunityOutcome(invite=self._signal_invite, reason="ok")
 
     def find(self, content_hash: str) -> ArtifactRef | None:
         """Return the seeders + manifest for ``content_hash``, or ``None`` if unknown."""
@@ -253,6 +354,41 @@ class HttpTrackerTransport:
                 fix="the tracker is misbehaving; check its version and logs",
             ) from exc
 
+    def community(self, pubkey: str, ts: str, signature: str) -> CommunityOutcome:
+        """Ask the tracker for the Signal community invite, proving identity ownership.
+
+        ``GET /community?pubkey&ts&sig``. A ``200`` carries the invite
+        (``reason == "ok"``); a ``403`` carries a typed refusal
+        (``bad_signature`` / ``stale`` / ``not_a_contributor``); a ``404`` means
+        the tracker has no invite configured (``not_configured``). Honest-verify:
+        a transport failure, a 5xx, or a malformed body raises
+        :class:`~sanctum_cli.errors.LocalError` — an invite is never fabricated.
+        """
+        resp = self._send(
+            "GET",
+            "/community",
+            params={"pubkey": pubkey, "ts": ts, "sig": signature},
+            allow_status=_COMMUNITY_ALLOW_STATUS,
+        )
+        if resp.status_code == httpx.codes.NOT_FOUND:
+            return CommunityOutcome(invite=None, reason="not_configured")
+        if resp.status_code == httpx.codes.FORBIDDEN:
+            reason = self._json(resp).get("reason")
+            if reason not in _COMMUNITY_REFUSALS:
+                raise LocalError(
+                    f"mesh tracker returned an unknown community refusal from "
+                    f"{self._base}/community",
+                    fix="the tracker is misbehaving; check its version and logs",
+                )
+            return CommunityOutcome(invite=None, reason=reason)
+        invite = self._json(resp).get("invite")
+        if not isinstance(invite, str):
+            raise LocalError(
+                f"mesh tracker returned no 'invite' string from {self._base}/community",
+                fix="the tracker is misbehaving; check its version and logs",
+            )
+        return CommunityOutcome(invite=invite, reason="ok")
+
     def _manifest_from(self, payload: Any, where: str) -> ChampionManifest:
         """Rebuild a manifest from the OPEN tracker's JSON, honest-verify style.
 
@@ -279,11 +415,14 @@ class HttpTrackerTransport:
         *,
         json_body: Any | None = None,
         params: dict[str, str] | None = None,
+        allow_status: frozenset[int] = frozenset(),
     ) -> httpx.Response:
         """Perform one request; map a transport error and any 5xx/unexpected to LocalError.
 
-        A ``404`` is returned as-is so :meth:`find` can read it as a miss; every
-        other non-2xx (and every transport-level failure) is an honest raise.
+        A ``404`` is returned as-is so :meth:`find` can read it as a miss, as is
+        any status in ``allow_status`` (e.g. a ``403`` community refusal the
+        caller decodes into a typed outcome); every other non-2xx (and every
+        transport-level failure) is an honest raise.
         """
         url = self._base + path
         try:
@@ -295,7 +434,7 @@ class HttpTrackerTransport:
                 f"mesh tracker unreachable at {url}: {exc}",
                 fix="check the tracker is running and reachable, then retry",
             ) from exc
-        if resp.status_code == httpx.codes.NOT_FOUND:
+        if resp.status_code == httpx.codes.NOT_FOUND or resp.status_code in allow_status:
             return resp
         if not resp.is_success:
             raise LocalError(
@@ -342,8 +481,11 @@ class TrackerHandlers:
     can be unit-tested by awaiting it with a stub request — no live socket.
     """
 
-    def __init__(self, registry: TrackerRegistry) -> None:
+    def __init__(self, registry: TrackerRegistry, *, verify: VerifyFn | None = None) -> None:
         self.registry = registry
+        # The Ed25519 verify seam the community gate proves ownership with —
+        # injectable so the handler glue is unit-tested with a fake / real signer.
+        self._verify: VerifyFn = verify if verify is not None else Ed25519Signer().verify
 
     async def register(self, request: web.Request) -> web.Response:
         """``POST /register`` → ``{"ok": bool}`` (the registry's ack)."""
@@ -389,13 +531,33 @@ class TrackerHandlers:
             }
         )
 
+    async def community(self, request: web.Request) -> web.Response:
+        """``GET /community?pubkey&ts&sig`` → 200 invite / 403 refusal / 404 unconfigured.
+
+        Maps the registry's :class:`CommunityOutcome`: ``ok`` →
+        ``200 {"invite": …}``; ``bad_signature`` / ``stale`` /
+        ``not_a_contributor`` → ``403 {"reason": …}``; ``not_configured`` →
+        ``404 {"reason": "not_configured"}``.
+        """
+        outcome = self.registry.community(
+            request.query.get("pubkey", ""),
+            request.query.get("ts", ""),
+            request.query.get("sig", ""),
+            verify=self._verify,
+        )
+        if outcome.reason == "ok":
+            return web.json_response({"invite": outcome.invite})
+        if outcome.reason == "not_configured":
+            return web.json_response({"reason": "not_configured"}, status=404)
+        return web.json_response({"reason": outcome.reason}, status=403)
+
 
 def build_tracker_app(registry: TrackerRegistry | None = None) -> web.Application:
-    """Wire the five discovery routes to a fresh (or injected) :class:`TrackerRegistry`.
+    """Wire the discovery + community routes to a fresh (or injected) :class:`TrackerRegistry`.
 
     Returns an ``aiohttp.web.Application`` ready for :func:`serve` (or for a test
     that inspects its routes). The routes are ``POST /register``, ``GET /peers``,
-    ``GET /catalog``, ``POST /announce``, and ``GET /find``.
+    ``GET /catalog``, ``POST /announce``, ``GET /find``, and ``GET /community``.
     """
     handlers = TrackerHandlers(registry if registry is not None else TrackerRegistry())
     app = web.Application()
@@ -404,6 +566,7 @@ def build_tracker_app(registry: TrackerRegistry | None = None) -> web.Applicatio
     app.router.add_get("/catalog", handlers.catalog)
     app.router.add_post("/announce", handlers.announce)
     app.router.add_get("/find", handlers.find)
+    app.router.add_get("/community", handlers.community)
     return app
 
 

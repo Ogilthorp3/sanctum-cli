@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -26,7 +27,9 @@ import pytest
 from aiohttp import web
 
 from sanctum_cli.errors import LocalError
+from sanctum_cli.mesh.adapters import Ed25519Signer
 from sanctum_cli.mesh.tracker import (
+    CommunityOutcome,
     HttpTrackerTransport,
     TrackerHandlers,
     TrackerRegistry,
@@ -38,25 +41,47 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
 _BASE = "http://tracker.test"
+_INVITE = "https://signal.group/#CjQKIABCDEF"
 
 
 # ─── shared fixtures / helpers ───────────────────────────────────────────
 
 
-def _manifest(content_hash: str = "sha256:abc") -> ChampionManifest:
+def _manifest(
+    content_hash: str = "sha256:abc", producer_pubkey: str = "ed25519:PUB"
+) -> ChampionManifest:
     return ChampionManifest(
         content_hash=content_hash,
         kind=ArtifactKind.LORA_ADAPTER,
         base_model="qwen3.6-35b-a3b-4bit",
         eval_scores={"tiered": 0.897},
         size_bytes=42_000_000,
-        producer_pubkey="ed25519:PUB",
+        producer_pubkey=producer_pubkey,
         signature="sig:XYZ",
     )
 
 
 def _identity() -> MeshIdentity:
     return MeshIdentity(pubkey="ed25519:PUB", label="manoir", created="2026-07-05T00:00:00Z")
+
+
+def _mint() -> tuple[Ed25519Signer, str, str]:
+    """Return ``(signer, public_hex, private_hex)`` — a real Ed25519 identity."""
+    signer = Ed25519Signer()
+    public, private = signer.generate()
+    return signer, public, private
+
+
+def _sign_challenge(signer: Ed25519Signer, private: str, public: str, ts: str) -> str:
+    """Sign the exact ``community-request:<pubkey>:<ts>`` challenge the gate rebuilds."""
+    return signer.sign(private, f"community-request:{public}:{ts}".encode())
+
+
+def _seeded_registry(public: str, *, signal_invite: str | None = None) -> TrackerRegistry:
+    """A registry where ``public`` has announced one champion (a contributor)."""
+    reg = TrackerRegistry(signal_invite=signal_invite)
+    reg.announce(_manifest("sha256:comm", producer_pubkey=public), "100.64.0.1")
+    return reg
 
 
 def _registry_handler(registry: TrackerRegistry) -> Callable[[httpx.Request], httpx.Response]:
@@ -187,6 +212,115 @@ def test_registry_list_peers_returns_copy() -> None:
     peers = reg.list_peers()
     peers.append("100.64.0.99")  # mutating the copy must not leak back in
     assert reg.list_peers() == ["100.64.0.1"]
+
+
+# ─── TrackerRegistry.community — the signed contribute-to-join gate ───────
+
+
+def test_registry_has_seeded_only_after_announce() -> None:
+    _signer, public, _private = _mint()
+    reg = TrackerRegistry()
+    assert reg.has_seeded(public) is False
+    reg.announce(_manifest("sha256:x", producer_pubkey=public), "100.64.0.1")
+    assert reg.has_seeded(public) is True
+
+
+def test_registry_community_returns_invite_for_seeded_signed_fresh() -> None:
+    signer, public, private = _mint()
+    reg = _seeded_registry(public, signal_invite=_INVITE)
+    ts = datetime.now(UTC).isoformat()
+    sig = _sign_challenge(signer, private, public, ts)
+
+    outcome = reg.community(public, ts, sig, verify=signer.verify)
+
+    assert outcome == CommunityOutcome(invite=_INVITE, reason="ok")
+
+
+def test_registry_community_bad_signature_even_for_seeded_pubkey() -> None:
+    signer, public, private = _mint()
+    reg = _seeded_registry(public, signal_invite=_INVITE)
+    ts = datetime.now(UTC).isoformat()
+    # A signature over a DIFFERENT message: the pubkey seeded, but ownership
+    # is not proven for this challenge → reveal-nothing bad_signature.
+    forged = signer.sign(private, b"community-request:someone-else:2000-01-01T00:00:00+00:00")
+
+    outcome = reg.community(public, ts, forged, verify=signer.verify)
+
+    assert outcome == CommunityOutcome(invite=None, reason="bad_signature")
+
+
+def test_registry_community_bad_signature_hides_configured_and_contributor() -> None:
+    # Fail-closed ordering: an unproven caller must not learn "configured" or
+    # "not a contributor" — a bad sig is caught first, before either check.
+    signer, public, _private = _mint()
+    other_signer, _other_pub, other_priv = _mint()
+    reg = _seeded_registry(public, signal_invite=_INVITE)
+    ts = datetime.now(UTC).isoformat()
+    # Signed by the WRONG key → verify(public, …) fails.
+    wrong_key_sig = _sign_challenge(other_signer, other_priv, public, ts)
+
+    outcome = reg.community(public, ts, wrong_key_sig, verify=signer.verify)
+
+    assert outcome.reason == "bad_signature"
+    assert outcome.invite is None
+
+
+def test_registry_community_not_a_contributor_for_never_seeded() -> None:
+    signer, public, private = _mint()
+    reg = TrackerRegistry(signal_invite=_INVITE)  # nobody has seeded
+    ts = datetime.now(UTC).isoformat()
+    sig = _sign_challenge(signer, private, public, ts)
+
+    outcome = reg.community(public, ts, sig, verify=signer.verify)
+
+    assert outcome == CommunityOutcome(invite=None, reason="not_a_contributor")
+
+
+def test_registry_community_not_configured_when_invite_unset() -> None:
+    signer, public, private = _mint()
+    reg = _seeded_registry(public, signal_invite=None)  # seeded, but no invite
+    ts = datetime.now(UTC).isoformat()
+    sig = _sign_challenge(signer, private, public, ts)
+
+    outcome = reg.community(public, ts, sig, verify=signer.verify)
+
+    assert outcome == CommunityOutcome(invite=None, reason="not_configured")
+
+
+def test_registry_community_stale_when_now_far_in_future() -> None:
+    signer, public, private = _mint()
+    reg = _seeded_registry(public, signal_invite=_INVITE)
+    ts = datetime.now(UTC).isoformat()
+    sig = _sign_challenge(signer, private, public, ts)  # a real, valid signature
+    far_future = datetime.now(UTC) + timedelta(hours=1)
+
+    outcome = reg.community(public, ts, sig, verify=signer.verify, now=far_future)
+
+    assert outcome == CommunityOutcome(invite=None, reason="stale")
+
+
+def test_registry_community_stale_on_malformed_ts_fail_closed() -> None:
+    signer, public, private = _mint()
+    reg = _seeded_registry(public, signal_invite=_INVITE)
+    ts = "not-a-timestamp"
+    sig = _sign_challenge(signer, private, public, ts)  # signature is valid…
+
+    outcome = reg.community(public, ts, sig, verify=signer.verify)
+
+    # …but the challenge instant is unparseable → fail-closed as stale.
+    assert outcome == CommunityOutcome(invite=None, reason="stale")
+
+
+def test_registry_community_fresh_within_skew_window_is_ok() -> None:
+    signer, public, private = _mint()
+    reg = _seeded_registry(public, signal_invite=_INVITE)
+    ts = datetime.now(UTC).isoformat()
+    sig = _sign_challenge(signer, private, public, ts)
+    just_inside = datetime.now(UTC) + timedelta(seconds=90)  # < ±120 s
+
+    outcome = reg.community(public, ts, sig, verify=signer.verify, now=just_inside)
+
+    assert outcome.reason == "ok"
 
 
 # ─── HttpTrackerTransport — REAL client HTTP/JSON over MockTransport ──────
@@ -347,6 +481,105 @@ def test_client_raises_on_non_json_body(
         transport.peers()
 
 
+# ─── HttpTrackerTransport.community — the client leg of the gate ─────────
+
+
+def test_client_community_returns_invite_on_200(
+    transport_factory: Callable[..., HttpTrackerTransport],
+) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"invite": _INVITE})
+
+    transport = transport_factory(handler=handler)
+    assert transport.community("pub", "ts", "sig") == CommunityOutcome(invite=_INVITE, reason="ok")
+
+
+def test_client_community_sends_pubkey_ts_sig_query(
+    transport_factory: Callable[..., HttpTrackerTransport],
+) -> None:
+    seen: dict[str, Any] = {}
+
+    def capture(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        seen["params"] = dict(request.url.params)
+        return httpx.Response(200, json={"invite": _INVITE})
+
+    transport = transport_factory(handler=capture)
+    transport.community("PUB", "TS", "SIG")
+
+    assert seen["path"] == "/community"
+    assert seen["params"] == {"pubkey": "PUB", "ts": "TS", "sig": "SIG"}
+
+
+@pytest.mark.parametrize("reason", ["bad_signature", "stale", "not_a_contributor"])
+def test_client_community_maps_403_to_typed_refusal(
+    transport_factory: Callable[..., HttpTrackerTransport], reason: str
+) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, json={"reason": reason})
+
+    transport = transport_factory(handler=handler)
+    assert transport.community("pub", "ts", "sig") == CommunityOutcome(invite=None, reason=reason)
+
+
+def test_client_community_maps_404_to_not_configured(
+    transport_factory: Callable[..., HttpTrackerTransport],
+) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"reason": "not_configured"})
+
+    transport = transport_factory(handler=handler)
+    assert transport.community("pub", "ts", "sig") == CommunityOutcome(
+        invite=None, reason="not_configured"
+    )
+
+
+def test_client_community_raises_localerror_on_5xx(
+    transport_factory: Callable[..., HttpTrackerTransport],
+) -> None:
+    def boom(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, json={"error": "kaboom"})
+
+    transport = transport_factory(handler=boom)
+    with pytest.raises(LocalError):
+        transport.community("pub", "ts", "sig")
+
+
+def test_client_community_raises_on_200_without_invite(
+    transport_factory: Callable[..., HttpTrackerTransport],
+) -> None:
+    # Honest-verify: a 200 whose body carries no invite string is a misbehaving
+    # tracker, never a fabricated (empty) invite.
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"welcome": True})
+
+    transport = transport_factory(handler=handler)
+    with pytest.raises(LocalError):
+        transport.community("pub", "ts", "sig")
+
+
+def test_client_community_raises_on_unknown_403_reason(
+    transport_factory: Callable[..., HttpTrackerTransport],
+) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, json={"reason": "teapot"})
+
+    transport = transport_factory(handler=handler)
+    with pytest.raises(LocalError):
+        transport.community("pub", "ts", "sig")
+
+
+def test_client_community_raises_localerror_on_transport_error(
+    transport_factory: Callable[..., HttpTrackerTransport],
+) -> None:
+    def unreachable(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused", request=request)
+
+    transport = transport_factory(handler=unreachable)
+    with pytest.raises(LocalError):
+        transport.community("pub", "ts", "sig")
+
+
 # ─── HttpTrackerTransport — client lifetime ──────────────────────────────
 
 
@@ -385,7 +618,7 @@ def test_build_tracker_app_returns_application() -> None:
     assert isinstance(build_tracker_app(), web.Application)
 
 
-def test_build_tracker_app_wires_the_five_routes() -> None:
+def test_build_tracker_app_wires_all_routes() -> None:
     app = build_tracker_app()
     # aiohttp auto-adds a HEAD route for each GET; filter those out.
     routes = {
@@ -399,6 +632,7 @@ def test_build_tracker_app_wires_the_five_routes() -> None:
         ("GET", "/catalog"),
         ("POST", "/announce"),
         ("GET", "/find"),
+        ("GET", "/community"),
     }
 
 
@@ -475,6 +709,69 @@ def test_handler_peers_and_catalog_report_registry_state() -> None:
     catalog_resp = asyncio.run(handlers.catalog(_StubRequest()))  # type: ignore[arg-type]
     champions = _body(catalog_resp)["champions"]
     assert [c["content_hash"] for c in champions] == ["sha256:a"]
+
+
+# ─── server: /community handler glue (real Ed25519 round-trip) ───────────
+
+
+def test_handler_community_ok_returns_200_invite() -> None:
+    signer, public, private = _mint()
+    reg = _seeded_registry(public, signal_invite=_INVITE)
+    handlers = TrackerHandlers(reg, verify=signer.verify)
+    ts = datetime.now(UTC).isoformat()
+    sig = _sign_challenge(signer, private, public, ts)
+
+    resp = asyncio.run(
+        handlers.community(_StubRequest(query={"pubkey": public, "ts": ts, "sig": sig}))  # type: ignore[arg-type]
+    )
+
+    assert resp.status == 200
+    assert _body(resp) == {"invite": _INVITE}
+
+
+def test_handler_community_bad_signature_returns_403() -> None:
+    signer, public, _private = _mint()
+    reg = _seeded_registry(public, signal_invite=_INVITE)
+    handlers = TrackerHandlers(reg, verify=signer.verify)
+    ts = datetime.now(UTC).isoformat()
+
+    resp = asyncio.run(
+        handlers.community(_StubRequest(query={"pubkey": public, "ts": ts, "sig": "00"}))  # type: ignore[arg-type]
+    )
+
+    assert resp.status == 403
+    assert _body(resp) == {"reason": "bad_signature"}
+
+
+def test_handler_community_not_configured_returns_404() -> None:
+    signer, public, private = _mint()
+    reg = _seeded_registry(public, signal_invite=None)
+    handlers = TrackerHandlers(reg, verify=signer.verify)
+    ts = datetime.now(UTC).isoformat()
+    sig = _sign_challenge(signer, private, public, ts)
+
+    resp = asyncio.run(
+        handlers.community(_StubRequest(query={"pubkey": public, "ts": ts, "sig": sig}))  # type: ignore[arg-type]
+    )
+
+    assert resp.status == 404
+    assert _body(resp) == {"reason": "not_configured"}
+
+
+def test_handler_community_defaults_to_real_ed25519_verify() -> None:
+    # No injected verify → the default Ed25519Signer().verify is used end to end.
+    signer, public, private = _mint()
+    reg = _seeded_registry(public, signal_invite=_INVITE)
+    handlers = TrackerHandlers(reg)  # default verify
+    ts = datetime.now(UTC).isoformat()
+    sig = _sign_challenge(signer, private, public, ts)
+
+    resp = asyncio.run(
+        handlers.community(_StubRequest(query={"pubkey": public, "ts": ts, "sig": sig}))  # type: ignore[arg-type]
+    )
+
+    assert resp.status == 200
+    assert _body(resp) == {"invite": _INVITE}
 
 
 # ─── malformed manifests from the OPEN (untrusted) tracker → clean raise ─────
