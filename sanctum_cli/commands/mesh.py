@@ -31,6 +31,7 @@ import json
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Protocol
 
@@ -53,7 +54,7 @@ from sanctum_cli.mesh.adapters import (
 )
 from sanctum_cli.mesh.identity import MeshIdentityStore
 from sanctum_cli.mesh.seed import seed as seed_local
-from sanctum_cli.mesh.tracker import HttpTrackerTransport
+from sanctum_cli.mesh.tracker import CommunityOutcome, HttpTrackerTransport
 from sanctum_cli.mesh.types import ArtifactKind, Verdict
 from sanctum_cli.mesh.verify import adopt
 
@@ -125,6 +126,16 @@ class MeshDirectory(Protocol):
 
     def find(self, content_hash: str) -> ArtifactRef | None:
         """Return the seeders + manifest for ``content_hash``, or ``None``."""
+        ...
+
+    def community(self, pubkey: str, ts: str, signature: str) -> CommunityOutcome:
+        """Vend the Signal community invite iff ``pubkey`` proves it seeded ≥ 1 champion.
+
+        The caller signs a fresh ``community-request:<pubkey>:<ts>`` challenge; the
+        tracker verifies ownership + freshness + contribution and returns a typed
+        :class:`~sanctum_cli.mesh.tracker.CommunityOutcome` (the invite on ``ok``,
+        else an honest refusal). Task 8's HTTP-tracker adapter implements this.
+        """
         ...
 
 
@@ -217,6 +228,7 @@ class StatusReport:
     identity_fingerprint: str | None
     peers: list[str]
     champions: list[str]
+    contributor: bool = False
 
 
 # ─── core orchestration (seams injected; no live boundary) ───────────────
@@ -266,13 +278,21 @@ def mesh_status(*, store: MeshIdentityStore, directory: MeshDirectory, label: st
     already exists on disk, so ``status`` never has the side effect of joining.
     """
     fp: str | None = None
+    pubkey: str | None = None
     if store.identity_file.exists():
         # ``ensure`` loads (never mints) when the file exists — the label is ignored.
-        fp = fingerprint(store.ensure(label).pubkey)
+        pubkey = store.ensure(label).pubkey
+        fp = fingerprint(pubkey)
+    catalog = directory.catalog()
+    # A soft "you're a contributor" hint only when this node's own pubkey is a
+    # producer in the live catalog — best-effort, derived from a real read, never
+    # a self-attested claim (mirrors the tracker's has_seeded gate).
+    contributor = pubkey is not None and any(m.producer_pubkey == pubkey for m in catalog)
     return StatusReport(
         identity_fingerprint=fp,
         peers=directory.peers(),
-        champions=[m.content_hash for m in directory.catalog()],
+        champions=[m.content_hash for m in catalog],
+        contributor=contributor,
     )
 
 
@@ -573,6 +593,31 @@ def _print_status(report: StatusReport) -> None:
     console.print(f"Champions available: {len(report.champions)}")
     for champ in report.champions:
         console.print(f"  • {escape(champ)}")
+    if report.contributor:
+        console.print(
+            "[green]✓[/] You're a contributor — run [bold]sanctum mesh community[/] for the group."
+        )
+
+
+def _print_community(outcome: CommunityOutcome) -> None:
+    if outcome.reason == "ok":
+        group = config.instance_value("mesh.community_name", "the Sanctum mesh community")
+        console.print(f"[bold green]✓ You're in — welcome to {escape(str(group))}.[/]")
+        console.print(f"Signal invite: {escape(outcome.invite or '')}")
+    elif outcome.reason == "not_a_contributor":
+        console.print(
+            "[yellow]•[/] Seed a champion first "
+            "([bold]sanctum mesh seed …[/]) to unlock the group."
+        )
+    elif outcome.reason == "not_configured":
+        console.print("[yellow]•[/] No community is set up on this mesh yet.")
+    else:
+        # bad_signature / stale — the honest-verify transport raises on anything
+        # malformed, and a correct client signs a fresh challenge; landing here means
+        # our identity did not verify (e.g. tracker clock skew). Never fake an invite.
+        console.print(
+            "[yellow]•[/] The mesh could not verify this node's identity for the community."
+        )
 
 
 def _print_verdict(verdict: Verdict) -> None:
@@ -714,3 +759,27 @@ def seed_command(
         f"[green]✓[/] Seeded {escape(announced.content_hash)} to the mesh "
         f"(addr {escape(resolved_addr)})."
     )
+
+
+@mesh_app.command(
+    "community", help="Unlock the mesh's Signal community invite (verified contributors only)."
+)
+def community_command() -> None:
+    try:
+        store = _build_identity_store()
+        directory = _build_directory()
+        identity = store.ensure(_resolve_label())
+        # Sign the EXACT challenge the tracker rebuilds: ``ts`` is a tz-aware ISO-8601
+        # UTC instant passed verbatim (any reformatting would invalidate the sig).
+        ts = datetime.now(UTC).isoformat()
+        message = f"community-request:{identity.pubkey}:{ts}"
+        sig = identity.sign(message.encode("utf-8"))
+        outcome = directory.community(identity.pubkey, ts, sig)
+    except SanctumError as exc:
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code)) from exc
+    _print_community(outcome)
+    if outcome.reason != "ok":
+        # A fail-closed refusal (or no community configured): no invite was vended.
+        # Exit non-zero so a scripted call distinguishes "got the invite" from "did not".
+        raise typer.Exit(code=int(ExitCode.USER_ERROR))

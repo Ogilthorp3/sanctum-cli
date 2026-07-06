@@ -30,8 +30,10 @@ from typer.testing import CliRunner
 
 from sanctum_cli.cli import app
 from sanctum_cli.commands import mesh as mesh_cmd
+from sanctum_cli.errors import ExitCode, LocalError
 from sanctum_cli.mesh.artifact import build_manifest
 from sanctum_cli.mesh.identity import MeshIdentityStore
+from sanctum_cli.mesh.tracker import CommunityOutcome
 from sanctum_cli.mesh.types import ArtifactRef
 from sanctum_cli.mesh.verify import SandboxResult
 
@@ -78,14 +80,19 @@ class FakeDirectory:
         catalog: tuple[ChampionManifest, ...] = (),
         find_result: ArtifactRef | None = None,
         register_ack: bool = True,
+        community_outcome: CommunityOutcome | None = None,
+        community_error: Exception | None = None,
     ) -> None:
         self._peers = list(peers)
         self._catalog = list(catalog)
         self._find_result = find_result
         self._register_ack = register_ack
+        self._community_outcome = community_outcome
+        self._community_error = community_error
         self.register_calls: list[tuple[MeshIdentity, str]] = []
         self.announce_calls: list[tuple[ChampionManifest, str]] = []
         self.find_calls: list[str] = []
+        self.community_calls: list[tuple[str, str, str]] = []
 
     def register(self, identity: MeshIdentity, addr: str) -> bool:
         self.register_calls.append((identity, addr))
@@ -103,6 +110,13 @@ class FakeDirectory:
     def find(self, content_hash: str) -> ArtifactRef | None:
         self.find_calls.append(content_hash)
         return self._find_result
+
+    def community(self, pubkey: str, ts: str, signature: str) -> CommunityOutcome:
+        self.community_calls.append((pubkey, ts, signature))
+        if self._community_error is not None:
+            raise self._community_error
+        assert self._community_outcome is not None, "no community_outcome configured on FakeDirectory"
+        return self._community_outcome
 
 
 class FakeVerifier:
@@ -177,6 +191,19 @@ def _make_ref(tmp_path: Path) -> tuple[ArtifactRef, LoadedIdentity]:
         art, ident, base_model="qwen3.6-35b-a3b-4bit", eval_scores={"tiered": 0.9}
     )
     return ArtifactRef(content_hash=manifest.content_hash, seeders=["100.64.0.9"], manifest=manifest), ident
+
+
+def _manifest_by(tmp_path: Path, token: str) -> ChampionManifest:
+    """A champion manifest whose ``producer_pubkey`` is ``FakeSigner(token)``'s pubkey."""
+    ident = MeshIdentityStore(signer=FakeSigner(token), path=tmp_path / f"id-{token}").ensure(
+        label=f"peer-{token}"
+    )
+    art = tmp_path / f"champ-{token}"
+    art.mkdir()
+    (art / "adapters.safetensors").write_bytes(b"WEIGHTS")
+    return build_manifest(
+        art, ident, base_model="qwen3.6-35b-a3b-4bit", eval_scores={"tiered": 0.9}
+    )
 
 
 def _install(
@@ -484,13 +511,131 @@ def test_seed_not_announced_below_baseline(
     assert directory.announce_calls == []  # a regressing champion is never advertised
 
 
+# ─── community ─────────────────────────────────────────────────────────────
+
+
+def test_community_prints_invite_on_ok(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    store = _make_store(tmp_path)
+    directory = FakeDirectory(
+        community_outcome=CommunityOutcome(invite="https://signal.group/#XYZ", reason="ok")
+    )
+    _install(monkeypatch, store=store, directory=directory)
+
+    result = runner.invoke(app, ["mesh", "community"])
+
+    assert result.exit_code == 0, result.stdout
+    assert "https://signal.group/#XYZ" in result.stdout
+    # The request proved ownership of THIS node's pubkey (the has_seeded key) with a
+    # real signature over the verbatim challenge timestamp.
+    assert len(directory.community_calls) == 1
+    pubkey, ts, sig = directory.community_calls[0]
+    assert pubkey == "fakepub:cli-test-token"
+    assert ts and sig.startswith("fakesig:")
+
+
+def test_community_nudges_when_not_a_contributor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _make_store(tmp_path)
+    directory = FakeDirectory(
+        community_outcome=CommunityOutcome(invite=None, reason="not_a_contributor")
+    )
+    _install(monkeypatch, store=store, directory=directory)
+
+    result = runner.invoke(app, ["mesh", "community"])
+
+    assert result.exit_code != 0
+    assert "Seed a champion first" in result.stdout
+    assert "signal.group" not in result.stdout  # no invite fabricated on a refusal
+
+
+def test_community_reports_not_configured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _make_store(tmp_path)
+    directory = FakeDirectory(
+        community_outcome=CommunityOutcome(invite=None, reason="not_configured")
+    )
+    _install(monkeypatch, store=store, directory=directory)
+
+    result = runner.invoke(app, ["mesh", "community"])
+
+    assert result.exit_code != 0
+    assert "No community is set up" in result.stdout
+
+
+def test_community_reports_transport_error_cleanly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _make_store(tmp_path)
+    directory = FakeDirectory(
+        community_error=LocalError("mesh tracker unreachable", fix="check the tracker")
+    )
+    _install(monkeypatch, store=store, directory=directory)
+
+    result = runner.invoke(app, ["mesh", "community"])
+
+    # Honest-verify: a transport failure is a clean LocalError exit — never a raw
+    # traceback and never a fabricated invite.
+    assert result.exit_code == int(ExitCode.LOCAL_ERROR)
+    assert "signal.group" not in result.output
+
+
+# ─── status: contributor hint ──────────────────────────────────────────────
+
+
+def test_status_shows_contributor_hint_when_seeded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _make_store(tmp_path, token="me")
+    store.ensure(label="haus-me")  # pre-mint → pubkey fakepub:me
+    directory = FakeDirectory(catalog=(_manifest_by(tmp_path, "me"),))
+    _install(monkeypatch, store=store, directory=directory)
+
+    result = runner.invoke(app, ["mesh", "status"])
+
+    assert result.exit_code == 0, result.stdout
+    assert "You're a contributor" in result.stdout
+    assert "sanctum mesh community" in result.stdout
+
+
+def test_status_no_hint_when_not_a_contributor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _make_store(tmp_path, token="me")
+    store.ensure(label="haus-me")
+    # A champion seeded by a DIFFERENT identity — our pubkey is not its producer.
+    directory = FakeDirectory(catalog=(_manifest_by(tmp_path, "someone-else"),))
+    _install(monkeypatch, store=store, directory=directory)
+
+    result = runner.invoke(app, ["mesh", "status"])
+
+    assert result.exit_code == 0, result.stdout
+    assert "You're a contributor" not in result.stdout
+
+
+def test_status_no_hint_without_local_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _make_store(tmp_path, token="me")  # never minted
+    directory = FakeDirectory(catalog=(_manifest_by(tmp_path, "me"),))
+    _install(monkeypatch, store=store, directory=directory)
+
+    result = runner.invoke(app, ["mesh", "status"])
+
+    assert result.exit_code == 0, result.stdout
+    # No identity on disk → we cannot claim to be a contributor → no hint, no mint.
+    assert "You're a contributor" not in result.stdout
+    assert not store.identity_file.exists()
+
+
 # ─── registration ────────────────────────────────────────────────────────
 
 
 def test_mesh_app_registered_with_all_subcommands() -> None:
     result = runner.invoke(app, ["mesh", "--help"])
     assert result.exit_code == 0, result.stdout
-    for sub in ("join", "status", "pull", "seed"):
+    for sub in ("join", "status", "pull", "seed", "community"):
         assert sub in result.stdout
 
 
