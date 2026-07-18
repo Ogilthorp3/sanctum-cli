@@ -134,9 +134,9 @@ def test_render_bootstrap_script_refuses_quoted_pubkey() -> None:
 
 
 def test_bootstrap_script_stdout_is_byte_clean(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Default output is the raw script on stdout (pipe/redirect clean)."""
+    """`--format script` output is the raw script on stdout (pipe/redirect clean)."""
     monkeypatch.setattr(node_cmd, "_ensure_automation_pubkey", lambda: PUBKEY)
-    result = runner.invoke(app, ["node", "bootstrap-script"])
+    result = runner.invoke(app, ["node", "bootstrap-script", "--format", "script"])
     assert result.exit_code == 0, result.stdout
     assert result.stdout.startswith("#!/bin/bash")
     assert PUBKEY in result.stdout
@@ -145,10 +145,12 @@ def test_bootstrap_script_stdout_is_byte_clean(monkeypatch: pytest.MonkeyPatch) 
 def test_bootstrap_script_out_writes_executable(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """--out writes the script 0755 and prints the hand-off guidance."""
+    """`--format script --out` writes the script 0755 and prints the hand-off guidance."""
     monkeypatch.setattr(node_cmd, "_ensure_automation_pubkey", lambda: PUBKEY)
     target = tmp_path / "bootstrap.sh"
-    result = runner.invoke(app, ["node", "bootstrap-script", "--out", str(target)])
+    result = runner.invoke(
+        app, ["node", "bootstrap-script", "--format", "script", "--out", str(target)]
+    )
     assert result.exit_code == 0, result.stdout
     assert target.read_text(encoding="utf-8").startswith("#!/bin/bash")
     assert target.stat().st_mode & 0o111  # executable
@@ -168,12 +170,12 @@ def test_bootstrap_script_mints_key_pair_on_first_run(
         path.with_suffix(".pub").write_text(PUBKEY + "\n", encoding="utf-8")
 
     monkeypatch.setattr(node_cmd, "_generate_automation_key", fake_keygen)
-    result = runner.invoke(app, ["node", "bootstrap-script"])
+    result = runner.invoke(app, ["node", "bootstrap-script", "--format", "script"])
     assert result.exit_code == 0, result.stdout
     assert calls == [priv]
     assert PUBKEY in result.stdout
     # Second run: the pair exists, the seam must NOT fire again.
-    result = runner.invoke(app, ["node", "bootstrap-script"])
+    result = runner.invoke(app, ["node", "bootstrap-script", "--format", "script"])
     assert result.exit_code == 0
     assert calls == [priv]
 
@@ -479,3 +481,227 @@ def test_register_node_preserves_existing_blocks(tmp_path: Path) -> None:
     assert data["nodes"]["older"]["host"] == "old.example"  # existing node preserved
     assert data["nodes"]["chalet"]["host"] == "sat.example"
     assert (tmp_path / "instance.yaml.bak").exists()
+
+
+# ── pairing code: stable, key-bound, 6 digits ─────────────────────────────────
+
+_OTHER_PUBKEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDifferentBlobHereXY sanctum-automation-console-2026-07-18"
+
+
+def test_pairing_code_is_six_digits() -> None:
+    code = node_cmd.pairing_code(PUBKEY)
+    assert len(code) == 6
+    assert code.isdigit()
+
+
+def test_pairing_code_is_stable_for_a_key() -> None:
+    """Same key → same code (so the console can show it and a UI can verify it)."""
+    assert node_cmd.pairing_code(PUBKEY) == node_cmd.pairing_code(PUBKEY)
+
+
+def test_pairing_code_differs_across_keys() -> None:
+    assert node_cmd.pairing_code(PUBKEY) != node_cmd.pairing_code(_OTHER_PUBKEY)
+
+
+# ── postinstall script: the pkg's root-run bootstrap ──────────────────────────
+
+import re as _re  # noqa: E402 — test-local helper import
+
+_DOTTED_QUAD = _re.compile(r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b")
+
+
+def test_render_postinstall_field_semantics() -> None:
+    """The pkg postinstall runs the field-validated bootstrap as root, into the console user."""
+    code = node_cmd.pairing_code(PUBKEY)
+    script = node_cmd.render_postinstall(PUBKEY, sudo_nopasswd=False, code=code)
+    # Runs as root via Installer — resolves the CONSOLE user, not root's home.
+    assert "stat -f%Su /dev/console" in script
+    assert 'dscl . -read /Users/"$CU" NFSHomeDirectory' in script
+    assert 'chown "$CU" "$HD/.ssh/authorized_keys"' in script
+    # The bootstrap steps, verbatim (no sudo — already root).
+    assert "systemsetup -setremotelogin on" in script
+    assert "pmset -a sleep 0 disksleep 0 powernap 0 womp 1" in script
+    assert "systemsetup -setrestartpowerfailure on" in script
+    # The console's pubkey is embedded; the pairing code is stamped.
+    assert f"KEY='{PUBKEY}'" in script
+    assert f"# sanctum-pairing: {code}" in script
+    # NO sudoers content without the flag; and NEVER a hardcoded IP.
+    assert "sudoers.d" not in script
+    assert "NOPASSWD" not in script
+    assert not _DOTTED_QUAD.search(script), "postinstall must embed no IP literal"
+
+
+def test_render_postinstall_sudo_nopasswd_block() -> None:
+    """--sudo-nopasswd adds a visudo-validated NOPASSWD drop-in for the console user."""
+    script = node_cmd.render_postinstall(PUBKEY, sudo_nopasswd=True, code="000000")
+    assert "/etc/sudoers.d/sanctum-automation" in script
+    assert "NOPASSWD: ALL" in script
+    assert "visudo -c -f /etc/sudoers.d/sanctum-automation" in script
+    assert "rm -f /etc/sudoers.d/sanctum-automation" in script  # remove-on-invalid guard
+
+
+def test_render_postinstall_refuses_quoted_pubkey() -> None:
+    from sanctum_cli.errors import LocalError
+
+    with pytest.raises(LocalError):
+        node_cmd.render_postinstall("ssh-ed25519 AAAA it's-corrupt", sudo_nopasswd=False, code="000000")
+
+
+# ── build_pkg: pkgbuild / productsign argv behind the injectable seam ─────────
+
+
+class _RecordingPkgBuilder:
+    """Records each pkg-tool argv and returns success, building NO real package."""
+
+    def __init__(self) -> None:
+        self.calls: list[list[str]] = []
+
+    def __call__(self, argv: list[str]) -> tuple[int, str]:
+        self.calls.append(argv)
+        return (0, "")
+
+
+def test_build_pkg_unsigned_calls_pkgbuild_only(tmp_path: Path) -> None:
+    """No signing identity → one pkgbuild call with the exact argv, no productsign."""
+    builder = _RecordingPkgBuilder()
+    scripts_dir = tmp_path / "scripts"
+    out_pkg = tmp_path / "Sanctum-Node-Setup.pkg"
+    result = node_cmd.build_pkg(
+        "#!/bin/bash\nexit 0\n",
+        out_pkg,
+        version="2026.07.18",
+        pkg_builder=builder,
+        find_identity=lambda: None,
+        stage_scripts=lambda _s: scripts_dir,
+    )
+    assert builder.calls == [
+        [
+            "pkgbuild",
+            "--nopayload",
+            "--scripts",
+            str(scripts_dir),
+            "--identifier",
+            "haus.sanctum.node-setup",
+            "--version",
+            "2026.07.18",
+            str(out_pkg),
+        ]
+    ]
+    assert result.signed is False
+    assert result.identity is None
+    assert result.path == out_pkg
+
+
+def test_build_pkg_signed_invokes_productsign_when_identity_present(tmp_path: Path) -> None:
+    """A Developer ID Installer identity → pkgbuild(unsigned) then productsign(out)."""
+    builder = _RecordingPkgBuilder()
+    scripts_dir = tmp_path / "scripts"
+    out_pkg = tmp_path / "Sanctum-Node-Setup.pkg"
+    identity = "Developer ID Installer: Bert (TEAMID123)"
+    result = node_cmd.build_pkg(
+        "#!/bin/bash\nexit 0\n",
+        out_pkg,
+        version="2026.07.18",
+        pkg_builder=builder,
+        find_identity=lambda: identity,
+        stage_scripts=lambda _s: scripts_dir,
+    )
+    unsigned = out_pkg.with_suffix(".unsigned.pkg")
+    assert builder.calls == [
+        [
+            "pkgbuild",
+            "--nopayload",
+            "--scripts",
+            str(scripts_dir),
+            "--identifier",
+            "haus.sanctum.node-setup",
+            "--version",
+            "2026.07.18",
+            str(unsigned),
+        ],
+        ["productsign", "--sign", identity, str(unsigned), str(out_pkg)],
+    ]
+    assert result.signed is True
+    assert result.identity == identity
+
+
+# ── bootstrap-script --format pkg: the mom-friendly default ───────────────────
+
+
+def _wire_pkg(
+    monkeypatch: pytest.MonkeyPatch, *, identity: str | None
+) -> tuple[list[list[str]], list[Path]]:
+    """Point the pkg path at recording seams — no real pkgbuild/security/open/keygen."""
+    monkeypatch.setattr(node_cmd, "_ensure_automation_pubkey", lambda: PUBKEY)
+    argv_log: list[list[str]] = []
+
+    def fake_pkg_tool(argv: list[str]) -> tuple[int, str]:
+        argv_log.append(argv)
+        return (0, "")
+
+    def fake_stage(postinstall: str) -> Path:
+        # Assert the postinstall content flows through, but write nothing real.
+        assert "systemsetup -setremotelogin on" in postinstall
+        from pathlib import Path as RuntimePath
+
+        return RuntimePath("/tmp/fake-scripts")  # ip-allow: inert fake path, never created
+
+    revealed: list[Path] = []
+    monkeypatch.setattr(node_cmd, "_run_pkg_tool", fake_pkg_tool)
+    monkeypatch.setattr(node_cmd, "_find_installer_identity", lambda: identity)
+    monkeypatch.setattr(node_cmd, "_stage_postinstall", fake_stage)
+    monkeypatch.setattr(node_cmd, "_reveal_in_finder", revealed.append)
+    return argv_log, revealed
+
+
+def test_bootstrap_pkg_is_default_and_calls_pkgbuild(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Bare `bootstrap-script` (default pkg) builds via the seam with the expected argv."""
+    argv_log, revealed = _wire_pkg(monkeypatch, identity=None)
+    out_pkg = tmp_path / "Node.pkg"
+    result = runner.invoke(app, ["node", "bootstrap-script", "--out", str(out_pkg)])
+    assert result.exit_code == 0, result.stdout
+    assert argv_log == [
+        [
+            "pkgbuild",
+            "--nopayload",
+            "--scripts",
+            "/tmp/fake-scripts",  # ip-allow: inert fake path from the seam
+            "--identifier",
+            "haus.sanctum.node-setup",
+            "--version",
+            node_cmd._pkg_version(),
+            str(out_pkg),
+        ]
+    ]
+    # Mom-friendly output: the pairing code + unsigned note + reveal-in-Finder.
+    assert node_cmd.pairing_code(PUBKEY) in result.stdout
+    assert "unsigned" in result.stdout
+    assert revealed == [out_pkg]
+
+
+def test_bootstrap_pkg_signs_when_identity_present(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A signing identity → productsign is invoked and the output says 'signed'."""
+    identity = "Developer ID Installer: Bert (TEAMID123)"
+    argv_log, _revealed = _wire_pkg(monkeypatch, identity=identity)
+    out_pkg = tmp_path / "Node.pkg"
+    result = runner.invoke(app, ["node", "bootstrap-script", "--out", str(out_pkg)])
+    assert result.exit_code == 0, result.stdout
+    assert any(a[0] == "productsign" for a in argv_log)
+    assert "signed" in result.stdout
+
+
+def test_bootstrap_script_format_still_works(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`--format script` still emits the byte-clean developer script (unchanged)."""
+    monkeypatch.setattr(node_cmd, "_ensure_automation_pubkey", lambda: PUBKEY)
+    # A pkg seam that would fail loudly if `--format script` wrongly built a pkg.
+    monkeypatch.setattr(
+        node_cmd, "_run_pkg_tool", lambda _a: (_ for _ in ()).throw(AssertionError("built a pkg!"))
+    )
+    result = runner.invoke(app, ["node", "bootstrap-script", "--format", "script"])
+    assert result.exit_code == 0, result.stdout
+    assert result.stdout.startswith("#!/bin/bash")
+    assert PUBKEY in result.stdout
