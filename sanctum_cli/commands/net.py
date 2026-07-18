@@ -1236,6 +1236,17 @@ def _build_armor_installer() -> ArmorInstaller:
     )
 
 
+def _single_nat_live_armed() -> bool:
+    """True iff the live single-NAT cutover is explicitly armed in instance.yaml.
+
+    ``net.single_nat_live: true`` is the Phase-2 arming switch (Jedi council 2026-07-18).
+    Default False: the ``--apply`` DMZ engage refuses until an attended dry-run has
+    validated the real hub/box seams. Reads :func:`config.instance_value`; a test
+    monkeypatches THIS function so the whole config layer stays untouched.
+    """
+    return bool(config.instance_value("net.single_nat_live", False))
+
+
 def _single_nat_requires_armor() -> bool:
     """Does this network's single-NAT playbook need the Bell /32-armor stages? (FIX-e)
 
@@ -1443,6 +1454,23 @@ def net_single_nat(
     if rollback:
         _net_single_nat_rollback(force=force)
         return
+
+    # LIVE-FIRE GATE (Jedi council, 2026-07-18): the --apply DMZ engage is proven only
+    # against fakes (Phase 1) — it has never touched the real Sagemcom hub / Firewalla
+    # box. It stays INERT until an attended Phase-2 dry-run validates the hardware seams
+    # (DMZ leaf value, reboot signal, route/lease parsing). Checked FIRST on --apply, so
+    # a gated-off run makes ZERO probes and ZERO writes.
+    if apply and not _single_nat_live_armed():
+        exc = DeviceError(
+            "live single-NAT cutover is gated OFF (Phase-2 hardware validation pending)",
+            fix=(
+                "the staged cutover passes its full unit suite but has never run against "
+                "the real hub/box. After an attended Phase-2 dry-run validates it live, "
+                "arm it with `net.single_nat_live: true` in ~/.sanctum instance.yaml."
+            ),
+        )
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code))
 
     # FIX-e: resolve whether THIS network's single-NAT playbook needs the Bell /32
     # armor (and the /32 poison gate). Bell's Advanced DMZ does; other ISPs' passthrough

@@ -213,6 +213,11 @@ def _wire(
     monkeypatch.setattr(
         "sanctum_cli.commands.net._out_of_band_reachable", lambda: out_of_band
     )
+    # Live-fire config gate ARMED for these tests (the gate itself is covered by a
+    # dedicated test below); the real default is OFF.
+    monkeypatch.setattr(
+        "sanctum_cli.commands.net._single_nat_live_armed", lambda: True
+    )
     # FIX-f: the pre-apply box gate (passwordless sudo + dhclient over SSH) is a real
     # external probe; stub it READY so these tests exercise their intended paths. The
     # gate itself is covered by dedicated tests below.
@@ -650,3 +655,53 @@ def test_net_single_nat_apply_refuses_when_box_preflight_fails(
     assert hub.set_calls == []
     assert hub.reboot_calls == 0
     assert armor.installed == 0
+
+
+# ── live-fire config gate: --apply inert until net.single_nat_live is armed ───
+
+
+def test_net_single_nat_apply_gated_off_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--apply REFUSES (zero probes/writes) unless net.single_nat_live is armed.
+
+    The staged cutover is proven only against fakes; the live path stays inert until a
+    Phase-2 dry-run validates the real hardware. Gated off => the DMZ engage never runs."""
+    hub, fw, armor = FakeHub(), FakeRunner(), FakeArmor()
+    _wire(monkeypatch, hub=hub, fw=fw, armor=armor)
+    # Override the _wire arming stub: the live gate is OFF (the real default).
+    monkeypatch.setattr(
+        "sanctum_cli.commands.net._single_nat_live_armed", lambda: False
+    )
+    result = runner.invoke(app, ["net", "single-nat", "--apply", "--force"])
+    assert result.exit_code != 0
+    out = (result.stdout + result.stderr).lower()
+    assert "gated" in out or "single_nat_live" in out or "phase-2" in out
+    # Refused before the hub/box were ever touched.
+    assert hub.set_calls == []
+    assert hub.reboot_calls == 0
+    assert armor.installed == 0
+    assert fw.calls == []
+
+
+def test_single_nat_live_armed_reads_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_single_nat_live_armed() defaults OFF and flips only on net.single_nat_live: true."""
+    from sanctum_cli.commands import net as netmod
+
+    seen = {}
+
+    def fake_instance_value(key, default=None):
+        seen["key"], seen["default"] = key, default
+        return default  # instance.yaml with the key unset
+
+    monkeypatch.setattr(
+        "sanctum_cli.commands.net.config.instance_value", fake_instance_value
+    )
+    assert netmod._single_nat_live_armed() is False
+    assert seen["key"] == "net.single_nat_live"
+    assert seen["default"] is False
+    monkeypatch.setattr(
+        "sanctum_cli.commands.net.config.instance_value",
+        lambda key, default=None: True,
+    )
+    assert netmod._single_nat_live_armed() is True
