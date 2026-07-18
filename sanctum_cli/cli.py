@@ -44,6 +44,7 @@ from sanctum_cli.commands.link import link_app
 from sanctum_cli.commands.mesh import mesh_app
 from sanctum_cli.commands.module import module_app
 from sanctum_cli.commands.net import net_app
+from sanctum_cli.commands.node import node_app
 from sanctum_cli.errors import ExitCode, SanctumError
 from sanctum_cli.haus import haus_required
 
@@ -399,6 +400,7 @@ def screentime_phone_mode(
 
 app.add_typer(module_app, name="module")
 app.add_typer(net_app, name="net")
+app.add_typer(node_app, name="node")
 app.add_typer(link_app, name="link")
 app.add_typer(mesh_app, name="mesh")
 
