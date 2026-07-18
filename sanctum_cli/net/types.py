@@ -49,9 +49,17 @@ class Playbook:
     # prechecks   — things to confirm BEFORE touching the box (e.g. LAN subnet)
     # mtu         — WAN MTU this ISP's path requires (None = leave default)
     # alt_playbook — id of an alternative method reached via this playbook
+    # requires_slash32_armor — does this ISP's single-NAT passthrough hand the WAN a
+    #   /1-poison public lease that needs the self-healing /32 armor (stage_armor +
+    #   apply_armor) and the /32 poison gate? Bell's Advanced DMZ does; a generic /
+    #   CGNAT ISP does not (its passthrough yields a normal public lease, so the armor
+    #   stages are skipped and the poison gate accepts a healthy public lease of any
+    #   prefix). Default True — the SAFE default: an unset/unknown playbook never skips
+    #   the armor on what could be a real /1 lease (fail-safe, not fail-open).
     prechecks: tuple[str, ...] = ()
     mtu: int | None = None
     alt_playbook: str | None = None
+    requires_slash32_armor: bool = True
 
 
 @dataclass(frozen=True)
