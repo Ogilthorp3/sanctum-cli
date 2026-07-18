@@ -34,6 +34,9 @@ dependencies = [
   # Previously resolved only transitively via google-genai; the mesh makes it a
   # first-class dependency (see sanctum_cli/mesh/adapters.py).
   "cryptography>=42",
+  # aiohttp is imported directly by mesh/tracker.py (the tracker server); declare it
+  # explicitly rather than relying on the sagemcom_api transitive (a fresh install crashed without it).
+  "aiohttp>=3.9",
 ]
 
 [project.optional-dependencies]
