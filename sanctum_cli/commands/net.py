@@ -1422,6 +1422,63 @@ def _dmz_stage_verifiers(runner: Runner) -> dict[str, Callable[[], bool]]:
     }
 
 
+def _net_single_nat_check() -> None:
+    """Phase-2 read-only validation of every live seam — ZERO writes.
+
+    The ``--apply`` path gates the out-of-band probe, the box preflight, and the WAN
+    reads behind ``net.single_nat_live``; ``--check`` runs exactly those probes (plus
+    the hub connect + the CURRENT DMZ leaf value) WITHOUT engaging anything, so the
+    real-hardware seams can be validated remotely and safely before a live fire is
+    ever armed. Every probe failure is reported as a seam gap, never a traceback.
+    """
+    seams: list[tuple[bool, str]] = []
+
+    try:
+        oob = _out_of_band_reachable()
+    except Exception as exc:  # a probe crash is a failed seam, not a stack trace
+        seams.append((False, f"out-of-band recovery probe RAISED: {exc}"))
+    else:
+        seams.append((oob, f"out-of-band recovery reachable = {oob}"))
+
+    try:
+        pf = _box_preflight_ready()
+        seams.append((pf.ok, f"box preflight = {pf.ok} \u00b7 {pf.reason}"))
+    except Exception as exc:
+        seams.append((False, f"box preflight RAISED: {exc}"))
+
+    try:
+        runner = _build_runner()
+        wan_ip = runner(("fw_wan_ip",))
+        wan_cidr = runner(("wan_addr_cidr",)).strip()
+        wan_routes = runner(("wan_routes",)).strip()
+    except Exception as exc:
+        seams.append((False, f"WAN read RAISED: {exc}"))
+    else:
+        seams.append((True, f"WAN ip={wan_ip!r} classifier={flip.classify_wan_ip(wan_ip)}"))
+        seams.append((True, f"  addr: {(wan_cidr[:110] or '(empty)')}"))
+        seams.append((True, f"  routes(head): {(wan_routes.splitlines()[:3] or '(empty)')}"))
+
+    try:
+        with _connected_hub() as provider:
+            dmz_op = provider.capability_op(Capability.DMZ)
+            if dmz_op is None:
+                seams.append((False, "hub connected but DMZ capability UNSUPPORTED"))
+            else:
+                cur = provider.get(dmz_op.path)
+                seams.append((True, f"hub connected \u00b7 DMZ leaf {dmz_op.path} current={cur!r} (engage target={dmz_op.engaged!r})"))
+    except Exception as exc:
+        seams.append((False, f"hub connect / DMZ read RAISED: {exc}"))
+
+    typer.echo("net single-nat --check \u00b7 READ-ONLY \u00b7 zero writes")
+    for ok, msg in seams:
+        typer.echo(f"  [{'OK' if ok else 'XX'}] {msg}")
+    typer.echo("")
+    if all(ok for ok, _ in seams):
+        typer.echo("all probed seams GREEN \u2014 live path still gated behind net.single_nat_live")
+    else:
+        typer.echo("some seams need attention (XX above) before arming a live fire")
+
+
 @net_app.command(
     "single-nat",
     help=(
@@ -1442,14 +1499,22 @@ def net_single_nat(
         bool,
         typer.Option("--force", help="Skip the confirm prompt (still honors the recovery gate)."),
     ] = False,
+    check: Annotated[
+        bool,
+        typer.Option("--check", help="Read-only Phase-2 validation: probe every live seam (OOB, box preflight, WAN reads, hub+DMZ leaf) with ZERO writes."),
+    ] = False,
 ) -> None:
-    if apply and rollback:
+    if apply + rollback + check > 1:
         exc = DeviceError(
-            "--apply and --rollback are mutually exclusive",
-            fix="run one at a time: --apply to fire the cutover, --rollback to undo it.",
+            "--apply, --rollback, and --check are mutually exclusive",
+            fix="run one at a time: --check to validate seams read-only, --apply to fire, --rollback to undo.",
         )
         _report(exc)
         raise typer.Exit(code=int(exc.exit_code))
+
+    if check:
+        _net_single_nat_check()
+        return
 
     if rollback:
         _net_single_nat_rollback(force=force)

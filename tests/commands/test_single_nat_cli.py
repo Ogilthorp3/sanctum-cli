@@ -705,3 +705,32 @@ def test_single_nat_live_armed_reads_config(monkeypatch: pytest.MonkeyPatch) -> 
         lambda key, default=None: True,
     )
     assert netmod._single_nat_live_armed() is True
+
+
+# ── --check: read-only Phase-2 seam validation ───────────────────────────────
+
+
+def test_net_single_nat_check_is_read_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """--check probes the seams and makes ZERO writes (Phase-2 validation, no --apply)."""
+    hub, fw, armor = FakeHub(), FakeRunner(), FakeArmor()
+    _wire(monkeypatch, hub=hub, fw=fw, armor=armor, out_of_band=True)
+    result = runner.invoke(app, ["net", "single-nat", "--check"])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    out = result.stdout.lower()
+    assert "read-only" in out
+    assert "preflight" in out
+    assert "dmz" in out
+    assert hub.set_calls == []
+    assert hub.reboot_calls == 0
+    assert armor.installed == 0
+
+
+def test_net_single_nat_check_mutually_exclusive_with_apply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--check and --apply cannot be combined (and combining them writes nothing)."""
+    hub, fw, armor = FakeHub(), FakeRunner(), FakeArmor()
+    _wire(monkeypatch, hub=hub, fw=fw, armor=armor)
+    result = runner.invoke(app, ["net", "single-nat", "--check", "--apply"])
+    assert result.exit_code != 0
+    assert hub.set_calls == []

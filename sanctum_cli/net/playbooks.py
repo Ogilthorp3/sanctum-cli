@@ -98,7 +98,7 @@ BUILTINS: dict[str, Playbook] = {
             "Move the Firewalla WAN cable back to its original port if you changed it.",
             "Confirm the Firewalla WAN returns to a private address (working double-NAT).",
         ),
-        requires_slash32_armor=True,
+        requires_slash32_armor=False,
     ),
     "generic": Playbook(
         id="generic",
