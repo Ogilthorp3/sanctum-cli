@@ -17,9 +17,10 @@ from rich.markup import escape
 
 from sanctum_cli import config
 from sanctum_cli.devices import firewalla as firewalla_provider
+from sanctum_cli.devices import flip, intents, interlock, rails, registry, sagemcom
 from sanctum_cli.devices import ha_green as ha_green_provider
-from sanctum_cli.devices import intents, rails, registry, sagemcom
 from sanctum_cli.devices import orbi as orbi_provider
+from sanctum_cli.devices.armor import SinglenatArmorInstaller
 from sanctum_cli.devices.base import Capability, Creds, DeviceError, NetContext, OpResult
 from sanctum_cli.errors import ExitCode, LocalError, SanctumError
 from sanctum_cli.net import (
@@ -35,12 +36,14 @@ from sanctum_cli.net import (
 from sanctum_cli.net import (
     status as net_status,
 )
-from sanctum_cli.net.types import SpeedReport, Verdict
+from sanctum_cli.net.types import Nat, SpeedReport, Verdict
+from sanctum_cli.onboard_experience import chapter_banner, green_check
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
     from sanctum_cli.devices.base import DeviceProvider
+    from sanctum_cli.devices.intents import ArmorInstaller
     from sanctum_cli.net.detect import HttpProbe, Runner
     from sanctum_cli.net.link import CommandRunner, IdentityDiagnosis
     from sanctum_cli.net.types import TopologyReport
@@ -140,11 +143,28 @@ def _firewalla_key_path() -> Path:
     return Path.home() / ".ssh" / "firewalla_ed25519"
 
 
+def _firewalla_host() -> str | None:
+    """Resolve the box (Firewalla) host the SSH transport targets — config-first.
+
+    Reads ``devices.firewalla.host`` from instance.yaml at CALL TIME (so an off-LAN
+    cutover perch pins its tailnet box IP), falling back to the detected default
+    gateway — the shipped general-purpose behavior, which on the LAN resolves to the
+    box's own address. Returns ``None`` only when nothing is configured AND no
+    gateway parses (no box → fail-closed at the runner/gate). The SAME resolution
+    backs both :func:`_build_runner` (observe_lease / verify box reads + the recovery
+    re-lease) and :func:`_firewalla_recovery_host` (the gate), so they never diverge.
+    """
+    override = config.instance_value("devices.firewalla.host", None)
+    if override is not None:
+        return str(override)
+    return detect.parse_default_gateway(system.real_runner(("route",))) or None
+
+
 def _build_runner() -> Runner:
-    gw = detect.parse_default_gateway(system.real_runner(("route",)))
+    host = _firewalla_host()
     key_path = _firewalla_key_path()
     fw_key = str(key_path) if key_path.exists() else None
-    return system.make_real_runner(fw_gateway=gw, fw_key=fw_key)
+    return system.make_real_runner(fw_gateway=host, fw_key=fw_key)
 
 
 def _build_http() -> HttpProbe:
@@ -1121,41 +1141,382 @@ def hub_set(
         raise typer.Exit(code=1)
 
 
-@hub_app.command(
+# ``sanctum net single-nat`` is the FULL Bell Advanced-DMZ + /32 cutover surface,
+# driving the staged :func:`intents.single_nat_dmz` orchestrator (the brain is the
+# pure :mod:`sanctum_cli.devices.flip` machine). It supersedes the old single-leaf
+# ``net hub single-nat`` (SetBridgeMode), which is now a deprecation shim that
+# redirects here (see :func:`hub_single_nat`). Dry-run by default — bare invocation
+# makes ZERO device writes; ``--apply`` fires the cutover ONLY when the out-of-band
+# recovery probe says reachable; ``--rollback`` undoes a prior cutover (disable DMZ
+# + re-lease DHCP).
+
+# The armor kit checkout dir is NO LONGER hardcoded here (FIX-d2) — it resolves
+# config-first through the SHARED ``intents._armor_kit_dir`` seam
+# (``paths.armor_kit_dir`` → the shipped default), the SAME resolver
+# ``intents._default_armor_installer`` uses, so the CLI installer and the intents
+# fallback never drift on the checkout path. The box + Mini HOSTS likewise resolve
+# config-first through the ``intents._armor_*`` seams (``devices.firewalla.host`` /
+# ``.ssh_user`` / ``devices.mini.host`` → LAN default), so an off-LAN operator's
+# deploy rides the tailnet while the shipped default stays the LAN coordinates.
+
+# The SHIPPED-default out-of-band recovery host the cutover gate probes: the Mini
+# jump host, which the armor kit reaches on a SEPARATE link from the WAN the flip is
+# changing (the README deploys via the Mini LAN jump host). A reachable Mini means there
+# is a way to recover the hub if the cutover strands it; its absence makes the flip
+# refuse. This is NO LONGER a hardcoded probe target (FIX-b): the gate resolves the
+# Mini config-first through :func:`_out_of_band_host` (``devices.mini.host`` → this
+# LAN default), so an off-LAN operator on the Bell hub Wi-Fi probes the tailnet Mini
+# (which survives the /1 collapse) while the shipped default stays the LAN address.
+_OUT_OF_BAND_HOST = "10.0.0.10"  # ip-allow: shipped LAN default for the OOB recovery Mini jump host; overridden config-first via devices.mini.host
+_OUT_OF_BAND_PORT = 22
+
+# The SSH port the recovery re-lease reaches the Firewalla over (the same port
+# ``net.system._fw_ssh_argv`` uses for the ``dhcp_release`` op). The Firewalla host
+# itself is NOT a constant — it is resolved at gate time as the default gateway
+# (see :func:`_firewalla_recovery_host`), the same box ``_build_runner`` targets.
+_FIREWALLA_SSH_PORT = 22
+
+
+def _firewalla_recovery_host() -> str | None:
+    """Resolve the Firewalla the recovery re-lease will SSH to (config-first, FIX-b).
+
+    The unwind on a failed cutover (and an explicit ``--rollback``) fires the
+    ``dhcp_release`` runner tag, which SSHes to the Firewalla — and ``_build_runner``
+    resolves that box via :func:`_firewalla_host` (``devices.firewalla.host`` override
+    → detected default gateway). The gate MUST probe the SAME host so "the recovery
+    re-lease can reach its box" is what it actually verifies — so it shares
+    :func:`_firewalla_host`. When Bert pins the tailnet box, the gate probes the
+    tailnet box; on a default install it probes the LAN gateway. Returns ``None`` when
+    neither resolves (no recovery host → no recovery path).
+    """
+    return _firewalla_host()
+
+
+def _out_of_band_host() -> str:
+    """Resolve the Mini jump host the OOB recovery gate TCP-probes — config-first (FIX-b).
+
+    The recovery-path gate (:func:`_out_of_band_reachable`) checks the Mini is
+    reachable before authorizing the cutover. Reads ``devices.mini.host`` from
+    instance.yaml at CALL TIME and STRIPS any ``user@`` prefix (the gate does a bare
+    TCP connect, not an SSH login — ``bert@<tailnet-ip>`` → ``<tailnet-ip>``),
+    falling back to the shipped LAN default ``_OUT_OF_BAND_HOST`` so the
+    general-purpose tool is unchanged. It shares the SAME ``devices.mini.host`` key
+    the armor Mini deploy uses (:func:`intents._armor_mini_host`), so the gate and the
+    deploy reach the SAME Mini. This closes the keystone asymmetry: before FIX-b the
+    box leg of this gate was config-driven but the Mini leg was LAN-hardcoded, so an
+    off-LAN perch (Bell hub Wi-Fi, ``192.168/16``) could not reach the ``10/8`` LAN Mini behind
+    the Firewalla NAT and the fail-closed gate refused the cutover it was meant to
+    authorize.
+    """
+    configured = config.instance_value("devices.mini.host", None)
+    if configured is None:
+        return _OUT_OF_BAND_HOST
+    # The gate connects by TCP, not SSH — drop any ``user@`` login prefix.
+    return str(configured).rsplit("@", 1)[-1]
+
+
+def _build_armor_installer() -> ArmorInstaller:
+    """Build the real single-NAT armor installer, box + Mini hosts config-first (FIX-b).
+
+    The one seam through which the ``net single-nat`` command reaches a concrete
+    armor install (stages ``stage_armor`` + ``apply_armor``). The box + Mini deploy
+    targets resolve config-first via the shared ``intents._armor_*`` seams
+    (``devices.firewalla.host`` / ``devices.firewalla.ssh_user`` / ``devices.mini.host``
+    → LAN default) — one source of truth with :func:`intents._default_armor_installer`
+    — so an off-LAN operator's scp/ssh rides the tailnet while the shipped default
+    stays the LAN coordinates. Built only on the apply path (never the dry-run /
+    gate-refused paths, which make zero host contact); tests swap this for a
+    recording double so the wiring is exercised without shelling out.
+    """
+    return SinglenatArmorInstaller(
+        kit_dir=intents._armor_kit_dir(),
+        firewalla_host=intents._armor_firewalla_host(),
+        firewalla_user=intents._armor_firewalla_user(),
+        mini_host=intents._armor_mini_host(),
+    )
+
+
+def _single_nat_requires_armor() -> bool:
+    """Does this network's single-NAT playbook need the Bell /32-armor stages? (FIX-e)
+
+    ``net single-nat`` is the Bell Advanced-DMZ surface, so it follows the **bell**
+    playbook by default — which DOES hand the WAN a ``/1``-poison lease and needs the
+    self-healing ``/32`` armor (``stage_armor`` + ``apply_armor``) plus the ``/32``
+    poison gate. An instance.yaml ``net.isp`` pin selects a different ISP's playbook;
+    for a non-Bell passthrough that yields a normal public lease, the matched
+    playbook's ``requires_slash32_armor`` is False, so the orchestrator SKIPS the
+    armor stages and the poison gate accepts a healthy public lease of any prefix.
+
+    Defaults to the **bell** playbook — the SAFE default: an unset/unknown ``net.isp``
+    never skips the armor on what could be a real Bell ``/1`` lease (fail-safe, not
+    fail-open).
+    """
+    isp = str(config.instance_value("net.isp", "bell"))
+    playbook = playbooks.BUILTINS.get(isp, playbooks.BUILTINS["bell"])
+    return playbook.requires_slash32_armor
+
+
+def _box_preflight_ready() -> flip.PreflightDecision:
+    """Pre-apply box gate (FIX-f): passwordless sudo + a real ``dhclient`` on the box.
+
+    The cutover's box ops (``wan_dhcp`` / ``dhcp_release``) run ``sudo dhclient`` over
+    the SAME key-SSH transport the runner uses. If passwordless sudo is not configured
+    the op hangs on a (TTY-less) password prompt and false-fails mid-cutover; if
+    ``dhclient`` is absent the re-lease cannot run at all. Both are probed over the
+    EXISTING SSH (``sudo -n true`` + ``command -v dhclient``) BEFORE any mutation and
+    consulted through the pure :func:`flip.evaluate_box_preflight`, so a misconfigured
+    box refuses up front with a clear message rather than stranding the WAN.
+
+    Fail-closed: an unresolved box host / missing SSH key, or an unreachable box, reads
+    as not-ready (the probe returns ``(False, False)``). The box host + user + key are
+    resolved the SAME way the runner's box ops resolve them (:func:`_firewalla_host`,
+    :func:`intents._armor_firewalla_user`, :func:`_firewalla_key_path`), so the gate
+    checks the box the cutover will actually drive.
+    """
+    host = _firewalla_host()
+    key_path = _firewalla_key_path()
+    key = str(key_path) if key_path.exists() else None
+    if host is None or key is None:
+        return flip.evaluate_box_preflight(passwordless_sudo=False, dhclient_present=False)
+    sudo_ok, dhclient_ok = system.firewalla_box_preflight(
+        host, key, user=intents._armor_firewalla_user()
+    )
+    return flip.evaluate_box_preflight(
+        passwordless_sudo=sudo_ok, dhclient_present=dhclient_ok
+    )
+
+
+def _tcp_reachable(host: str, port: int) -> bool:
+    """A read-only TCP presence probe (mirrors :func:`_firewalla_present`)."""
+    try:
+        socket.create_connection((host, port), timeout=2).close()
+        return True
+    except OSError:
+        return False
+
+
+def _out_of_band_reachable() -> bool:
+    """Is the cutover's recovery path reachable right now? Fail-closed, Tailscale-first.
+
+    The flip's start precondition (:func:`flip.gate_ok`): the cutover briefly drops
+    the WAN, so the recovery path must exist before we touch anything. After 06-26,
+    the recovery path is checked in THREE layers, ALL of which must hold:
+
+    * **PRIMARY — the LAN-INDEPENDENT Tailscale-on-box channel** (FIX-3): a real
+      root-SSH round-trip over the tailnet to ``ts-firewalla`` (see
+      :func:`sanctum_cli.devices.interlock.tailscale_oob_live`). This is the ONLY
+      channel proven to survive a LAN collapse — on 06-26 the LAN-bound channels
+      below were up at gate-check time and then died WITH the LAN, so a gate that
+      trusted only them green-lit a cutover it could not recover. The tailnet path
+      is the safety net that makes the cutover survivable, so it is checked FIRST.
+    * the **Mini jump host** (:func:`_out_of_band_host`, config-first from
+      ``devices.mini.host`` → the ``_OUT_OF_BAND_HOST`` LAN default) — the
+      out-of-band link the operator recovers the box over; and
+    * the **Firewalla** (:func:`_firewalla_recovery_host`, the default gateway) —
+      the host that actually PERFORMS the recovery re-lease (the rollback's
+      ``dhcp_release`` SSHes it). Retained as secondary belt-and-suspenders.
+
+    Any layer failing — the tailnet round-trip not live, either LAN host
+    unreachable, or no Firewalla recovery host resolving — means no usable recovery
+    path, and the gate refuses (fail-closed). ``--force`` waives the human confirm
+    prompt but NEVER this probe. The moment-of-op interlock at the DMZ-engage seam
+    re-runs this same check (passed as ``oob_probe``) so a channel that dies between
+    preflight and engage is caught at the instant it matters.
+    """
+    # PRIMARY: the LAN-independent Tailscale-on-box channel (the only one that
+    # survives a LAN collapse). Fail-closed if the root-SSH round-trip is not live.
+    if not interlock.tailscale_oob_live():
+        return False
+    if not _tcp_reachable(_out_of_band_host(), _OUT_OF_BAND_PORT):
+        return False
+    fw_host = _firewalla_recovery_host()
+    if fw_host is None:
+        # No recovery host resolved → no host the re-lease can reach → no recovery
+        # path. Fail-closed rather than guess the Firewalla is reachable.
+        return False
+    return _tcp_reachable(fw_host, _FIREWALLA_SSH_PORT)
+
+
+def _print_dmz_stage_plan(plan: list[str]) -> None:
+    """Render the staged cutover plan through the onboarding experience helpers.
+
+    A "Step N of M" chapter banner frames the cutover, then each flip stage is
+    listed as a green-checked line (the same calm, confident framing the onboarding
+    arc uses). Pure presentation; the orchestrator decided the stages.
+    """
+    console.print(
+        chapter_banner(
+            1,
+            1,
+            "Single-NAT cutover (Bell Advanced DMZ + /32)",
+            "Put your network behind ONE NAT — guarded, reversible, attended-only.",
+        )
+    )
+    # The first plan line is the title; the rest are the ordered stages/notes.
+    for line in plan[1:]:
+        stripped = line.strip()
+        if stripped.lower().startswith(("note:", "on ")):
+            console.print(f"  [dim]{escape(stripped)}[/]")
+        else:
+            console.print(green_check(stripped))
+
+
+def _dmz_stage_verifiers(runner: Runner) -> dict[str, Callable[[], bool]]:
+    """The REAL per-stage probes the apply path gates each mutating stage on.
+
+    Honest-verify: a stage's ``✓`` MUST derive from a real-world outcome, never
+    from :func:`intents._default_stage_verifier`'s unconditional ``True``. Two
+    stages carry a probe that can fail-closed the moment the downstream WAN is bad:
+
+    * ``observe_lease`` — read the REAL downstream WAN lease via the runner
+      (``("lease_observe",)`` over the Firewalla SSH seam) and REJECT an
+      APIPA (169.254.x) / empty / double-NAT lease. This trips the instant the
+      router fails to pull a public lease — *before* the hub is left engaged in
+      Advanced DMZ on a dead WAN.
+    * ``verify`` — the terminal end-to-end check: the SAME
+      :func:`sanctum_cli.net.verify.verify` real-site probe net_optimize and the
+      old single_nat used. ONLY a single-NAT :class:`Verdict.VERIFIED` passes;
+      APIPA / still-double-NAT / inconclusive all fail the stage so
+      ``guarded_apply`` unwinds (disable DMZ → re-lease DHCP) and the command
+      exits non-zero.
+
+    The remaining stages (preflight/wan_dhcp/enable_dmz/hub_reboot/apply_armor/
+    arm) have no extra real-world readback of their own — their I/O already
+    fail-closes (a refused ``set``/``reboot``/armor-install returns ``ok=False``
+    or raises, which the orchestrator turns into a stage failure) — so they are
+    left to fall through; the two probes above are the gates that catch a WAN
+    that came up dead.
+    """
+
+    def _observe_lease_ok() -> bool:
+        # Read the REAL downstream WAN the router just leased. A self-assigned
+        # APIPA (169.254.x), an empty/no lease, or a still-private (double-NAT)
+        # address means the cutover did NOT land a public single-NAT WAN — fail
+        # the stage so the rails unwind before DMZ is left engaged on a dead WAN.
+        lease = runner(("lease_observe",)).strip() or None
+        if lease is None or detect.is_apipa(lease):
+            return False
+        # classify_nat off the lease alone (no hop2): a private address is
+        # double-NAT, a public one is the single-NAT win. Only SINGLE passes.
+        return detect.classify_nat(hop2=None, wan_ip=lease) is Nat.SINGLE
+
+    def _verify_ok() -> bool:
+        # The terminal honest-verify: only a confirmed single-NAT public WAN path
+        # commits. APIPA_ROLLBACK / NOT_YET (still double) / INCONCLUSIVE all fail.
+        return verify.verify(runner=runner)[0] is Verdict.VERIFIED
+
+    return {
+        "observe_lease": _observe_lease_ok,
+        "verify": _verify_ok,
+    }
+
+
+@net_app.command(
     "single-nat",
-    help="Put the hub in bridge mode (single NAT). Dry-run by default; pass --apply to fire.",
+    help=(
+        "Put your network behind a single NAT (Bell Advanced DMZ + /32). "
+        "Dry-run by default; --apply fires (attended-only), --rollback undoes."
+    ),
 )
-def hub_single_nat(
+def net_single_nat(
     apply: Annotated[
         bool,
-        typer.Option("--apply", help="Actually fire the cutover (attended-only; drops internet)."),
+        typer.Option("--apply", help="Fire the cutover (attended-only; briefly drops internet)."),
+    ] = False,
+    rollback: Annotated[
+        bool,
+        typer.Option("--rollback", help="Undo a prior cutover: disable DMZ + re-lease DHCP."),
     ] = False,
     force: Annotated[
-        bool, typer.Option("--force", help="Skip the confirmation prompt (with --apply).")
+        bool,
+        typer.Option("--force", help="Skip the confirm prompt (still honors the recovery gate)."),
     ] = False,
 ) -> None:
+    if apply and rollback:
+        exc = DeviceError(
+            "--apply and --rollback are mutually exclusive",
+            fix="run one at a time: --apply to fire the cutover, --rollback to undo it.",
+        )
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code))
+
+    if rollback:
+        _net_single_nat_rollback(force=force)
+        return
+
+    # FIX-e: resolve whether THIS network's single-NAT playbook needs the Bell /32
+    # armor (and the /32 poison gate). Bell's Advanced DMZ does; other ISPs' passthrough
+    # yields a normal public lease, so the armor stages are skipped and any public
+    # prefix is accepted. Default is the bell playbook (safe).
+    requires_armor = _single_nat_requires_armor()
+
+    # FIX-f: the pre-apply box precondition — the cutover's box ops run `sudo dhclient`
+    # over the existing SSH, so passwordless sudo + a real DHCP client MUST be present
+    # before we touch anything. Fail-closed with a clear message; zero writes (the gate
+    # runs before the hub is even connected).
+    if apply:
+        preflight = _box_preflight_ready()
+        if not preflight.ok:
+            exc = DeviceError(
+                preflight.reason,
+                fix=(
+                    "on the box (the Firewalla SSH user): grant passwordless sudo "
+                    "(a sudoers NOPASSWD rule) AND install a DHCP client (`dhclient`), "
+                    "then re-run with --apply."
+                ),
+            )
+            _report(exc)
+            raise typer.Exit(code=int(exc.exit_code))
+
+    # The Firewalla-key-bound runner (the same one net_optimize/net_check use) is
+    # what resolves the ("fw_wan_ip",)/("lease_observe",)/("dhcp_release",) tags
+    # over the SSH seam; the orchestrator drives the Firewalla through it.
+    runner = _build_runner()
+    # The out-of-band recovery gate is checked here (CLI layer) so the orchestrator
+    # gets a concrete bool; --force NEVER waives it (it only waives the confirm).
+    oob = _out_of_band_reachable() if apply else True
+
     try:
         with _connected_hub() as provider:
-            # Verify must run over the Firewalla-key-bound runner (the same one
-            # net_optimize/net_check use), NOT the bare system.real_runner. Only
-            # _build_runner() → make_real_runner() resolves the ("fw_wan_ip",) /
-            # ("fw_wan_mac",) tags over the SSH seam; the bare real_runner returns
-            # "" for them (system.py:18), which would make verify.verify see a
-            # None WAN IP — disabling the APIPA/DHCP-fail auto-rollback trigger and
-            # biasing classify_nat toward NOT-VERIFIED on a successful cutover.
-            result = intents.single_nat(
+            result = intents.single_nat_dmz(
                 provider,
-                force=force,
+                runner,
+                # The armor installer is only needed when the playbook requires the
+                # /32 armor; for a non-Bell ISP the armor stages are skipped, so pass
+                # None (the orchestrator never reaches the install).
+                _build_armor_installer() if (apply and requires_armor) else None,
                 apply=apply,
-                runner=_build_runner() if apply else None,
-                confirm=lambda plan: typer.confirm(f"{plan}\nProceed?"),
+                out_of_band_reachable=oob,
+                # FIX-3: the live, moment-of-op recovery re-probe the prevent-interlock
+                # consults at the DMZ-engage seam — the SAME recovery check (Tailscale
+                # round-trip first), re-sampled at the instant DMZ is engaged so a
+                # channel that died since preflight refuses the engage (zero DMZ writes).
+                oob_probe=_out_of_band_reachable if apply else None,
+                # Wire the REAL per-stage probes (honest-verify): the ``verify``
+                # stage runs the SAME ``net.verify.verify`` real-world probe that
+                # net_optimize/the old single_nat used — only a single-NAT
+                # ``Verdict.VERIFIED`` commits; APIPA/double-NAT/inconclusive fail
+                # the stage so the rails unwind. ``observe_lease`` rejects an
+                # APIPA/empty downstream lease the instant it is read (before the
+                # hub is left in DMZ on a dead WAN). Without these the stages would
+                # fall through to ``intents._default_stage_verifier`` (unconditional
+                # True) and a dead-WAN cutover would COMMIT — fail-to-DARK.
+                stage_verifiers=_dmz_stage_verifiers(runner) if apply else None,
+                force=force,
+                # FIX-e: gate the /32-armor + poison-/32 requirement on the playbook.
+                requires_slash32_armor=requires_armor,
+                confirm=lambda plan: typer.confirm(f"{plan}\nAre you at the box (not remote)?"),
             )
     except SanctumError as exc:
         _report(exc)
         raise typer.Exit(code=int(exc.exit_code)) from exc
-    for line in result.plan:
-        console.print(escape(line))
+
+    _print_dmz_stage_plan(result.plan)
     if not result.applied:
+        # Either a dry-run OR the out-of-band gate refused (result carries ok=False).
+        if result.result is not None and not result.result.ok:
+            console.print(f"\n[red]✗[/] {escape(result.result.detail)}")
+            raise typer.Exit(code=1)
         console.print("\n[dim]dry-run: no changes made. Re-run with --apply to fire.[/]")
         return
     assert result.result is not None  # apply path always carries an OpResult
@@ -1164,6 +1525,115 @@ def hub_single_nat(
     else:
         console.print(f"\n[yellow]{escape(result.result.detail)}[/]")
         raise typer.Exit(code=1)
+
+
+def _net_single_nat_rollback(*, force: bool) -> None:
+    """Undo a prior single-NAT cutover: disable Advanced DMZ + re-lease DHCP.
+
+    The mirror image of the apply path — it drives the SAME audited, reboot-aware,
+    verified rollback the rails use on a failed stage
+    (:class:`intents._DmzRollbackProvider.rollback`: restore the disengaged
+    baseline → reboot to latch the disable → re-lease DHCP → verify the WAN
+    recovered to a working double-NAT lease). It does NOT re-run the staged flip; it
+    restores the CAPTURED pre-cutover baseline (every single-NAT leaf disengaged via
+    :func:`intents.disengaged_baseline_snapshot` — bridge mode AND Advanced DMZ, not
+    a fabricated single-key dict that would leave a prior bridge-mode flip silently
+    engaged) and re-leases. ``--force`` waives the confirm prompt; without it the
+    operator is asked first.
+    """
+    runner = _build_runner()
+    try:
+        with _connected_hub() as provider:
+            op = provider.capability_op(Capability.DMZ)
+            if op is None:
+                exc = DeviceError(
+                    f"{provider.brand} ({provider.kind}) does not support Advanced DMZ (single-NAT)",
+                    fix="use a hub provider that advertises Capability.DMZ, or pin the right brand.",
+                )
+                _report(exc)
+                raise typer.Exit(code=int(exc.exit_code))
+
+            if not force and not typer.confirm(
+                f"Disable Advanced DMZ on {provider.brand} and re-lease DHCP "
+                "(returns the network to double-NAT)?"
+            ):
+                console.print("No changes made.")
+                return
+
+            # Restore the CAPTURED pre-cutover baseline (every single-NAT leaf
+            # disengaged), then reboot → re-lease → verify recovery — through the
+            # same _DmzRollbackProvider the rails use so the unwind is ONE audited,
+            # reboot-aware, verified path (FIX-5 a/b/c), not a fabricated single-key
+            # dict + a blind re-lease that reports green on a still-dark WAN.
+            wrapped = intents._DmzRollbackProvider(provider, runner)
+            snap = intents.disengaged_baseline_snapshot(provider)
+            result: OpResult = wrapped.rollback(snap)
+    except SanctumError as exc:
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code)) from exc
+
+    if result.ok:
+        console.print(f"[green]✓[/] single-NAT rolled back: {escape(result.detail)}")
+    else:
+        console.print(f"[yellow]{escape(result.detail)}[/]")
+        raise typer.Exit(code=1)
+
+
+@hub_app.command(
+    "single-nat",
+    help="DEPRECATED — use `sanctum net single-nat`. Prints the new command's plan.",
+)
+def hub_single_nat(
+    apply: Annotated[  # noqa: ARG001 - retained for CLI stability; redirects to net single-nat
+        bool,
+        typer.Option("--apply", help="(deprecated — use `sanctum net single-nat --apply`)"),
+    ] = False,
+    force: Annotated[  # noqa: ARG001 - retained for CLI stability; redirects to net single-nat
+        bool, typer.Option("--force", help="(deprecated — use `sanctum net single-nat --force`)")
+    ] = False,
+) -> None:
+    """DEPRECATED single-leaf SetBridgeMode flip — redirected to ``net single-nat``.
+
+    The single-leaf ``SetBridgeMode`` flip was superseded by the staged Advanced-DMZ
+    + /32 cutover (:func:`net_single_nat`), which reboots the hub, observes the
+    downstream lease, installs the self-healing armor kit, and gates on an
+    out-of-band recovery path. To avoid silently firing the OLD path (and to never
+    mutate on a deprecated command), this shim prints the NEW command's dry-run plan
+    and a deprecation note steering the operator there; it makes ZERO device writes
+    regardless of ``--apply``/``--force``.
+    """
+    console.print(
+        "[yellow]deprecated:[/] `net hub single-nat` (single-leaf SetBridgeMode) is "
+        "superseded by `sanctum net single-nat` (staged Advanced DMZ + /32 cutover)."
+    )
+    try:
+        with _connected_hub() as provider:
+            # Resolve the DMZ op for a dry-run plan via the new orchestrator; an
+            # unsupported hub (no DMZ op) still gets the deprecation note + redirect
+            # below (never a SetBridgeMode write). apply=False → ZERO mutations.
+            result = intents.single_nat_dmz(
+                provider,
+                _build_runner(),
+                None,
+                apply=False,
+            )
+            _print_dmz_stage_plan(result.plan)
+    except DeviceError:
+        # A hub that does not advertise the new DMZ op (e.g. an older read-only
+        # fallback) cannot render the staged plan — but the deprecation command's
+        # job is to STEER, not to mutate, so swallow the unsupported-op refusal and
+        # still print the redirect. We never reached any write (apply=False).
+        console.print(
+            "[dim]this hub does not advertise the new Advanced-DMZ op; "
+            "run `sanctum net single-nat` for the staged plan once supported.[/]"
+        )
+    except SanctumError as exc:
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code)) from exc
+    console.print(
+        "\n[dim]dry-run: no changes made. Run `sanctum net single-nat --apply` "
+        "to fire the staged cutover.[/]"
+    )
 
 
 # ─── firewalla (network-gear provider surface) ───────────────────────

@@ -7,7 +7,7 @@ BUILTINS: dict[str, Playbook] = {
         id="bell",
         display_name="Bell (Giga Hub / Home Hub 4000) — Advanced DMZ",
         achieves="single_nat",
-        gateway_ips=("192.168.2.1",),
+        gateway_ips=("192.168.2.1",),  # ip-allow: Bell Giga Hub published default LAN gateway (playbook match data, not an endpoint)
         title_contains=("Bell", "Giga Hub", "Home Hub"),
         admin_url_template="http://{gateway_ip}",
         prechecks=(
@@ -54,6 +54,9 @@ BUILTINS: dict[str, Playbook] = {
             "Renew the Firewalla WAN.",
             "Confirm the Firewalla WAN returns to a 192.168.x.x address (back to working double-NAT).",
         ),
+        # Bell's Advanced DMZ is the method that hands the WAN a /1-poison public
+        # lease — so it needs the self-healing /32 armor + the /32 poison gate.
+        requires_slash32_armor=True,
     ),
     "bell-pppoe": Playbook(
         id="bell-pppoe",
@@ -95,6 +98,7 @@ BUILTINS: dict[str, Playbook] = {
             "Move the Firewalla WAN cable back to its original port if you changed it.",
             "Confirm the Firewalla WAN returns to a private address (working double-NAT).",
         ),
+        requires_slash32_armor=True,
     ),
     "generic": Playbook(
         id="generic",
@@ -121,6 +125,9 @@ BUILTINS: dict[str, Playbook] = {
             "Turn OFF the DMZ / Exposed Host / IP Passthrough setting.",
             "Renew the Firewalla WAN; confirm it returns to a private address (working double-NAT).",
         ),
+        # A generic ISP's passthrough yields a normal public lease — no /1 poison, so
+        # the /32 armor stages are skipped and any public prefix commits.
+        requires_slash32_armor=False,
     ),
     "cgnat": Playbook(
         id="cgnat",
@@ -136,6 +143,9 @@ BUILTINS: dict[str, Playbook] = {
         gotchas=("This is an ISP-side setting; no change on your equipment will fix it.",),
         ordering=(),
         rollback=(),
+        # CGNAT single-NAT is not reachable from our side, so there is no cutover +
+        # no /32 armor.
+        requires_slash32_armor=False,
     ),
 }
 

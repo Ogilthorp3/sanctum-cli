@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, TypeVar
 
@@ -54,7 +55,7 @@ from sanctum_cli.devices.base import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine
+    from collections.abc import Callable, Coroutine, Iterator
     from collections.abc import Set as AbstractSet
 
 T = TypeVar("T")
@@ -65,29 +66,43 @@ KEYCHAIN_ACCOUNT = "admin"
 KEYCHAIN_SERVICE = "bell-hub-admin"
 
 # The Bell-specific network-config subtree we snapshot before a mutating intent.
-# These are the leaf XPaths a single-NAT / DMZ cutover touches.
+# These are the leaf XPaths a single-NAT / DMZ cutover touches. The Advanced-DMZ
+# leaf is the settable boolean ``.../AdvancedDMZ/Enable`` — verified live against
+# the F5697 (2026-06-26): the AdvancedDMZ parent is a nested struct, and the
+# boolean leaf accepts only the lowercase strings ``"true"``/``"false"`` (targeting
+# the parent with ``"on"`` misfires with XMO_INVALID_PARAMETER_TYPE_ERR).
 _BRIDGE_MODE_XPATH = "Device/Services/BellNetworkCfg/SetBridgeMode"
-_ADVANCED_DMZ_XPATH = "Device/Services/BellNetworkCfg/AdvancedDMZ"
+_ADVANCED_DMZ_XPATH = "Device/Services/BellNetworkCfg/AdvancedDMZ/Enable"
 _SNAPSHOT_XPATHS = (_BRIDGE_MODE_XPATH, _ADVANCED_DMZ_XPATH)
 
 # The brand-owned vocabulary: high-level Capability → the Bell TR-069 (path,
 # engaged-value) that achieves it. A Layer-2 intent reaches bridge mode through
 # this map (via capability_op), so it never hardcodes a Bell XPath — adding a
-# non-TR-069 brand is one new provider with its own map, no intent change.
+# non-TR-069 brand is one new provider with its own map, no intent change. The DMZ
+# leaf is a boolean, so it engages with the SAH lowercase string ``"true"`` (it
+# rejects ``"on"`` with XMO_INVALID_PARAMETER_TYPE_ERR).
 _CAPABILITY_OPS: dict[Capability, CapabilityOp] = {
     Capability.BRIDGE_MODE: CapabilityOp(path=_BRIDGE_MODE_XPATH, engaged="on"),
-    Capability.DMZ: CapabilityOp(path=_ADVANCED_DMZ_XPATH, engaged="on"),
+    Capability.DMZ: CapabilityOp(path=_ADVANCED_DMZ_XPATH, engaged="true"),
 }
 
-# The leaves a single-NAT cutover actually MUTATES (derived from the bridge-mode
-# capability op so the two never drift). The snapshot MUST carry a restorable
-# baseline for each even if the read returns None at snapshot time — otherwise a
-# rollback after a failed cutover would have nothing to restore and would
-# silently "succeed" while leaving the household in bridge mode (internet down).
-# A None read of the bridge-mode leaf means the hub is not in bridge mode, so the
-# safe pre-cutover baseline is "off".
-_MUTATED_XPATHS = (_CAPABILITY_OPS[Capability.BRIDGE_MODE].path,)
-_SAFE_BASELINE = "off"
+# The leaves a single-NAT cutover actually MUTATES (derived from the capability ops
+# so the two never drift). The snapshot MUST carry a restorable baseline for each
+# even if the read returns None at snapshot time — otherwise a rollback after a
+# failed cutover would have nothing to restore and would silently "succeed" while
+# leaving the household in single-NAT (internet down). A None read means the leaf is
+# not engaged, so the safe pre-cutover baseline is its DISENGAGED value: ``"off"``
+# for the on/off bridge-mode leaf, ``"false"`` for the boolean Advanced-DMZ leaf
+# (which is why the baseline is a per-leaf map, not one scalar — sending ``"off"``
+# to the boolean DMZ leaf would be rejected).
+_MUTATED_XPATHS = (
+    _CAPABILITY_OPS[Capability.BRIDGE_MODE].path,
+    _CAPABILITY_OPS[Capability.DMZ].path,
+)
+_SAFE_BASELINES: dict[str, str] = {
+    _BRIDGE_MODE_XPATH: "off",
+    _ADVANCED_DMZ_XPATH: "false",
+}
 
 # XPath that identifies the device class once authenticated, used to refine the
 # generic ``brand`` into a concrete model string after connect.
@@ -102,17 +117,62 @@ _PRODUCT_CLASS_XPATH = "Device/DeviceInfo/ProductClass"
 # proof the write landed.
 _SAH_OK = frozenset({"XMO_REQUEST_NO_ERR", "XMO_NO_ERR", "Ok"})
 
+# Reboot-ONLY success tokens — the reboot verb's wider success vocabulary (FIX-1).
+# A SAH reboot tears down its own session as the box restarts, so the request that
+# issued it rarely gets a clean XMO_NO_ERR: the hub reports the action callback
+# died with the session (XMO_ACTION_CALLBACK_ERR) or that it is already rebooting
+# (XMO_REBOOTING_ERR). Both mean the reboot was INITIATED = SUCCESS. They are
+# accepted ONLY for the reboot verb (never for set/action) — a setValue returning
+# one of these is still a real failure. On 2026-06-26 reading these as failure
+# tripped a rollback against an already-rebooting hub → DMZ left engaged un-armored.
+_SAH_REBOOT_INITIATED = frozenset({"XMO_ACTION_CALLBACK_ERR", "XMO_REBOOTING_ERR"})
+_SAH_REBOOT_OK = _SAH_OK | _SAH_REBOOT_INITIATED
 
-def _reply_error(reply: Any) -> str | None:
-    """Return the first SAH error description in a setValue reply, else ``None``.
+
+def _sah_value(value: object) -> str:
+    """Coerce a value to the SAH wire STRING the hub's ``setValue`` expects.
+
+    The Bell SAH leaves are TYPED: a boolean leaf (e.g. ``AdvancedDMZ/Enable``)
+    accepts ONLY the lowercase strings ``"true"``/``"false"`` and rejects anything
+    else with ``XMO_INVALID_PARAMETER_TYPE_ERR`` (code 16777311) — the exact error
+    that stranded the 2026-06-27 auto-rollback. The installed ``sagemcom_api``
+    DESERIALIZES a boolean leaf to a Python ``bool``, so a snapshot taken via
+    ``str(value)`` captured ``"True"``/``"False"`` (capitalized) and a restore of
+    that baseline was rejected by the hub — DMZ stayed engaged, the household dark.
+    Normalize the Python ``bool`` (and the capitalized repr an older ``str(bool)``
+    snapshot may carry) to the SAH form so the ENGAGE's ``"true"`` and the
+    ROLLBACK's ``"false"`` are the SAME string type. Any other value passes through
+    as its ``str``.
+
+    Owned at the SAH boundary (Contracts at the Boundary): every value crossing into
+    ``set_value_by_xpath`` — a fresh write OR a restored baseline — and every value
+    read back for a baseline is normalized here, so no caller can hand the hub a
+    non-string boolean. ``isinstance(value, bool)`` is checked first because ``bool``
+    is a subclass of ``int`` (``str(True)`` would otherwise give ``"True"``).
+    """
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    text = str(value)
+    if text in ("True", "False"):
+        return text.lower()
+    return text
+
+
+def _reply_error(reply: Any, ok_tokens: frozenset[str] = _SAH_OK) -> str | None:
+    """Return the first non-``ok_tokens`` SAH error description in a reply, else ``None``.
 
     Fail-closed: a reply is clean only when the top-level ``error.description`` is
-    a known success token AND every action's ``error.description`` is too. A
+    an accepted success token AND every action's ``error.description`` is too. A
     missing/garbled envelope, an unmodeled top-level error, or a failed action
     each yield a non-None description so the caller treats the write as failed —
     closing the transport's two swallow surfaces: it RETURNS (does not raise) on
     an unmodeled top-level error, and it never inspects per-action errors unless
     the top level is ``XMO_REQUEST_ACTION_ERR``.
+
+    ``ok_tokens`` defaults to :data:`_SAH_OK` (the set/action success set); the
+    reboot verb passes :data:`_SAH_REBOOT_OK` so the reboot-initiated tokens
+    (XMO_ACTION_CALLBACK_ERR / XMO_REBOOTING_ERR) are treated as success for that
+    verb ONLY — see :meth:`SagemcomHubProvider.reboot`.
     """
     if not isinstance(reply, dict):
         return f"unrecognized reply (not a dict: {type(reply).__name__})"
@@ -123,7 +183,7 @@ def _reply_error(reply: Any) -> str | None:
     top_desc = top.get("description") if isinstance(top, dict) else None
     if top_desc is None:
         return "reply missing top-level error.description"
-    if top_desc not in _SAH_OK:
+    if top_desc not in ok_tokens:
         return str(top_desc)
     actions = inner.get("actions")
     if isinstance(actions, list):
@@ -132,9 +192,86 @@ def _reply_error(reply: Any) -> str | None:
                 continue
             err = action.get("error")
             desc = err.get("description") if isinstance(err, dict) else None
-            if desc is not None and desc not in _SAH_OK:
+            if desc is not None and desc not in ok_tokens:
                 return str(desc)
     return None
+
+
+# Exception types that mean the hub dropped its OWN connection as it began to
+# reboot — the EXPECTED success signal for the reboot verb (FIX-1). ConnectionError
+# (incl. ConnectionResetError), TimeoutError (asyncio.TimeoutError IS TimeoutError
+# on 3.11+), and OSError cover the stdlib + aiohttp families (aiohttp's
+# ServerDisconnectedError / ClientConnectionError / ServerTimeoutError are all
+# OSError subclasses). Matched by base class so the optional aiohttp dep need not
+# be imported here. A genuine rejection (DeviceError, auth) is NOT in this family,
+# so it still fails closed.
+_REBOOT_CONNECTION_DROP = (ConnectionError, TimeoutError, OSError)
+
+
+def _is_reboot_connection_drop(exc: BaseException) -> bool:
+    """True iff ``exc`` looks like the hub dropping its connection to reboot.
+
+    Belt-and-suspenders for transports whose disconnect error is NOT an OSError
+    subclass: match the known aiohttp/asyncio connection-drop class names too, so a
+    ``ServerDisconnectedError`` (were it ever not an OSError) is still read as the
+    reboot's success signal rather than a failure.
+    """
+    if isinstance(exc, _REBOOT_CONNECTION_DROP):
+        return True
+    return type(exc).__name__ in {
+        "ServerDisconnectedError",
+        "ClientConnectionError",
+        "ClientOSError",
+        "ConnectionResetError",
+        "ServerTimeoutError",
+        "TimeoutError",
+    }
+
+
+def _iter_sah_error_descriptions(exc: BaseException) -> Iterator[str]:
+    """Yield every SAH ``error.description`` string a raised exception carries.
+
+    The installed ``sagemcom_api`` raises its typed errors as
+    ``SomeException(action_error)`` where ``action_error`` is the SAH error dict
+    (``{"description": "XMO_..."}``) — so the description we must classify rides in
+    ``exc.args``. We walk the args (and one level of nested list/tuple) and surface
+    any dict ``description`` plus any bare-string arg, so the reboot contract can
+    read the token whether the library passed the dict or (defensively) a string.
+    No token match happens here — the caller decides which descriptions mean what.
+    """
+    for arg in getattr(exc, "args", ()):
+        if isinstance(arg, Mapping):
+            desc = arg.get("description")
+            if isinstance(desc, str):
+                yield desc
+        elif isinstance(arg, str):
+            yield arg
+        elif isinstance(arg, (list, tuple)):
+            for item in arg:
+                if isinstance(item, Mapping):
+                    nested = item.get("description")
+                    if isinstance(nested, str):
+                        yield nested
+
+
+def _reboot_initiated_from_exc(exc: BaseException) -> bool:
+    """True iff a RAISED transport exception carries a reboot-INITIATED SAH token.
+
+    FIX-1 shape-B. The installed ``sagemcom_api`` does not only RETURN the
+    reboot-initiated tokens; when ``XMO_ACTION_CALLBACK_ERR`` / ``XMO_REBOOTING_ERR``
+    ride at the ACTION level under a top-level ``XMO_REQUEST_ACTION_ERR``, ``__post``
+    RAISES ``UnknownException({"description": "XMO_ACTION_CALLBACK_ERR"})`` (verified
+    against the installed client). That raise is the hub tearing down its session to
+    reboot = SUCCESS, NOT a failure — so :meth:`SagemcomHubProvider.reboot` accepts
+    it. A GENUINE typed rejection (``AccessRestrictionException`` /
+    ``AuthenticationException``, whose description is NOT a reboot-initiated token)
+    returns False and still fails closed. Mirrors :data:`_SAH_REBOOT_INITIATED` so
+    the return-path and the raise-path accept EXACTLY the same tokens (Contracts at
+    the Boundary — the two must never drift).
+    """
+    return any(
+        desc in _SAH_REBOOT_INITIATED for desc in _iter_sah_error_descriptions(exc)
+    )
 
 
 def _make_client(creds: Creds) -> Any:
@@ -162,6 +299,42 @@ def _make_client(creds: Creds) -> Any:
         EncryptionMethod.SHA512,
         ssl=False,
     )
+
+
+# The SAH action that reboots a Sagemcom F@st gateway — the exact dict the
+# installed ``sagemcom_api`` client's own ``reboot()`` builds. Issued through the
+# client's raw request path (see :func:`_reboot_raw`) so the provider receives the
+# full reply envelope and can fail-closed via :func:`_reply_error`.
+_REBOOT_ACTION = {
+    "id": 0,
+    "method": "reboot",
+    "xpath": "Device",
+    "parameters": {"source": "GUI"},
+}
+
+
+async def _reboot_raw(client: Any) -> Any:
+    """Issue the SAH reboot action and return the RAW reply envelope.
+
+    The convenience ``client.reboot()`` returns ``__get_response_value(response)``
+    (the extracted leaf value), discarding the ``{"reply": {"error": ...}}``
+    envelope the fail-closed check needs — and for the reboot action it yields the
+    same ``''`` for a clean and a rejected reply, so success cannot be told from
+    failure. The client's raw request method DOES return the full envelope, so we
+    issue the action through it instead. Its name is mangled
+    (``_SagemcomClient__api_request_async``); we reach it via ``getattr`` and fall
+    back to the public ``reboot()`` coroutine only if a future library version
+    drops/renames the raw method, so the provider still functions (with the
+    library's own error handling) rather than breaking outright.
+    """
+    raw = getattr(client, "_SagemcomClient__api_request_async", None)
+    if raw is not None:
+        return await raw([dict(_REBOOT_ACTION)], False)
+    # Defensive fallback: a client without the raw seam (e.g. a future rename).
+    # The library's own ``reboot()`` raises on the errors it models; the swallowed
+    # unmodeled-top-level surface is then out of our reach but no worse than the
+    # library's baseline.
+    return await client.reboot()
 
 
 # Read-only fingerprint constants. An unauthenticated SAH JSON-req to a Sagemcom
@@ -380,7 +553,10 @@ class SagemcomHubProvider:
         except Exception as exc:  # normalize any transport error
             msg = f"Sagemcom getValue failed for {path!r}: {exc}"
             raise DeviceError(msg) from exc
-        return None if value is None else str(value)
+        # Coerce a boolean leaf's Python-bool read to the SAH wire string so a
+        # captured baseline is never poisoned with "True"/"False" (which a later
+        # restore would send back and the hub would reject) — see _sah_value.
+        return None if value is None else _sah_value(value)
 
     def get(self, path: str) -> str | None:
         """Read one leaf value by XPath; ``None`` when the path is unknown."""
@@ -396,8 +572,13 @@ class SagemcomHubProvider:
         """
         client = self._require_client()
         before = self._raw_get(path)
+        # Normalize at the boundary: a Python bool or its capitalized repr (a typed
+        # baseline / older str(bool) snapshot) becomes the SAH "true"/"false" the
+        # boolean leaves require — otherwise the hub rejects it with
+        # XMO_INVALID_PARAMETER_TYPE_ERR and an auto-rollback cannot disable DMZ.
+        wire = _sah_value(value)
         try:
-            reply = self._run(client.set_value_by_xpath(path, value))
+            reply = self._run(client.set_value_by_xpath(path, wire))
         except Exception as exc:  # normalize any transport error
             msg = f"Sagemcom setValue failed for {path!r}: {exc}"
             raise DeviceError(msg) from exc
@@ -407,7 +588,80 @@ class SagemcomHubProvider:
             raise DeviceError(
                 msg, fix="the hub did not accept the write; check the leaf/value and retry"
             )
-        return OpResult(ok=True, detail=f"set {path}", before=before, after=value)
+        return OpResult(ok=True, detail=f"set {path}", before=before, after=wire)
+
+    def reboot(self) -> OpResult:
+        """Reboot the hub via the SAH ``reboot`` action — reboot-initiated = SUCCESS.
+
+        The installed ``sagemcom_api`` client models the reboot as the SAH action
+        ``{"method": "reboot", "xpath": "Device", "parameters": {"source":
+        "GUI"}}``. We drive it on the provider's persistent loop — the same loop
+        login bound to, so the client's loop-bound ``aiohttp`` session stays valid —
+        and then inspect the *raw reply envelope* ourselves (NOT the convenience
+        ``client.reboot()``, whose lossy ``__get_response_value`` returns ``''`` for
+        both a clean and a rejected reply — see :func:`_reboot_raw`).
+
+        **FIX-1 — the reboot success contract.** Unlike :meth:`set`, a reboot kills
+        its own connection as the box restarts, so the request that issued it rarely
+        gets a clean ``XMO_NO_ERR``. Three outcomes ALL mean "reboot initiated" =
+        SUCCESS, and the contract treats them as such (Contracts at the Boundary —
+        authored from the device's REAL reply shapes, not the old XMO_NO_ERR-only
+        assumption that stranded the haus on 2026-06-26):
+
+        * the connection drops mid-request (reset / server-disconnect / read
+          timeout) — caught here and reported ``ok=True`` (the reboot fired);
+        * the reply carries ``XMO_ACTION_CALLBACK_ERR`` (the action callback died
+          with the session) — accepted via :data:`_SAH_REBOOT_OK`;
+        * the reply carries ``XMO_REBOOTING_ERR`` (the box is already rebooting) —
+          also accepted via :data:`_SAH_REBOOT_OK`.
+
+        Still fail-closed on a GENUINE rejection: a transport error that is NOT a
+        connection-drop, or an ``error.description`` outside :data:`_SAH_REBOOT_OK`
+        (e.g. ``XMO_ACCESS_RESTRICTION_ERR``, an auth failure), raises
+        :class:`DeviceError` — a reboot the hub actually refused never reports green.
+        This contract is shared by the rollback's latch-reboot
+        (:class:`~sanctum_cli.devices.intents._DmzRollbackProvider`), which calls
+        this same ``reboot()`` — so the unwind survives the normal reboot drop too.
+        """
+        client = self._require_client()
+        try:
+            reply = self._run(_reboot_raw(client))
+        except Exception as exc:  # normalize any transport error
+            # A dropped connection right after issuing the reboot is the NORMAL,
+            # EXPECTED success signal (the hub tore down its own session to reboot),
+            # NOT a failure — report ok=True. Only a non-drop transport error fails.
+            if _is_reboot_connection_drop(exc):
+                return OpResult(
+                    ok=True,
+                    detail="reboot issued (hub dropped the connection — reboot initiated)",
+                )
+            # FIX-1 shape-B: the installed sagemcom_api RAISES (not returns) when a
+            # reboot-initiated token rides at the ACTION level under a top-level
+            # XMO_REQUEST_ACTION_ERR (__post → UnknownException({"description":
+            # "XMO_ACTION_CALLBACK_ERR"})). That raise is the reboot firing, NOT a
+            # rejection, so accept it — otherwise a reboot that succeeded is read as a
+            # failed stage and the rails roll back (the precise 06-26 cascade). A
+            # genuine typed rejection (access-restriction/auth) carries no reboot
+            # token and still falls through to the fail-closed raise below.
+            if _reboot_initiated_from_exc(exc):
+                return OpResult(
+                    ok=True,
+                    detail=(
+                        "reboot issued (hub raised a reboot-initiated SAH token "
+                        "— reboot initiated)"
+                    ),
+                )
+            msg = f"Sagemcom reboot failed: {exc}"
+            raise DeviceError(
+                msg, fix="check the hub is reachable and the session is valid"
+            ) from exc
+        err = _reply_error(reply, ok_tokens=_SAH_REBOOT_OK)
+        if err is not None:
+            msg = f"Sagemcom reboot was rejected by the hub: {err}"
+            raise DeviceError(
+                msg, fix="the hub did not accept the reboot; check admin rights and retry"
+            )
+        return OpResult(ok=True, detail="reboot issued")
 
     def capabilities(self) -> AbstractSet[Capability]:
         """Operations this hub actually supports."""
@@ -432,14 +686,15 @@ class SagemcomHubProvider:
         """Capture the Bell network-config leaves we may need to restore.
 
         A best-effort read of each tracked XPath, with one hard guarantee: every
-        leaf a mutating intent will actually change (``_MUTATED_XPATHS``) is
-        ALWAYS present in the baseline, even if its read returns None. A leaf the
-        firmware does not surface at snapshot time would otherwise be dropped,
-        leaving rollback with nothing to restore — so it would silently "succeed"
-        while the hub stayed in bridge mode (internet down). For the bridge-mode
-        leaf a None read means "not in bridge mode", so the safe pre-cutover
-        baseline is ``"off"``. Non-mutated leaves (e.g. DMZ) stay best-effort:
-        captured only when read, since we never write them.
+        leaf a mutating intent will actually change (``_MUTATED_XPATHS`` — bridge
+        mode AND Advanced DMZ) is ALWAYS present in the baseline, even if its read
+        returns None. A leaf the firmware does not surface at snapshot time (the real
+        Bell shape: a getValue of an un-engaged Advanced-DMZ leaf returns None) would
+        otherwise be dropped, leaving rollback with nothing to restore — so a failed
+        cutover would silently "succeed" while the hub stayed in single-NAT (internet
+        down). A None read means the leaf is not engaged, so the safe pre-cutover
+        baseline is its DISENGAGED value from ``_SAFE_BASELINES`` (``"off"`` for the
+        on/off bridge leaf, ``"false"`` for the boolean DMZ leaf).
         """
         data: dict[str, str] = {}
         for xpath in _SNAPSHOT_XPATHS:
@@ -448,7 +703,7 @@ class SagemcomHubProvider:
                 data[xpath] = value
         # Guarantee a restorable baseline for every leaf the cutover will mutate.
         for xpath in _MUTATED_XPATHS:
-            data.setdefault(xpath, _SAFE_BASELINE)
+            data.setdefault(xpath, _SAFE_BASELINES[xpath])
         return Snapshot(
             brand=self.brand,
             taken_at=datetime.now(tz=UTC).isoformat(),
