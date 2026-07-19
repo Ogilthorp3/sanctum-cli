@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "sanctum-cli"
-version = "0.14.1"
+version = "0.15.0"
 description = "Unified terminal binary for Sanctum hosts — router, wizard, doctor."
 readme = "README.md"
 requires-python = ">=3.11"
