@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `sanctum upgrade` — toolchain currency in one command. Inventories every
+  tool sanctum rides on (brew formulae, npm globals, pip venvs) against a
+  curated registry, resolves the latest *stable* version per manager (brew
+  bottles, npm `latest` dist-tag, pip final releases — never beta), and
+  prints an old→new plan table tagged by what each tool makes sanctum
+  (smarter/safer/faster). Check mode is read-only and exits 1 when upgrades
+  exist (sentinel/cron-friendly); `--apply` upgrades one tool at a time,
+  re-probes the installed version (honest-verify), runs per-tool
+  post-checks, prints restart hints for daemons riding on what changed, and
+  finishes with the `sanctum self-test` gate. Respects `brew pin` as HOLD;
+  npm install-aliases (`denchclaw@npm:openclaw`) are recognized and upgraded
+  through the alias. `--only`, `--json`, `--skip-self-test` supported.
+
 ## [0.14.1] - 2026-07-03
 
 Pre-beta clean-install pass — removes operator-specific state that shipped as

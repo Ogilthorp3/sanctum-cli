@@ -39,6 +39,7 @@ from sanctum_cli.commands import screen_time as screentime_cmd
 from sanctum_cli.commands import self_test as self_test_cmd
 from sanctum_cli.commands import uninstall as uninstall_cmd
 from sanctum_cli.commands import update as update_cmd
+from sanctum_cli.commands import upgrade as upgrade_cmd
 from sanctum_cli.commands import vision as vision_cmd
 from sanctum_cli.commands.link import link_app
 from sanctum_cli.commands.mesh import mesh_app
@@ -292,6 +293,21 @@ def update_top(
     skip_self_test: Annotated[bool, typer.Option("--skip-self-test")] = False,
 ) -> None:
     update_cmd.update_command(dry_run=dry_run, skip_self_test=skip_self_test)
+
+
+@app.command(
+    "upgrade",
+    help="Toolchain currency — inventory every tool sanctum rides on, upgrade to latest stable.",
+)
+def upgrade_top(
+    apply: Annotated[bool, typer.Option("--apply")] = False,
+    only: Annotated[str | None, typer.Option("--only")] = None,
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+    skip_self_test: Annotated[bool, typer.Option("--skip-self-test")] = False,
+) -> None:
+    upgrade_cmd.upgrade_command(
+        apply=apply, only=only, json_output=json_output, skip_self_test=skip_self_test
+    )
 
 
 @app.command("uninstall", help="Remove sanctum from this machine. Preserves data by default.")
