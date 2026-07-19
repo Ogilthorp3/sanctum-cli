@@ -266,13 +266,20 @@ def npm_latest(run: Runner, package: str) -> str:
     return r.stdout.strip() if r.returncode == 0 else ""
 
 
+def venv_pip(venv: str) -> list[str]:
+    """Invoke pip as ``<venv>/bin/python -m pip`` — the pip console script's
+    shebang bakes in the venv's creation path, so a renamed/relocated venv
+    has a working python but a broken pip binary (found live on the chalet)."""
+    return [str(Path(venv).expanduser() / "bin" / "python"), "-m", "pip"]
+
+
 def pip_venv_state(run: Runner, venv: str, package: str) -> tuple[str, str]:
     """(installed, latest-stable) for a package inside a venv; '' if absent."""
-    pip = str(Path(venv).expanduser() / "bin" / "pip")
-    if not Path(pip).exists():
+    if not (Path(venv).expanduser() / "bin" / "python").exists():
         return "", ""
+    pip = venv_pip(venv)
     installed = ""
-    r = run([pip, "show", package])
+    r = run([*pip, "show", package])
     for line in r.stdout.splitlines():
         if line.lower().startswith("version:"):
             installed = line.split(":", 1)[1].strip()
@@ -280,7 +287,7 @@ def pip_venv_state(run: Runner, venv: str, package: str) -> tuple[str, str]:
     if not installed:
         return "", ""
     latest = installed
-    r = run([pip, "index", "versions", package])
+    r = run([*pip, "index", "versions", package])
     # First line: "package (X.Y.Z)" — pip already excludes pre-releases.
     if r.returncode == 0 and "(" in r.stdout:
         latest = r.stdout.split("(", 1)[1].split(")", 1)[0].strip()
@@ -368,8 +375,7 @@ def upgrade_command_for(row: PlanRow) -> list[str]:
         target = f"{alias}@npm:{s.package}@{row.latest}" if alias else f"{s.package}@{row.latest}"
         return ["npm", "install", "-g", target]
     assert s.venv is not None
-    pip = str(Path(s.venv).expanduser() / "bin" / "pip")
-    return [pip, "install", "--upgrade", f"{s.package}=={row.latest}"]
+    return [*venv_pip(s.venv), "install", "--upgrade", f"{s.package}=={row.latest}"]
 
 
 def reprobe_version(run: Runner, spec: ToolSpec) -> str:
