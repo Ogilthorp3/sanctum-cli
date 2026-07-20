@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.1] - 2026-07-20
+
+### Fixed
+
+- `sanctum upgrade` now invokes a venv's pip as `<venv>/bin/python -m pip` instead of the `bin/pip` console script, whose shebang bakes in the venv's original path — a relocated/renamed venv (e.g. the chalet mlx venv) has a working python but a broken pip binary, which made upgrade report the tool absent. Live-fire-verified on the chalet.
+
 ## [0.15.0] - 2026-07-19
 
 ### Added
