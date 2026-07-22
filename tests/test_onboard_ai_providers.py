@@ -332,7 +332,7 @@ def test_claude_subscription_ready_persists_via_proxy_no_keychain(
     data = yaml.safe_load(inst.read_text(encoding="utf-8"))
     claude = data["cli"]["providers"]["claude"]
     assert claude["via"] == "proxy"
-    assert claude["endpoint"] == "http://127.0.0.1:2001"
+    assert claude["endpoint"] == "http://127.0.0.1:3456"
     assert "Claude" in out
 
 

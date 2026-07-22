@@ -966,8 +966,9 @@ def _run_family_setup(*, yes: bool) -> bool:
 _CLAUDE_KEYCHAIN = ("anthropic-api-key", "sanctum")
 #: The Keychain (service, account) for the Gemini key (matches the gemini default).
 _GEMINI_KEYCHAIN = ("google-ai-api-key", "sanctum")
-#: The local claude-cli-proxy endpoint the subscription path points the provider at.
-_CLAUDE_PROXY_ENDPOINT = "http://127.0.0.1:2001"
+#: The local claude-max-proxy endpoint the subscription path points the provider at
+#: (:3456; the old anthropic-proxy on :2001 was retired — see instance.yaml services).
+_CLAUDE_PROXY_ENDPOINT = "http://127.0.0.1:3456"
 
 
 def _claude_logged_in() -> bool:

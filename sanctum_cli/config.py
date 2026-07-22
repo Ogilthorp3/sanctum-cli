@@ -50,8 +50,11 @@ class ClaudeProvider(StrictModel):
     """
 
     via: Literal["proxy", "direct"] = "proxy"
-    endpoint: str = "http://127.0.0.1:2001"
-    model: str = "claude-opus-4-7"
+    # claude-max-proxy (Max subscription, OpenAI-compat) listens on :3456 and
+    # advertises the un-suffixed id `claude-opus-4` via /v1/models. The old
+    # anthropic-proxy on :2001 was retired (see instance.yaml services).
+    endpoint: str = "http://127.0.0.1:3456"
+    model: str = "claude-opus-4"
     keychain: KeychainRef = Field(
         default_factory=lambda: KeychainRef(service="anthropic-api-key", account="sanctum")
     )
