@@ -465,7 +465,7 @@ def doctor_command(
                             ).encode("utf-8"),
                             headers={"Content-Type": "application/json"},
                         )
-                        with urllib.request.urlopen(req, timeout=2) as response:
+                        with urllib.request.urlopen(req, timeout=2):
                             pass
                     except Exception:
                         pass

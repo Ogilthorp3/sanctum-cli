@@ -11,6 +11,7 @@ the v1.0 roadmap once the surface is stable.
 
 from __future__ import annotations
 
+import contextlib
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Flag, auto
@@ -126,7 +127,5 @@ class Provider(ABC):
             client = getattr(self, attr, None)
             close = getattr(client, "close", None)
             if callable(close):
-                try:
+                with contextlib.suppress(Exception):
                     close()
-                except Exception:
-                    pass
