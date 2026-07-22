@@ -10,6 +10,10 @@ jobs:
     # system_profiler). Run CI on macOS so the platform tests collect and
     # run honestly — on Linux they crash at import (no launchctl).
     runs-on: [self-hosted, macOS, ARM64]
+    env:
+      # self-hosted runner: setup-python's default toolcache (/Users/runner/...)
+      # is not writable here; point it at a writable dir on the manoir runner.
+      RUNNER_TOOL_CACHE: /Users/bert/.sanctum/gh-runner/_toolcache
     steps:
       - uses: actions/checkout@v4
 
