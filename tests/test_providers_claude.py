@@ -190,11 +190,31 @@ def test_proxy_cost_is_zero_max_subscription_is_flat_rate() -> None:
     assert p.cost(Usage(tokens_in=1_000_000, tokens_out=1_000_000)) == Decimal(0)
 
 
-def test_proxy_health_pings_chat_endpoint() -> None:
+def test_proxy_health_pings_models_endpoint() -> None:
     import httpx
 
     def handler(request: httpx.Request) -> httpx.Response:
-        # Health probe should hit /v1/chat/completions
+        # Health probe prefers a cheap GET /v1/models — no inference spent.
+        assert request.method == "GET"
+        assert request.url.path == "/v1/models"
+        return httpx.Response(200, json={"data": [{"id": "claude-opus-4"}]})
+
+    p = _make_proxy()
+    p._http.close()
+    p._http = httpx.Client(base_url=p._cfg.endpoint, transport=httpx.MockTransport(handler))
+
+    snap = p.health()
+    assert snap.ok is True
+    assert snap.latency_ms is not None
+
+
+def test_proxy_health_falls_back_to_chat_when_no_models_endpoint() -> None:
+    import httpx
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/models":
+            return httpx.Response(404, text="not found")
+        # Older proxies (retired :2001) lack /v1/models → fall back to chat.
         assert request.url.path == "/v1/chat/completions"
         return httpx.Response(200, json={"choices": [{"message": {"content": "."}}]})
 
@@ -204,7 +224,6 @@ def test_proxy_health_pings_chat_endpoint() -> None:
 
     snap = p.health()
     assert snap.ok is True
-    assert snap.latency_ms is not None
 
 
 def test_proxy_health_failure_carries_detail() -> None:

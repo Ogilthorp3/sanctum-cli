@@ -50,8 +50,11 @@ class ClaudeProvider(StrictModel):
     """
 
     via: Literal["proxy", "direct"] = "proxy"
-    endpoint: str = "http://127.0.0.1:2001"
-    model: str = "claude-opus-4-7"
+    # claude-max-proxy (Max subscription, OpenAI-compat) on :3456. The old
+    # anthropic-proxy :2001 was retired (see instance.yaml services). The proxy
+    # advertises the un-suffixed id `claude-opus-4` via /v1/models.
+    endpoint: str = "http://127.0.0.1:3456"
+    model: str = "claude-opus-4"
     keychain: KeychainRef = Field(
         default_factory=lambda: KeychainRef(service="anthropic-api-key", account="sanctum")
     )
@@ -328,9 +331,7 @@ def scaffold_instance(path: Path | None = None, *, name: str | None = None) -> P
         chosen_name, slug = name, slugify_name(name)
     else:
         chosen_name, slug = _default_identity()
-    target.write_text(
-        f"instance:\n  name: {chosen_name}\n  slug: {slug}\n", encoding="utf-8"
-    )
+    target.write_text(f"instance:\n  name: {chosen_name}\n  slug: {slug}\n", encoding="utf-8")
     return target
 
 

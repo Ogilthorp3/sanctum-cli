@@ -951,7 +951,7 @@ _CLAUDE_KEYCHAIN = ("anthropic-api-key", "sanctum")
 #: The Keychain (service, account) for the Gemini key (matches the gemini default).
 _GEMINI_KEYCHAIN = ("google-ai-api-key", "sanctum")
 #: The local claude-cli-proxy endpoint the subscription path points the provider at.
-_CLAUDE_PROXY_ENDPOINT = "http://127.0.0.1:2001"
+_CLAUDE_PROXY_ENDPOINT = "http://127.0.0.1:3456"
 
 
 def _claude_logged_in() -> bool:
@@ -1127,7 +1127,12 @@ def _run_claude_api_key() -> dict[str, Any] | None:
     ``{via: direct, endpoint}`` config; on a REJECTED key REVOKES the Keychain entry
     and returns None (persist nothing — fail-closed). An empty key skips Claude.
     """
-    key = Prompt.ask("  Anthropic API key", password=True).strip()
+    key = Prompt.ask(
+        "  Anthropic API key (enter to skip)",
+        password=True,
+        default="",
+        show_default=False,
+    ).strip()
     if not key:
         console.print("  [dim]no key entered — Claude skipped (add later)[/]")
         return None

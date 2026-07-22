@@ -257,7 +257,10 @@ def test_ai_providers_yes_skips_without_prompting_or_writing(
 
 def _invoke_family_onboard_interactive(input_text: str) -> tuple[int, str]:
     """`onboard --recipe family` (no --yes), feeding stdin; OTHER gates mocked out."""
+    import sys
+
     with (
+        patch("getpass.getpass", side_effect=lambda *a, **k: sys.stdin.readline().rstrip("\n")),
         patch("sanctum_cli.commands.onboard.backup_cmd.backup_estimate"),
         patch("sanctum_cli.commands.onboard.backup_cmd.backup_run"),
         patch("sanctum_cli.commands.onboard._dispatch_cloud_setup"),
@@ -277,6 +280,8 @@ def _invoke_family_onboard_interactive(input_text: str) -> tuple[int, str]:
         # Network-resilience is the last interactive gate (own tests); mock it so a
         # real posture probe / DHCP flip / daemon install never runs here.
         patch("sanctum_cli.commands.onboard._run_network_resilience"),
+        patch("sanctum_cli.commands.onboard._run_wifi_identity"),
+        patch("sanctum_cli.commands.onboard._run_first_hello"),
         # The masked key prompt (Prompt.ask(password=True)) routes to getpass, which
         # emits GetPassWarning under CliRunner's non-TTY stdin; pyproject turns
         # warnings into errors, so suppress only that benign one here (production has
@@ -331,7 +336,7 @@ def test_claude_subscription_ready_persists_via_proxy_no_keychain(
     data = yaml.safe_load(inst.read_text(encoding="utf-8"))
     claude = data["cli"]["providers"]["claude"]
     assert claude["via"] == "proxy"
-    assert claude["endpoint"] == "http://127.0.0.1:2001"
+    assert claude["endpoint"] == "http://127.0.0.1:3456"
     assert "Claude" in out
 
 
@@ -528,9 +533,7 @@ def test_gemini_key_rejected_revokes_and_persists_nothing(
     monkeypatch.setenv("SANCTUM_INSTANCE_FILE", str(inst))
 
     monkeypatch.setattr("sanctum_cli.commands.onboard._claude_cli_ready", lambda: False)
-    monkeypatch.setattr(
-        "sanctum_cli.commands.onboard.store_device_secret", lambda **k: None
-    )
+    monkeypatch.setattr("sanctum_cli.commands.onboard.store_device_secret", lambda **k: None)
     monkeypatch.setattr(
         "sanctum_cli.commands.onboard._provider_health", lambda kind, cfg: _bad("403")
     )
@@ -552,9 +555,7 @@ def test_gemini_key_rejected_revokes_and_persists_nothing(
     assert gemini is None  # nothing persisted for a rejected key
 
 
-def test_gemini_skipped_with_empty_key(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_gemini_skipped_with_empty_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """An empty Gemini key skips Gemini (add later) without a store or probe."""
     inst = tmp_path / "instance.yaml"
     inst.write_text("instance:\n  name: X\n  slug: x\n", encoding="utf-8")

@@ -116,3 +116,17 @@ class Provider(ABC):
     @abstractmethod
     def cost(self, usage: Usage) -> Decimal:
         """USD cost for a given usage, computed locally — no network call."""
+
+    def close(self) -> None:
+        """Release any network client held by the provider. Safe to call more
+        than once and safe to skip. Prevents leaked sockets when a provider is
+        built for a one-off probe (e.g. ``doctor``/status health checks) and
+        then discarded — otherwise the pooled httpx connection lingers to GC."""
+        for attr in ("_http", "_client"):
+            client = getattr(self, attr, None)
+            close = getattr(client, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
