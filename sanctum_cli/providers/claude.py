@@ -45,9 +45,7 @@ HEALTH_TIMEOUT_S = 5.0
 
 class ClaudeProvider(Provider):
     name = "claude"
-    capabilities = (
-        Capability.CHAT | Capability.TOOLS | Capability.STREAMING | Capability.THINKING
-    )
+    capabilities = Capability.CHAT | Capability.TOOLS | Capability.STREAMING | Capability.THINKING
 
     def __init__(self, cfg: ClaudeProviderConfig, api_key: str | None) -> None:
         self._cfg = cfg
@@ -140,8 +138,33 @@ class ClaudeProvider(Provider):
         return self._health_direct()
 
     def _health_proxy(self) -> HealthSnapshot:
-        # The proxy is healthy if a tiny ping returns 200; we use a one-token
-        # request because the proxy doesn't expose a /v1/models endpoint.
+        # Prefer a cheap GET /v1/models — claude-max-proxy (:3456) exposes it and
+        # it returns instantly without spending a model inference on every health
+        # check. Fall back to a one-token chat for proxies that lack it (e.g. the
+        # retired anthropic-proxy :2001, which had no /v1/models).
+        try:
+            t0 = time.perf_counter_ns()
+            r = self._http.get("/v1/models", timeout=HEALTH_TIMEOUT_S)
+            latency_ms = (time.perf_counter_ns() - t0) // 1_000_000
+            if r.status_code == 200:
+                return HealthSnapshot(
+                    ok=True, latency_ms=int(latency_ms), quota_remaining=None, detail=None
+                )
+            if r.status_code != 404:
+                return HealthSnapshot(
+                    ok=False,
+                    latency_ms=int(latency_ms),
+                    quota_remaining=None,
+                    detail=f"proxy /v1/models returned HTTP {r.status_code}",
+                )
+            # 404 → proxy has no /v1/models; fall through to the chat probe.
+        except Exception as exc:
+            return HealthSnapshot(
+                ok=False, latency_ms=None, quota_remaining=None, detail=str(exc)[:160]
+            )
+
+        # Fallback: a one-token chat completion. Slower (may load the routed
+        # model), so allow more headroom than the /v1/models probe.
         try:
             t0 = time.perf_counter_ns()
             r = self._http.post(
@@ -151,7 +174,7 @@ class ClaudeProvider(Provider):
                     "messages": [{"role": "user", "content": "."}],
                     "max_tokens": 1,
                 },
-                timeout=HEALTH_TIMEOUT_S,
+                timeout=max(HEALTH_TIMEOUT_S, 20.0),
             )
             latency_ms = (time.perf_counter_ns() - t0) // 1_000_000
             if r.status_code == 200:

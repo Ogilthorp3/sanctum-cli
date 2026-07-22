@@ -10,7 +10,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Annotated, Literal
 
 if TYPE_CHECKING:
@@ -32,7 +32,50 @@ LAUNCHCTL_TIMEOUT_S = 5
 RESTIC_PROBE_TIMEOUT_S = 10
 PROVIDER_PROBE_TIMEOUT_S = 8
 
-Status = Literal["OPERATIONAL", "DEGRADED", "FAILED", "UNKNOWN"]
+Status = Literal["OPERATIONAL", "REPORTING", "DEGRADED", "FAILED", "UNKNOWN"]
+
+HTTP_PROBE_TIMEOUT_S = 2
+
+# One-shot agents whose non-zero exit is a *designed signal* (drift detected,
+# drill WARN, self-test findings) — not a failure of the agent itself. Rendered
+# REPORTING (benign), never counted as degraded/failed. Triaged 2026-07-21:
+# these fire non-zero by design and were drowning real failures in false red.
+REPORTING_LABELS: frozenset[str] = frozenset(
+    {
+        "com.sanctum.council-drift",
+        "com.sanctum.council-guardian",
+        "com.sanctum.council-integrity",
+        "com.sanctum.git-drift-sentinel",
+        "com.sanctum.secrets-sync-drift-check",
+        "com.sanctum.model-latest-check",
+        "com.sanctum.resilience-test",
+        "com.sanctum.post-boot",
+        "com.sanctum.nightly-compactor",
+    }
+)
+
+
+def _daemon_probes() -> dict[str, str]:
+    """Long-lived daemons that may run outside launchd (started by another
+    supervisor), or whose crash-looping launchd copy shadows a healthy peer.
+    A live health probe is more truthful than launchctl label presence."""
+    import os
+
+    ff = os.environ.get("FORCE_FLOW_URL", "http://127.0.0.1:4077").rstrip("/")
+    return {
+        "com.sanctum.force-flow": f"{ff}/health",
+        "com.sanctum.thalamus": "http://127.0.0.1:1988/status",
+    }
+
+
+def _http_ok(url: str) -> bool:
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(url, timeout=HTTP_PROBE_TIMEOUT_S) as r:
+            return 200 <= getattr(r, "status", 200) < 400
+    except Exception:
+        return False
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,6 +124,7 @@ class Report:
 
 
 def _agents() -> list[AgentRow]:
+    expected_labels = ["com.sanctum.force-flow"]
     if not shutil.which("launchctl"):
         return []
     try:
@@ -107,14 +151,38 @@ def _agents() -> list[AgentRow]:
                 label=label,
                 pid=pid,
                 last_exit=last_exit,
-                status=_agent_status(pid, last_exit),
+                status=_agent_status(pid, last_exit, label),
             )
         )
+
+    # Truth-over-launchd: force-flow/thalamus can run outside launchd, or a
+    # crash-looping launchd duplicate can shadow a healthy peer that already
+    # holds the port. A live health probe wins over the launchctl verdict.
+    index = {r.label: i for i, r in enumerate(rows)}
+    for label, url in _daemon_probes().items():
+        if label in index:
+            i = index[label]
+            # Only ever upgrade: a live probe overrides a crash-looping/absent
+            # launchd verdict. Never downgrade what launchctl reports healthy.
+            if rows[i].status in ("FAILED", "DEGRADED") and _http_ok(url):
+                rows[i] = replace(rows[i], status="OPERATIONAL")
+        elif label in expected_labels:
+            # An expected daemon missing from launchctl: trust the health probe.
+            alive = _http_ok(url)
+            rows.append(
+                AgentRow(
+                    label=label,
+                    pid="-",
+                    last_exit="-",
+                    status="OPERATIONAL" if alive else "FAILED",
+                )
+            )
+
     rows.sort(key=lambda r: r.label)
     return rows
 
 
-def _agent_status(pid: str, last_exit: str) -> Status:
+def _agent_status(pid: str, last_exit: str, label: str = "") -> Status:
     # launchctl list output: PID="-" if not running. Last exit -9 etc means killed.
     if pid not in ("-", "0"):
         return "OPERATIONAL"
@@ -124,6 +192,14 @@ def _agent_status(pid: str, last_exit: str) -> Status:
         return "UNKNOWN"
     if rc == 0:
         return "OPERATIONAL"  # successful one-shot
+    if rc == -15:
+        # SIGTERM: launchd's normal way to stop an agent (schedule/throttle/
+        # kickstart). Benign. NOT -9 (SIGKILL) — that can be OOM/watchdog and
+        # stays DEGRADED so a force-kill still surfaces.
+        return "OPERATIONAL"
+    if label in REPORTING_LABELS:
+        # Non-zero by design: monitor detected drift / drill reported WARN.
+        return "REPORTING"
     return "DEGRADED"
 
 
@@ -132,7 +208,13 @@ def _provider(name: str, p: Provider) -> ProviderRow:
     try:
         snap = p.health()
     except Exception as exc:  # provider.health() shouldn't raise but defend anyway
-        snap = HealthSnapshot(ok=False, latency_ms=None, quota_remaining=None, detail=str(exc)[:160])
+        snap = HealthSnapshot(
+            ok=False, latency_ms=None, quota_remaining=None, detail=str(exc)[:160]
+        )
+    finally:
+        # Built solely to probe; release its socket now instead of leaking the
+        # pooled connection to GC (surfaces as a ResourceWarning under pytest).
+        p.close()
     status: Status = "OPERATIONAL" if snap.ok else "FAILED"
     return ProviderRow(name=name, status=status, latency_ms=snap.latency_ms, detail=snap.detail)
 
@@ -146,13 +228,14 @@ def _providers(cfg: config.Config) -> list[ProviderRow]:
         for n in names:
             try:
                 p = make_provider(n, cfg.cli.providers)
-            except LocalError as exc:
+            except (LocalError, ImportError) as exc:
+                detail = exc.message[:120] if hasattr(exc, "message") else str(exc)[:120]
                 rows.append(
                     ProviderRow(
                         name=n,
                         status="UNKNOWN",
                         latency_ms=None,
-                        detail=f"{exc.message[:120]}",
+                        detail=detail,
                     )
                 )
                 continue
@@ -221,7 +304,15 @@ def _restic_check(repo: str, password: str) -> RepoRow:
 # ─── Helpers ────────────────────────────────────────────────────────
 
 
-_ORDER: dict[Status, int] = {"OPERATIONAL": 0, "DEGRADED": 1, "UNKNOWN": 2, "FAILED": 3}
+# REPORTING ranks with OPERATIONAL (0): a monitor's designed non-zero exit must
+# NOT drag `overall` into degraded/failed — red is reserved for real breakage.
+_ORDER: dict[Status, int] = {
+    "OPERATIONAL": 0,
+    "REPORTING": 0,
+    "DEGRADED": 1,
+    "UNKNOWN": 2,
+    "FAILED": 3,
+}
 
 
 def _worse(a: Status, b: Status) -> Status:
@@ -231,6 +322,7 @@ def _worse(a: Status, b: Status) -> Status:
 def _color(status: Status) -> str:
     return {
         "OPERATIONAL": "[green]OPERATIONAL[/]",
+        "REPORTING": "[cyan]REPORTING[/]",
         "DEGRADED": "[yellow]DEGRADED[/]",
         "FAILED": "[red]FAILED[/]",
         "UNKNOWN": "[dim]UNKNOWN[/]",
@@ -243,6 +335,7 @@ def _color(status: Status) -> str:
 def render_brief(report: Report) -> str:
     counts = {
         "OPERATIONAL": 0,
+        "REPORTING": 0,
         "DEGRADED": 0,
         "FAILED": 0,
         "UNKNOWN": 0,
@@ -259,6 +352,7 @@ def render_brief(report: Report) -> str:
         f"{len(report.agents)} agents · "
         f"{len(report.providers)} providers · "
         f"{len(report.repos)} repos · "
+        f"{counts['REPORTING']} reporting · "
         f"{counts['DEGRADED']} degraded · {counts['FAILED']} failed"
     )
 
@@ -310,14 +404,72 @@ def collect(cfg: config.Config) -> Report:
 
 
 def doctor_command(
-    full: Annotated[
-        bool, typer.Option("--full", help="Always print full per-row detail.")
-    ] = False,
+    full: Annotated[bool, typer.Option("--full", help="Always print full per-row detail.")] = False,
     json_output: Annotated[
         bool, typer.Option("--json", help="Emit JSON (full report regardless of --full).")
     ] = False,
+    fix: bool = False,
 ) -> None:
     cfg = config.load()
+
+    if fix:
+        import json
+        import os
+        import shutil
+        import time
+        import urllib.request
+        from pathlib import Path
+
+        report_before = collect(cfg)
+        _probes = _daemon_probes()
+        for a in report_before.agents:
+            if a.status in ("FAILED", "DEGRADED"):
+                label = a.label
+                # Never resurrect a service that is already answering its health
+                # probe: loading a second copy fights the live one for its port
+                # (AddrInUse) — the failure mode that crash-loops the duplicate.
+                if label in _probes and _http_ok(_probes[label]):
+                    continue
+                plist_path = Path.home() / f"Library/LaunchAgents/{label}.plist"
+                if not plist_path.exists():
+                    target_dir = plist_path.parent
+                    target_dir.mkdir(parents=True, exist_ok=True)
+                    candidates = [
+                        Path(f"/Users/bert/Library/LaunchAgents/{label}.plist"),
+                        Path(f"/Users/bert/Projects/sanctum-runtime/launchagents/{label}.plist"),
+                        Path(
+                            f"/Users/bert/Projects/Claude_Code/sanctum/launchagents/{label}.plist"
+                        ),
+                    ]
+                    for src in candidates:
+                        if src.exists():
+                            shutil.copy(src, plist_path)
+                            break
+
+                if plist_path.exists():
+                    subprocess.run(["launchctl", "unload", str(plist_path)], capture_output=True)
+                    time.sleep(0.5)
+                    subprocess.run(["launchctl", "load", str(plist_path)], capture_output=True)
+
+                    url = os.environ.get("FORCE_FLOW_URL", "http://127.0.0.1:4077")
+                    try:
+                        req = urllib.request.Request(
+                            f"{url}/notify",
+                            data=json.dumps(
+                                {
+                                    "source": "doctor",
+                                    "severity": "info",
+                                    "title": f"LaunchAgent Recovery: {label}",
+                                    "message": f"Automatically restarted drifted LaunchAgent {label}.",
+                                }
+                            ).encode("utf-8"),
+                            headers={"Content-Type": "application/json"},
+                        )
+                        with urllib.request.urlopen(req, timeout=2) as response:
+                            pass
+                    except Exception:
+                        pass
+
     report = collect(cfg)
 
     if json_output:
