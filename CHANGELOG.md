@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.2] - 2026-07-24
+
+### Removed
+
+- `gemini-cli` dropped from the `sanctum upgrade` registry — retired from the haus (Bert, 2026-07-24); the binary was uninstalled from all machines.
+
 ## [0.15.1] - 2026-07-20
 
 ### Fixed

@@ -127,7 +127,6 @@ REGISTRY: tuple[ToolSpec, ...] = (
         restart_hint="venvs pinned to this interpreter may need a rebuild on minor bumps",
     ),
     ToolSpec("uv", "brew", "uv", ("faster",), "python packaging/tooling"),
-    ToolSpec("gemini-cli", "brew", "gemini-cli", ("smarter",), "google lane"),
     ToolSpec(
         "cloudflared",
         "brew",
