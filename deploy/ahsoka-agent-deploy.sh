@@ -24,7 +24,7 @@ OPENCLAW_VER="2026.7.1-2"            # pin: last version live-fire-verified on a
 MODEL_REPO="mlx-community/Qwen2.5-7B-Instruct-4bit"   # bake-off winner (12/12 tools, FR, fits 16GB)
 MODEL_DIR=".sanctum/models/Qwen2.5-7B-Instruct-4bit"
 say(){ printf '\n\033[1m== %s ==\033[0m\n' "$*"; }
-run(){ ssh -o BatchMode=yes -o ConnectTimeout=10 "$HOST" "$@"; }
+run(){ ssh -o BatchMode=yes -o ConnectTimeout=10 "$HOST" "export PATH=/opt/homebrew/bin:/usr/local/bin:\$PATH; $*"; }
 
 say "0. preflight ($HOST)"
 run 'command -v node >/dev/null || { echo "MISSING node — brew install node first"; exit 10; }'
