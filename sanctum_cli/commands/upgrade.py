@@ -176,6 +176,23 @@ REGISTRY: tuple[ToolSpec, ...] = (
         venv="~/.sanctum/mlx-venv",
         restart_hint="launchctl kickstart the mlx server daemon that serves this venv",
     ),
+    ToolSpec(
+        "mlx-lm-finetune",
+        "pip-venv",
+        "mlx-lm",
+        ("smarter", "faster"),
+        "training venv (dragon lines)",
+        venv="~/Projects/mlx-finetune/.venv",
+    ),
+    ToolSpec(
+        "mlx-lm-tts",
+        "pip-venv",
+        "mlx-lm",
+        ("smarter",),
+        "yoda voice stack venv (drift canary; apply also bumps mlx/mlx-audio/parakeet)",
+        venv="~/Projects/yoda-voice-agent/.tts-venv",
+        restart_hint="kickstart com.sanctum.yoda-tts-worker + yoda-stt-worker (voice rides this venv)",
+    ),
 )
 
 

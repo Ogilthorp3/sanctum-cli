@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.3] - 2026-07-24
+
+### Added
+
+- `sanctum upgrade` registry now tracks the manoir's `mlx-finetune/.venv` and `yoda-voice-agent/.tts-venv` (mlx-lm as the drift canary), so the daily sentinel catches MLX drift in the training and voice stacks instead of only the satellite brain venv.
+
 ## [0.15.2] - 2026-07-24
 
 ### Removed
