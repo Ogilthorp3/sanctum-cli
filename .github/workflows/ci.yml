@@ -9,14 +9,17 @@ jobs:
     # sanctum-cli is a macOS product (launchctl, keychain, networksetup,
     # system_profiler). Run CI on macOS so the platform tests collect and
     # run honestly — on Linux they crash at import (no launchctl).
-    runs-on: macos-latest
+    runs-on: [self-hosted, macOS, ARM64]
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
+      - name: Set up Python 3.12 (self-hosted venv)
+        # actions/setup-python's prebuilt macOS Python hardcodes /Users/runner and
+        # can't self-install on a self-hosted Mac. Use the runner's brew python@3.12
+        # in a venv; its bin goes first on PATH so `python`/`pip` are 3.12 for all steps.
+        run: |
+          /opt/homebrew/bin/python3.12 -m venv "$RUNNER_TEMP/venv"
+          echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
 
       - name: Install restic
         run: brew install restic
