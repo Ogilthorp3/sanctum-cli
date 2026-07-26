@@ -70,6 +70,32 @@ def _haus_present(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr("sanctum_cli.haus.is_present", lambda _component: True)
 
 
+@pytest.fixture(autouse=True)
+def _isolate_mesh_tracker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the mesh tracker default off any LIVE loopback service.
+
+    The default tracker URL is ``http://127.0.0.1:8765``. On ephemeral CI that
+    port is closed, so an incidental tracker probe during a command refuses
+    instantly and leaves no socket. On a dev box (or a self-hosted runner) a real
+    tracker may be listening on 8765 — the probe then *connects*, and the unclosed
+    client socket raises a ``ResourceWarning`` that ``filterwarnings=error`` turns
+    into a failure in some unrelated later test. Point the default at a
+    just-closed ephemeral port so tests never reach a live tracker and behave
+    identically on every host (and are safe on a self-hosted runner). Tests that
+    exercise tracker wiring set ``mesh.tracker_url`` themselves and are unaffected.
+    """
+    import socket as _socket
+
+    s = _socket.socket()
+    s.bind(("127.0.0.1", 0))
+    closed_port = s.getsockname()[1]
+    s.close()  # port is now free/closed → connections refuse fast, no leaked socket
+    monkeypatch.setattr(
+        "sanctum_cli.commands.mesh._DEFAULT_TRACKER_URL",
+        f"http://127.0.0.1:{closed_port}",
+    )
+
+
 @pytest.fixture
 def minimal_instance_yaml(tmp_path: Path) -> Path:
     """A tiny but valid instance.yaml — instance block only, defaults everywhere else."""
