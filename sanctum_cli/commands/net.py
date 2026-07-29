@@ -36,6 +36,7 @@ from sanctum_cli.net import (
 from sanctum_cli.net import (
     status as net_status,
 )
+from sanctum_cli.commands.home_net import home_app
 from sanctum_cli.net.types import Nat, SpeedReport, Verdict
 from sanctum_cli.onboard_experience import chapter_banner, green_check
 
@@ -977,6 +978,7 @@ _ = sagemcom
 
 hub_app = typer.Typer(help="Drive the network gateway (hub) through the device-provider rails.")
 net_app.add_typer(hub_app, name="hub")
+net_app.add_typer(home_app, name="home")
 
 # DeviceInfo read paths the status summary surfaces. These are the generic
 # TR-069 DeviceInfo leaves; a provider that does not expose one returns None and
@@ -998,11 +1000,16 @@ _HUB_FIRMWARE_PATH = "Device/DeviceInfo/SoftwareVersion"
 def _hub_netcontext() -> NetContext:
     """Build the NetContext the registry fingerprints the hub over.
 
-    Parses the default gateway from the real ``route`` probe (read-only) and
-    threads the real runner so a provider's ``detect()`` can probe without owning
-    its own subprocess plumbing. Monkeypatched in tests so no shell-out occurs.
+    Prefer ``devices.hub.host`` from instance.yaml when set (e.g. Bell hub mgmt
+    while the house default gateway is Firewalla). Falls back to the default
+    gateway from the real ``route`` probe. Monkeypatched in tests so no shell-out
+    occurs.
     """
-    gw = detect.parse_default_gateway(system.real_runner(("route",)))
+    pinned = config.instance_value("devices.hub.host", None)
+    if pinned:
+        gw = str(pinned)
+    else:
+        gw = detect.parse_default_gateway(system.real_runner(("route",)))
     return NetContext(gateway_ip=gw, runner=system.real_runner)
 
 
