@@ -59,15 +59,11 @@ def test_hub_reachable_is_attention() -> None:
 
 
 def test_unknown_probes_fail_open() -> None:
-    r = build_home_report(
-        internet=None, wan=None, mss=None, armor=None, hub=None
-    )
+    r = build_home_report(internet=None, wan=None, mss=None, armor=None, hub=None)
     assert r.overall is Overall.GREEN  # all UNKNOWN → fail-open
     assert all(row.health is Health.UNKNOWN for row in r.rows)
 
 
 def test_private_wan_attention() -> None:
-    r = build_home_report(
-        **_ok_inputs(wan=WanPath("private", None, "eth0", "192.168.2.x"))
-    )
+    r = build_home_report(**_ok_inputs(wan=WanPath("private", None, "eth0", "192.168.2.x")))
     assert r.overall is Overall.ATTENTION

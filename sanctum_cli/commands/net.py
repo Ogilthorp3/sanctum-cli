@@ -16,6 +16,7 @@ from rich.console import Console
 from rich.markup import escape
 
 from sanctum_cli import config
+from sanctum_cli.commands.home_net import home_app
 from sanctum_cli.devices import firewalla as firewalla_provider
 from sanctum_cli.devices import flip, intents, interlock, rails, registry, sagemcom
 from sanctum_cli.devices import ha_green as ha_green_provider
@@ -36,7 +37,6 @@ from sanctum_cli.net import (
 from sanctum_cli.net import (
     status as net_status,
 )
-from sanctum_cli.commands.home_net import home_app
 from sanctum_cli.net.types import Nat, SpeedReport, Verdict
 from sanctum_cli.onboard_experience import chapter_banner, green_check
 
@@ -559,9 +559,7 @@ def _install_heal_daemon() -> None:
             "\n[yellow]![/] --install writes a system LaunchDaemon to "
             f"{escape(str(plist_path))} — that needs root."
         )
-        console.print(
-            "  → run it with sudo: [bold]sudo sanctum net heal --install[/]"
-        )
+        console.print("  → run it with sudo: [bold]sudo sanctum net heal --install[/]")
         return
 
     try:
@@ -601,8 +599,7 @@ def _install_heal_daemon() -> None:
             f"confirmed: {escape(detail)}"
         )
         console.print(
-            f"  [dim]load it manually: sudo launchctl bootstrap system "
-            f"{escape(str(plist_path))}[/]"
+            f"  [dim]load it manually: sudo launchctl bootstrap system {escape(str(plist_path))}[/]"
         )
 
 
@@ -727,9 +724,7 @@ def net_heal(
 
     # Heal did not come up healthy → revert to the snapshot and stop + alert.
     ip, mask, router = snap
-    console.print(
-        "[red]✗ not healed[/] — re-probe still unhealthy; reverting to the snapshot."
-    )
+    console.print("[red]✗ not healed[/] — re-probe still unhealthy; reverting to the snapshot.")
     runner(["networksetup", "-setmanual", "Wi-Fi", ip, mask, router])
     console.print(
         f"  [yellow]↩ reverted[/] Wi-Fi to manual {escape(ip)} / {escape(mask)} / "
@@ -822,17 +817,13 @@ def _status_probe_daemon() -> net_status.DaemonInfo:
     Read-only: `launchctl print system/<label>` returns 0 when the daemon is
     loaded, non-zero otherwise. The last-known result comes from the daemon's own
     heartbeat log (never a live heal)."""
-    loaded, _ = _heal_launchctl(
-        ["print", f"system/{heal.HEAL_DAEMON_LABEL}"], check=True
-    )
+    loaded, _ = _heal_launchctl(["print", f"system/{heal.HEAL_DAEMON_LABEL}"], check=True)
     try:
         text = heal._HEAL_HEARTBEAT_FILE.read_text(encoding="utf-8")
     except OSError:
         text = ""
     last, age, fresh = _parse_daemon_heartbeat(text)
-    return net_status.DaemonInfo(
-        loaded=loaded, last_result=last, age_seconds=age, fresh=fresh
-    )
+    return net_status.DaemonInfo(loaded=loaded, last_result=last, age_seconds=age, fresh=fresh)
 
 
 def _status_probe_identity() -> IdentityDiagnosis:
@@ -860,9 +851,7 @@ def _status_probe_guardian() -> net_status.GuardianInfo:
     if epoch is None:
         return net_status.GuardianInfo(reachable=False, fresh=None, age_seconds=None)
     age = max(0, int(time.time()) - epoch)
-    return net_status.GuardianInfo(
-        reachable=True, fresh=age < _GUARDIAN_FRESH_S, age_seconds=age
-    )
+    return net_status.GuardianInfo(reachable=True, fresh=age < _GUARDIAN_FRESH_S, age_seconds=age)
 
 
 def _firewalla_guardian_epoch(gateway: str, key: str, user: str = "pi") -> int | None:
@@ -1006,10 +995,7 @@ def _hub_netcontext() -> NetContext:
     occurs.
     """
     pinned = config.instance_value("devices.hub.host", None)
-    if pinned:
-        gw = str(pinned)
-    else:
-        gw = detect.parse_default_gateway(system.real_runner(("route",)))
+    gw = str(pinned) if pinned else detect.parse_default_gateway(system.real_runner(("route",)))
     return NetContext(gateway_ip=gw, runner=system.real_runner)
 
 
@@ -1299,9 +1285,7 @@ def _box_preflight_ready() -> flip.PreflightDecision:
     sudo_ok, dhclient_ok = system.firewalla_box_preflight(
         host, key, user=intents._armor_firewalla_user()
     )
-    return flip.evaluate_box_preflight(
-        passwordless_sudo=sudo_ok, dhclient_present=dhclient_ok
-    )
+    return flip.evaluate_box_preflight(passwordless_sudo=sudo_ok, dhclient_present=dhclient_ok)
 
 
 def _tcp_reachable(host: str, port: int) -> bool:
@@ -1472,7 +1456,12 @@ def _net_single_nat_check() -> None:
                 seams.append((False, "hub connected but DMZ capability UNSUPPORTED"))
             else:
                 cur = provider.get(dmz_op.path)
-                seams.append((True, f"hub connected \u00b7 DMZ leaf {dmz_op.path} current={cur!r} (engage target={dmz_op.engaged!r})"))
+                seams.append(
+                    (
+                        True,
+                        f"hub connected \u00b7 DMZ leaf {dmz_op.path} current={cur!r} (engage target={dmz_op.engaged!r})",
+                    )
+                )
     except Exception as exc:
         seams.append((False, f"hub connect / DMZ read RAISED: {exc}"))
 
@@ -1508,7 +1497,10 @@ def net_single_nat(
     ] = False,
     check: Annotated[
         bool,
-        typer.Option("--check", help="Read-only Phase-2 validation: probe every live seam (OOB, box preflight, WAN reads, hub+DMZ leaf) with ZERO writes."),
+        typer.Option(
+            "--check",
+            help="Read-only Phase-2 validation: probe every live seam (OOB, box preflight, WAN reads, hub+DMZ leaf) with ZERO writes.",
+        ),
     ] = False,
 ) -> None:
     if apply + rollback + check > 1:

@@ -22,10 +22,10 @@ from rich.table import Table
 from rich.text import Text
 
 from sanctum_cli import config
-from sanctum_cli.net import home as home_mod
 from sanctum_cli.net.home import (
     ArmorState,
     Health,
+    HomeReport,
     HubReach,
     InternetPath,
     MssGuard,
@@ -177,11 +177,7 @@ def probe_wan() -> WanPath | None:
         m = re.search(r"\beth0:.*inet\s+(\d+\.\d+\.\d+\.\d+)", body, re.S)
         ip = m.group(1) if m else ""
         wan_if = "eth0"
-        kind = (
-            "private"
-            if ip.startswith(("10.", "192.168.", "172."))
-            else "public_eth"
-        )
+        kind = "private" if ip.startswith(("10.", "192.168.", "172.")) else "public_eth"
         pub = pub or ip
     detail = f"{kind} · if={wan_if or '-'} · public={pub or '-'}"
     return WanPath(kind, pub, wan_if, detail)
@@ -265,7 +261,7 @@ def probe_hub() -> HubReach:
             return HubReach(False, host, f"{host} unreachable (normal under PPPoE bridge)")
 
 
-def _render(report: home_mod.HomeReport) -> None:
+def _render(report: HomeReport) -> None:
     table = Table(show_header=False, box=None, padding=(0, 1))
     table.add_column("mark", width=2)
     table.add_column("label", style="bold", min_width=14)
@@ -298,7 +294,7 @@ def _render(report: home_mod.HomeReport) -> None:
     console.print(f"[dim]Safe improve: {report.improve_detail}[/]")
 
 
-def collect_report() -> home_mod.HomeReport:
+def collect_report() -> HomeReport:
     # armor once — also feeds WAN classification when verify JSON is present
     armor = probe_armor()
     wan = probe_wan()
@@ -368,9 +364,7 @@ def home_status(
     help="Apply SAFE fixes only (MSS 1400 + mtu_probing on Firewalla). Never changes WAN mode.",
 )
 def home_improve(
-    force: Annotated[
-        bool, typer.Option("--force", help="Apply even if status looks OK.")
-    ] = False,
+    force: Annotated[bool, typer.Option("--force", help="Apply even if status looks OK.")] = False,
     dry_run: Annotated[
         bool, typer.Option("--dry-run", help="Show what would run; zero changes.")
     ] = False,
