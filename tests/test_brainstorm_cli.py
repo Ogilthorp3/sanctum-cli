@@ -27,8 +27,13 @@ runner = CliRunner()
 
 # Independent oracle (NOT bs._FAMILY_BY_MODEL).
 _DOCTRINE_FAMILY = {
-    "Yoda": "claude", "Mundi": "claude", "Qui-Gon": "codestral",
-    "Cilghal": "qwen", "Windu": "gemini",
+    "Yoda": "claude",
+    "Windu": "gemini",
+    "Qui-Gon": "codestral",
+    "Mundi": "grok",
+    "Cilghal": "heretic",
+    "Jocasta": "claude",
+    "Mothma": "claude",
 }
 
 
@@ -57,7 +62,11 @@ def _ask_returning(table: dict[str, SeatResult]):
 # ───────────────────────── unit: family resolution ─────────────────────────
 def test_family_of_known_aliases() -> None:
     assert bs._family_of("council-max-thinking") == "claude"
+    assert bs._family_of("council-brain") == "claude"
     assert bs._family_of("council-code") == "codestral"
+    assert bs._family_of("council-finance") == "grok"
+    assert bs._family_of("council-spacial") == "gemini"
+    assert bs._family_of("council-heretic") == "heretic"
     assert bs._family_of("council-mlx") == "qwen"
     for g in ("gemini-31-pro", "gemini-3-pro", "gemini-25-pro"):
         assert bs._family_of(g) == "gemini"
@@ -73,8 +82,14 @@ def test_family_of_unknown_and_none() -> None:
 
 def test_fallback_family_is_qwen_and_seats_tagged() -> None:
     assert bs.FALLBACK_FAMILY == "qwen"
-    # structural ceiling: Yoda + Mundi are BOTH claude (4 families across 5 seats)
-    assert bs.SEATS["Yoda"]["family"] == bs.SEATS["Mundi"]["family"] == "claude"
+    # Aligned roster: Mundi is grok; Yoda/Jocasta/Mothma share claude family.
+    assert bs.SEATS["Yoda"]["family"] == "claude"
+    assert bs.SEATS["Mundi"]["family"] == "grok"
+    assert bs.SEATS["Cilghal"]["family"] == "heretic"
+    assert bs.SEATS["Jocasta"]["family"] == bs.SEATS["Mothma"]["family"] == "claude"
+    assert set(bs.SEATS) == {
+        "Yoda", "Windu", "Qui-Gon", "Mundi", "Cilghal", "Jocasta", "Mothma",
+    }
 
 
 # ───────────────────────── unit: diversity accounting ─────────────────────────
@@ -82,11 +97,11 @@ def test_assess_diversity_healthy_dedups_claude() -> None:
     chosen = list(bs.SEATS)
     results = [_ok(s) for s in chosen]
     div = bs._assess_diversity(results, chosen)
-    # 5 seats, but claude appears ONCE -> 4 families, never 5
-    assert div.designed == frozenset({"claude", "codestral", "qwen", "gemini"})
-    assert div.achieved == frozenset({"claude", "codestral", "qwen", "gemini"})
-    assert div.answered_seats == 5
-    assert div.redundant == {"claude": ["Yoda", "Mundi"]}
+    # 7 seats; claude on Yoda+Jocasta+Mothma counts once -> 5 families
+    assert div.designed == frozenset({"claude", "codestral", "gemini", "grok", "heretic"})
+    assert div.achieved == frozenset({"claude", "codestral", "gemini", "grok", "heretic"})
+    assert div.answered_seats == 7
+    assert div.redundant == {"claude": ["Yoda", "Jocasta", "Mothma"]}
 
 
 def test_assess_diversity_gemini_absent_marks_lost() -> None:
@@ -95,7 +110,7 @@ def test_assess_diversity_gemini_absent_marks_lost() -> None:
     div = bs._assess_diversity(results, chosen)
     assert "gemini" not in div.achieved          # the voice is gone
     assert "Windu" in div.absent_seats
-    assert div.achieved == frozenset({"claude", "codestral", "qwen"})
+    assert div.achieved == frozenset({"claude", "codestral", "grok", "heretic"})
 
 
 def test_assess_diversity_unknown_models_do_not_inflate() -> None:
@@ -202,7 +217,7 @@ def test_cli_healthy_all_families(full_instance_yaml: Path, monkeypatch: pytest.
     assert result.exit_code == 0, result.stdout
     combined = result.stdout + (result.stderr or "")
     assert "homogenized" not in combined.lower()
-    assert "5/5 seats answered" in combined
+    assert "7/7 seats answered" in combined
 
 
 def test_cli_redundant_claude_badge(full_instance_yaml: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -211,7 +226,7 @@ def test_cli_redundant_claude_badge(full_instance_yaml: Path, monkeypatch: pytes
     with patch.object(bs, "_ask", _ask_returning(table)):
         result = runner.invoke(app, ["brainstorm", "topic"])
     assert result.exit_code == 0
-    assert "redundant" in result.stdout.lower()  # Yoda+Mundi both claude
+    assert "redundant" in result.stdout.lower()  # Yoda+Jocasta+Mothma all claude
 
 
 def test_cli_gemini_degraded_badge(full_instance_yaml: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -348,7 +363,8 @@ def test_e2e_real_boundary_gemini_starve_then_escalate(
         body = json.loads(request.content)
         model, toks = body["model"], body["max_tokens"]
         calls.append((model, toks))
-        if model == "gemini-31-pro" and toks < bs.THINKING_BUDGET_ESCALATED:
+        # Windu rides council-spacial (gemini family); starve first budget then escalate.
+        if model == "council-spacial" and toks < bs.THINKING_BUDGET_ESCALATED:
             return httpx.Response(200, json={
                 "choices": [{"message": {"content": ""}, "finish_reason": "stop"}],
                 "usage": {"completion_tokens_details": {"reasoning_tokens": 60}},
@@ -370,6 +386,8 @@ def test_e2e_real_boundary_gemini_starve_then_escalate(
     # recovered on its OWN gemini model via escalation — never fell back to qwen
     assert windu["status"] == "ok"
     assert windu["family"] == "gemini"
-    assert any(m == "gemini-31-pro" and t >= bs.THINKING_BUDGET_ESCALATED for m, t in calls)
+    assert any(m == "council-spacial" and t >= bs.THINKING_BUDGET_ESCALATED for m, t in calls)
     assert "gemini" in payload["diversity"]["achieved_families"]
-    assert payload["diversity"]["achieved_families"] == ["claude", "codestral", "gemini", "qwen"]
+    assert payload["diversity"]["achieved_families"] == [
+        "claude", "codestral", "gemini", "grok", "heretic",
+    ]
