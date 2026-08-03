@@ -11,18 +11,18 @@ from __future__ import annotations
 
 #: The robed figure. Staff to the right, star on the hat, nothing spooky.
 ART = r"""
-          _
-        .' '.
-       /  *  \
-      /_______\
-       (o   o)          *
-       ( __/ )         /
-      /|     |\       /
-     / |     | \     /
-    *  | ~~~ |  *   *
-       |     |      |
-      _|_____|_     |
-     '---------'   /|\
+          ___
+         /   \
+        / ~*~ \              \ /
+       /_______\            (\o/)
+        (o   o)     O         |
+        | \_/ |     |        / \
+       /'-----'\    |      _/___\_
+      / /|   |\ \   |
+     (_/ |   | \_)  |
+         |   |     \|/
+        /_____\     |
+       (_______)   /|\
 """
 
 CLOSING = "You're a wizard, Bert."
