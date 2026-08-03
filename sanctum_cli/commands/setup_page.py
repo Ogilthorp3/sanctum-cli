@@ -75,10 +75,10 @@ PAGE = """<!doctype html>
   .pill { font-size:12px; color:var(--muted); border:1px solid var(--line); border-radius:999px; padding:2px 10px; }
 
   label { display:block; font-size:13px; font-weight:600; margin: 12px 0 5px; }
-  input[type=text], input[type=password] {
+  input[type=text], input[type=password], input[type=number], select {
     width:100%; padding:11px 13px; border:1px solid var(--line); border-radius:10px;
     background: var(--bg); color: var(--ink); font-size:15px; font-family:inherit; }
-  input:focus { outline:none; border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 25%, transparent); }
+  input:focus, select:focus { outline:none; border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 25%, transparent); }
 
   button { font-family:inherit; font-size:14px; font-weight:600; border-radius:10px;
     padding:9px 16px; border:1px solid transparent; cursor:pointer; }
@@ -130,7 +130,7 @@ PAGE = """<!doctype html>
 const $  = (s,r=document)=>r.querySelector(s);
 const $$ = (s,r=document)=>[...r.querySelectorAll(s)];
 let STATE=null, PANES=[], cur=0;
-const local = { autoOK:false, claude:false, gemini:false };
+const local = { autoOK:false, claude:false, gemini:false, netScanned:false, family:null };
 
 async function getState(){ STATE = await (await fetch('/state')).json(); }
 async function probe(id){ return (await fetch('/probe/'+id)).json(); }
@@ -151,21 +151,32 @@ async function run(btn, fn){ const t=btn.innerHTML; btn.disabled=true; btn.inner
 function showResult(el, ok, text){ el.className='result show '+(ok?'good':'bad'); el.textContent=text; }
 
 function buildPanes(){
+  const haus = STATE.tier==='haus';
   PANES = [
     {id:'welcome',   title:'Welcome'},
     {id:'preflight', title:'Get started'},
     {id:'name',      title:'Name it'},
     {id:'tailscale', title:'Connect'},
     {id:'perms',     title:'Permissions'},
-    {id:'ai',        title:'AI (optional)'},
-    {id:'done',      title:'Finish'},
+    {id:'backup',    title:'Back up'},
   ];
+  if(haus) PANES.push({id:'family', title:'Family'});
+  PANES.push({id:'network', title:'Network'});
+  if(haus) PANES.push({id:'firewalla', title:'Firewalla'},
+                      {id:'ha',        title:'Home Assistant'});
+  PANES.push({id:'ai',   title:'AI (optional)'},
+             {id:'done', title:'Finish'});
 }
 function railDot(id){
   const s = STATE.steps || {};
   if(id==='name') return s.instance ? dotClass(s.instance.status) : 'unk';
   if(id==='tailscale') return s.oauth ? dotClass(s.oauth.status) : 'unk';
   if(id==='perms'){ if(STATE.tier!=='haus') return 'ok'; return s.fda ? dotClass(s.fda.status):'unk'; }
+  if(id==='backup') return s.backup ? dotClass(s.backup.status) : 'unk';
+  if(id==='family') return s.family ? dotClass(s.family.status) : 'unk';
+  if(id==='network') return local.netScanned ? 'ok' : 'unk';
+  if(id==='firewalla') return s.firewalla ? dotClass(s.firewalla.status) : 'unk';
+  if(id==='ha') return s.ha ? dotClass(s.ha.status) : 'unk';
   if(id==='ai') return (local.claude||local.gemini) ? 'ok' : 'unk';
   return '';
 }
@@ -326,6 +337,109 @@ const HTML = {
     </div>
     <p class="muted">No key? That's fine — press Continue to use the local model.</p>`,
 
+  backup: ()=>{
+    const b=STATE.steps.backup;
+    const dest = b.repo
+      ? `<div class="row"><span class="dot ok"></span><div class="grow"><h3>Destination</h3>
+           <p class="sub">${esc(b.repo)}${b.secondary?(' · second copy: '+esc(b.secondary)):''}</p></div></div>`
+      : `<h3>Destination</h3>
+         <p class="sub">No cloud destination yet. Run this in Terminal — it walks you through a free,
+         egress-free bucket and stores the key safely:</p>`+cmd('sanctum cloud setup --backend r2')+
+        `<div class="row"><button class="btn sec" id="bkrecheck">Re-check</button></div>`;
+    const opts = (b.recipes||[]).map(r=>
+      `<option value="${esc(r)}" ${r===b.default_recipe?'selected':''}>${esc(r)}</option>`).join('');
+    return `<h1>Back up what matters</h1>
+      <p class="lede">A small, crucial slice — documents and settings — encrypted and deduplicated with restic.</p>
+      <div class="card">
+        <div class="row"><span class="dot ${b.restic?'ok':'todo'}"></span>
+          <div class="grow"><h3>restic</h3><p class="sub">${b.restic?'installed':'not found — install it, then re-check'}</p></div></div>
+        ${b.restic?'':cmd('brew install restic')+`<div class="row"><button class="btn sec" id="bkrestic">Re-check</button></div>`}
+      </div>
+      <div class="card">${dest}</div>
+      <div class="card"><h3>Policy</h3>
+        <label for="bkrecipe">What to back up</label>
+        <select id="bkrecipe">${opts}</select>
+        <div class="row" style="margin-top:6px">
+          <div class="grow"><label for="bkd">Daily kept</label><input type="number" id="bkd" min="1" value="${b.keep_daily}"/></div>
+          <div class="grow"><label for="bkw">Weekly</label><input type="number" id="bkw" min="0" value="${b.keep_weekly}"/></div>
+          <div class="grow"><label for="bkm">Monthly</label><input type="number" id="bkm" min="0" value="${b.keep_monthly}"/></div>
+        </div>
+        <div class="row" style="margin-top:14px"><button class="btn" id="bksave">Save policy</button></div>
+        <div class="result" id="bkres"></div>
+      </div>`;
+  },
+
+  family: ()=>`
+    <h1>Your family</h1>
+    <p class="lede">Who's in the haus, and which devices are theirs — this is who Sanctum protects.
+       Curfews and limits come later; this pane never deletes anyone.</p>
+    <div id="members"></div>
+    <div class="row" style="margin-top:12px"><button class="btn sec" id="addmember">Add a person</button>
+      <button class="btn" id="famsave">Save family</button></div>
+    <div class="result" id="famres"></div>
+    <p class="muted" style="margin-top:10px">A device's MAC address is on its Wi-Fi settings screen.
+       To remove someone, edit devices.yaml by hand — deliberately.</p>`,
+
+  network: ()=>`
+    <h1>Your network</h1>
+    <p class="lede">A quick, read-only scan: who hands out addresses, whether you're behind
+       double-NAT, and if this Mac is on your private Tailscale network.</p>
+    <div class="row"><button class="btn" id="netscan">Scan my network</button></div>
+    <div id="netrows" style="margin-top:14px"></div>
+    <div class="card"><h3>Want to improve it?</h3>
+      <p class="sub">These run in Terminal, explain every change first, and are reversible:</p>
+      ${cmd('sanctum net check')}${cmd('sanctum net optimize')}</div>`,
+
+  firewalla: ()=>{
+    const s=STATE.steps.firewalla;
+    return `<h1>Pair your Firewalla</h1>
+      <p class="lede">The bridge lets Sanctum see the network and enforce screen-time.
+         The token is verified live, then stays on this Mac.</p>
+      <div class="card">
+        <div class="row"><span class="dot ${dotClass(s.status)}"></span>
+          <div class="grow"><h3>Bridge</h3><p class="sub">${esc(s.detail)}</p></div></div>
+        <div class="row" style="margin-top:8px"><button class="btn sec" id="fwtest">Test connection</button></div>
+        <div class="result" id="fwproberes"></div>
+      </div>
+      <div class="card"><h3>Pair</h3>
+        <label for="fwurl">Bridge URL</label>
+        <input type="text" id="fwurl" value="${esc(s.url||'')}" />
+        <label for="fwtoken">Bridge token ${s.token_stored?'<span class="pill">stored — leave blank to reuse</span>':''}</label>
+        <input type="password" id="fwtoken" placeholder="${s.token_stored?'(using the stored token)':'paste the bridge token'}" />
+        <div class="row">
+          <div class="grow"><label for="fwip">Firewalla IP</label>
+            <input type="text" id="fwip" value="${esc(s.device_ip||'')}" placeholder="the LAN gateway (optional)"/></div>
+          <div class="grow"><label for="fwmac">Firewalla MAC</label>
+            <input type="text" id="fwmac" value="${esc(s.device_mac||'')}" placeholder="optional"/></div>
+        </div>
+        <div class="row" style="margin-top:14px"><button class="btn" id="fwsave">Verify &amp; pair</button></div>
+        <div class="result" id="fwres"></div>
+      </div>
+      <p class="muted">No Firewalla? Press Continue — curfews stay off until one is paired.</p>`;
+  },
+
+  ha: ()=>{
+    const s=STATE.steps.ha;
+    return `<h1>Home Assistant</h1>
+      <p class="lede">If a Home Assistant Green runs your home, connect it — verified with an
+         owner token that stays on this Mac.</p>
+      <div class="card">
+        <div class="row"><span class="dot ${dotClass(s.status)}"></span>
+          <div class="grow"><h3>HA Green</h3><p class="sub">${esc(s.detail)}</p></div></div>
+        <div class="row" style="margin-top:8px"><button class="btn sec" id="hacheck">Check</button></div>
+        <div id="harows" style="margin-top:10px"></div>
+      </div>
+      <div class="card"><h3>Connect</h3>
+        <label for="haurl">URL</label>
+        <input type="text" id="haurl" value="${esc(s.url||'')}" />
+        <label for="hatoken">Owner token ${s.token_stored?'<span class="pill">stored — leave blank to reuse</span>':''}</label>
+        <input type="password" id="hatoken" placeholder="${s.token_stored?'(using the stored token)':'a long-lived access token'}" />
+        <div class="row" style="margin-top:14px"><button class="btn" id="hasave">Verify &amp; connect</button></div>
+        <div class="result" id="hares"></div>
+      </div>
+      <p class="muted">No Home Assistant? Press Continue — this step is optional.</p>`;
+  },
+
   done: ()=>`
     <h1>One last check</h1>
     <p class="lede">Let's make sure everything's healthy before you go.</p>
@@ -379,6 +493,104 @@ const WIRE = {
     $('#geminisave').onclick=(e)=>run(e.target, async ()=>{
       const r=await act('provider','save',{kind:'gemini', key:$('#geminikey').value});
       showResult($('#geminires'), r.ok, (r.ok?'✓ ':'✗ ')+(r.detail||'')); if(r.ok) local.gemini=true;
+    });
+  },
+  backup: ()=>{
+    const rc=$('#bkrecheck'); if(rc) rc.onclick=(e)=>run(e.target, async ()=>{ await getState(); render(); });
+    const rr=$('#bkrestic'); if(rr) rr.onclick=(e)=>run(e.target, async ()=>{ await getState(); render(); });
+    $('#bksave').onclick=(e)=>run(e.target, async ()=>{
+      const r=await act('backup','save',{ default_recipe:$('#bkrecipe').value,
+        keep_daily:+$('#bkd').value, keep_weekly:+$('#bkw').value, keep_monthly:+$('#bkm').value });
+      showResult($('#bkres'), r.ok, (r.ok?'✓ ':'✗ ')+(r.detail||''));
+      if(r.ok){ await getState(); }
+    });
+  },
+  family: ()=>{
+    if(!local.family){
+      const seed=(STATE.steps.family&&STATE.steps.family.members)||[];
+      local.family=JSON.parse(JSON.stringify(seed));
+      if(!local.family.length) local.family.push({name:'',role:'child',devices:[{name:'',mac:''}]});
+    }
+    const sync=()=>{ $$('#members .card').forEach(card=>{
+      const m=local.family[+card.dataset.i];
+      m.name=$('.fname',card).value; m.role=$('.frole',card).value;
+      m.devices=$$('.dmac',card).map((el,j)=>({name:$$('.dname',card)[j].value, mac:el.value}));
+    }); };
+    const draw=()=>{
+      $('#members').innerHTML=local.family.map((m,i)=>`<div class="card" data-i="${i}">
+        <div class="row">
+          <div class="grow"><label>Name</label><input type="text" class="fname" value="${esc(m.name||'')}" placeholder="e.g. Albert"/></div>
+          <div style="width:130px"><label>Role</label><select class="frole">
+            <option value="child" ${m.role!=='parent'?'selected':''}>child</option>
+            <option value="parent" ${m.role==='parent'?'selected':''}>parent</option></select></div>
+        </div>
+        ${(m.devices||[]).map((d,j)=>`<div class="row" style="margin-top:8px">
+          <div class="grow"><input type="text" class="dname" data-j="${j}" value="${esc(d.name||'')}" placeholder="Device (e.g. iPhone)"/></div>
+          <div class="grow"><input type="text" class="dmac" data-j="${j}" value="${esc(d.mac||'')}" placeholder="AA:BB:CC:DD:EE:FF"/></div>
+        </div>`).join('')}
+        <div class="row" style="margin-top:8px"><button class="btn ghost adddev" data-i="${i}">+ device</button></div>
+      </div>`).join('');
+      $$('#members .adddev').forEach(b=>b.onclick=()=>{ sync();
+        local.family[+b.dataset.i].devices.push({name:'',mac:''}); draw(); });
+    };
+    draw();
+    $('#addmember').onclick=()=>{ sync();
+      local.family.push({name:'',role:'child',devices:[{name:'',mac:''}]}); draw(); };
+    $('#famsave').onclick=(e)=>run(e.target, async ()=>{
+      sync();
+      const members=local.family.filter(m=>(m.name||'').trim());
+      const r=await act('family','save',{members});
+      showResult($('#famres'), r.ok, (r.ok?'✓ ':'✗ ')+(r.detail||''));
+      if(r.ok){ local.family=null; await getState(); }
+    });
+  },
+  network: ()=>{
+    $('#netscan').onclick=(e)=>run(e.target, async ()=>{
+      const r=await probe('network');
+      local.netScanned=true;
+      const row=(l,d,s)=>`<div class="tnrow"><span class="dot ${s}"></span>
+        <span class="l">${esc(l)}</span><span class="d grow">${esc(d)}</span></div>`;
+      const tn=r.tailnet||{};
+      $('#netrows').innerHTML =
+        row('NAT', r.nat==='single'?'single — ideal':(r.nat||'unknown'),
+            r.nat==='single'?'ok':(r.nat==='double'?'warn':'unk'))+
+        row('Gateway', r.gateway||'not found', r.gateway?'ok':'unk')+
+        row('ISP', r.isp||'unknown', r.isp&&r.isp!=='unknown'?'ok':'unk')+
+        row('Firewalla', r.firewalla?'present':'not detected', r.firewalla?'ok':'unk')+
+        row('Tailscale', tn.on?('on the tailnet'+(tn.suffix?(' · '+tn.suffix):'')):'not joined',
+            tn.on?'ok':'warn')+
+        (r.reason?`<p class="muted" style="margin-top:10px">${esc(r.reason)}</p>`:'');
+    });
+  },
+  firewalla: ()=>{
+    $('#fwtest').onclick=(e)=>run(e.target, async ()=>{
+      const r=await probe('firewalla');
+      showResult($('#fwproberes'), !!r.ok, (r.ok?'✓ ':'✗ ')+(r.detail||''));
+    });
+    $('#fwsave').onclick=(e)=>run(e.target, async ()=>{
+      const r=await act('firewalla','save',{ url:$('#fwurl').value, token:$('#fwtoken').value,
+        device_ip:$('#fwip').value, device_mac:$('#fwmac').value });
+      showResult($('#fwres'), r.ok, (r.ok?'✓ ':'✗ ')+(r.detail||''));
+      if(r.ok){ $('#fwtoken').value=''; await getState(); }
+    });
+  },
+  ha: ()=>{
+    $('#hacheck').onclick=(e)=>run(e.target, async ()=>{
+      const r=await probe('ha');
+      const row=(l,d,s)=>`<div class="tnrow"><span class="dot ${s}"></span>
+        <span class="l">${esc(l)}</span><span class="d grow">${esc(d)}</span></div>`;
+      $('#harows').innerHTML =
+        row('On the LAN', r.host+':'+r.port+(r.reachable?' answers':' — no answer'),
+            r.reachable?'ok':'todo')+
+        row('HA Core', r.api_running?('API running'+(r.version?(' · '+r.version):'')):
+            (r.token_stored?'not verified':'needs the owner token below'), r.api_running?'ok':'unk')+
+        row('Remote access', r.tailnet_node?'Tailscale node joined':'not joined (optional)',
+            r.tailnet_node?'ok':'unk');
+    });
+    $('#hasave').onclick=(e)=>run(e.target, async ()=>{
+      const r=await act('ha','save',{ url:$('#haurl').value, token:$('#hatoken').value });
+      showResult($('#hares'), r.ok, (r.ok?'✓ ':'✗ ')+(r.detail||''));
+      if(r.ok){ $('#hatoken').value=''; await getState(); }
     });
   },
   done: ()=>{
