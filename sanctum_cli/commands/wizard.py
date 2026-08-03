@@ -12,7 +12,6 @@ from __future__ import annotations
 #: The robed figure. Staff to the right, star on the hat, nothing spooky.
 ART = r"""
       \|/     \|/
-       \|     |/
         \\___//              \ /
        .-------.            (\o/)
        |_______|)    O        |
