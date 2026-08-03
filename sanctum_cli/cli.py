@@ -42,6 +42,7 @@ from sanctum_cli.commands import uninstall as uninstall_cmd
 from sanctum_cli.commands import update as update_cmd
 from sanctum_cli.commands import upgrade as upgrade_cmd
 from sanctum_cli.commands import vision as vision_cmd
+from sanctum_cli.commands import wizard as wizard_cmd
 from sanctum_cli.commands.link import link_app
 from sanctum_cli.commands.mesh import mesh_app
 from sanctum_cli.commands.module import module_app
@@ -339,6 +340,11 @@ def devices_top() -> None:
 @app.command("matrix", help="Follow the white rabbit — digital rain until Ctrl-C.")
 def matrix_top() -> None:
     matrix_cmd.matrix_command()
+
+
+@app.command("wizard", help="The Wizard will see you now — a small hello to the haus's human.")
+def wizard_top() -> None:
+    wizard_cmd.wizard_command()
 
 
 @app.command(

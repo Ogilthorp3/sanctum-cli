@@ -14,7 +14,7 @@ PAGE = """<!doctype html>
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Sanctum Setup</title>
+<title>Sanctum Setup — the Wizard is in.</title>
 <style>
   :root {
     --bg: #f5f5f7; --card: #ffffff; --ink: #1d1d1f; --muted: #6e6e73;
@@ -215,6 +215,7 @@ const HTML = {
     <h1>Welcome to Sanctum</h1>
     <p class="lede">A calm, private network for your home. Let's set it up together —
        about five minutes, one step at a time. You can stop and come back anytime.</p>
+    <p class="muted">The Wizard will see you now.</p>
     <div class="card"><div class="row"><span class="dot ok"></span>
       <span class="grow">No terminal required. Every button here just runs Sanctum for you.</span></div></div>`,
 

@@ -601,3 +601,9 @@ def test_page_declares_new_panes_and_tier_gate() -> None:
     # And the on-demand probes are wired:
     for probe_id in ("probe('network')", "probe('firewalla')", "probe('ha')"):
         assert probe_id in PAGE
+
+
+def test_page_greets_as_the_wizard() -> None:
+    """Bert's Burning Man name is on the door — title + one welcome-pane line."""
+    assert "<title>Sanctum Setup — the Wizard is in.</title>" in PAGE
+    assert "The Wizard will see you now." in PAGE
