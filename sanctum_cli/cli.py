@@ -37,6 +37,7 @@ from sanctum_cli.commands import proxy as proxy_cmd
 from sanctum_cli.commands import schedule as schedule_cmd
 from sanctum_cli.commands import screen_time as screentime_cmd
 from sanctum_cli.commands import self_test as self_test_cmd
+from sanctum_cli.commands import setup as setup_cmd
 from sanctum_cli.commands import uninstall as uninstall_cmd
 from sanctum_cli.commands import update as update_cmd
 from sanctum_cli.commands import upgrade as upgrade_cmd
@@ -46,6 +47,7 @@ from sanctum_cli.commands.mesh import mesh_app
 from sanctum_cli.commands.module import module_app
 from sanctum_cli.commands.net import net_app
 from sanctum_cli.commands.node import node_app
+from sanctum_cli.commands.tailnet import tailnet_app
 from sanctum_cli.errors import ExitCode, SanctumError
 from sanctum_cli.haus import haus_required
 
@@ -419,6 +421,7 @@ app.add_typer(net_app, name="net")
 app.add_typer(node_app, name="node")
 app.add_typer(link_app, name="link")
 app.add_typer(mesh_app, name="mesh")
+app.add_typer(tailnet_app, name="tailnet")
 
 # The seventh organ — hormone panel + creative-mode lever. Read-only/file-based;
 # adds no behavior to any seat until a seat opts into the receptor.
@@ -671,6 +674,29 @@ def onboard_top(
 ) -> None:
     try:
         onboard_cmd.onboard_command(recipe=recipe, backend=backend, no_open=no_open, yes=yes)
+    except SanctumError as exc:
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code)) from exc
+
+
+@app.command(
+    "setup",
+    help="Open the first-run Setup Assistant — a friendly GUI over onboard, in your browser.",
+)
+def setup_top(
+    no_open: Annotated[
+        bool, typer.Option("--no-open", help="Start the server but don't open a browser window.")
+    ] = False,
+    port: Annotated[
+        int, typer.Option("--port", help="Bind to a specific loopback port (0 = pick a free one).")
+    ] = 0,
+    install_app: Annotated[
+        bool,
+        typer.Option("--install-app", help="Build a double-clickable Sanctum Setup.app in ~/Applications."),
+    ] = False,
+) -> None:
+    try:
+        setup_cmd.setup_command(no_open=no_open, port=port, install_app=install_app)
     except SanctumError as exc:
         _report(exc)
         raise typer.Exit(code=int(exc.exit_code)) from exc
