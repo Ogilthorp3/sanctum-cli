@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>@OPERATOR_HOME@</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>USER</key>
+    <string>sanctum</string>
+    <key>MEMORY_VAULT_DIR</key>
+    <string>@OPERATOR_HOME@/.sanctum/memory</string>
+    <key>MEMORY_VAULT_HOST</key>
+    <string>0.0.0.0</string>
+    <key>MEMORY_VAULT_PORT</key>
+    <string>42069</string>
+    <key>MEMORY_VAULT_TRANSPORT</key>
+    <string>sse</string>
+  </dict>
+  <key>GroupName</key>
+  <string>sanctum</string>
+  <key>KeepAlive</key>
+  <true/>
+  <key>Label</key>
+  <string>com.sanctum.memory-vault</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>@OPERATOR_HOME@/.sanctum/bin/sanctum-memory-vault</string>
+    <string>-m</string>
+    <string>memory_vault</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardErrorPath</key>
+  <string>/Users/sanctum/logs/memory-vault.stderr.log</string>
+  <key>StandardOutPath</key>
+  <string>/Users/sanctum/logs/memory-vault.stdout.log</string>
+  <key>ThrottleInterval</key>
+  <integer>15</integer>
+  <key>UserName</key>
+  <string>sanctum</string>
+  <key>WorkingDirectory</key>
+  <string>@OPERATOR_HOME@/.sanctum/memory-vault</string>
+</dict>
+</plist>

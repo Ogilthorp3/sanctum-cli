@@ -255,23 +255,325 @@ def check_wave1(*, require_user: bool = True) -> Wave1Report:
 
 
 def install_script_path() -> Path:
+    """Legacy path — still used for status when sanctum-config is present."""
     return INSTALL_SCRIPT
 
 
-def run_install(*, dry_run: bool = False) -> int:
-    """Run the hub install script (requires admin via sudo).
+def operator_home() -> Path:
+    """Home of the interactive operator (not root when under sudo)."""
+    sudo_user = os.environ.get("SUDO_USER") or os.environ.get("USER") or ""
+    if sudo_user and sudo_user != "root":
+        try:
+            return Path(pwd.getpwnam(sudo_user).pw_dir)
+        except KeyError:
+            pass
+    return Path.home()
 
-    Returns the subprocess exit code. Raises FileNotFoundError if the
-    sanctum-config scripts are not present on this machine.
+
+def _package_asset(name: str) -> str:
+    """Read a packaged asset (plist template) from the wheel."""
+    try:
+        from importlib.resources import files
+
+        return files("sanctum_cli.data.service_user").joinpath(name).read_text(encoding="utf-8")
+    except (FileNotFoundError, ModuleNotFoundError, TypeError, OSError):
+        # editable / source tree fallback
+        here = Path(__file__).resolve().parent / "data" / "service_user" / name
+        return here.read_text(encoding="utf-8")
+
+
+def materialize_assets(op_home: Path | None = None) -> Path:
+    """Write packaged plists into ``~/.sanctum/launchdaemons`` (expanded).
+
+    Idempotent. Does not require root. Returns the launchdaemons directory.
     """
-    script = install_script_path()
-    if not script.is_file():
-        raise FileNotFoundError(
-            f"missing {script} — clone/sync sanctum-config so "
-            "~/.sanctum/scripts/service-user/ exists"
+    home = op_home or operator_home()
+    dest = home / ".sanctum" / "launchdaemons"
+    dest.mkdir(parents=True, exist_ok=True)
+    scripts = home / ".sanctum" / "scripts" / "service-user"
+    scripts.mkdir(parents=True, exist_ok=True)
+    # marker so operators know CLI owns the greenfield path
+    (scripts / "README.md").write_text(
+        "# Service user (wave-1)\n\n"
+        "Installed by `sanctum service-user install` (packaged assets).\n"
+        "Canonical command: `sanctum service-user status|check|install`.\n",
+        encoding="utf-8",
+    )
+    for name in (
+        "com.sanctum.proxyd.plist",
+        "com.sanctum.force-flow.plist",
+        "com.sanctum.memory-vault.plist",
+    ):
+        text = _package_asset(name).replace("@OPERATOR_HOME@", str(home))
+        (dest / name).write_text(text, encoding="utf-8")
+    return dest
+
+
+def _run(cmd: list[str], *, check: bool = False) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(  # noqa: S603
+        cmd,
+        capture_output=True,
+        text=True,
+        check=check,
+        timeout=120,
+    )
+
+
+def _ensure_group_and_user() -> None:
+    """Create group+user ``sanctum`` if missing. Must run as root."""
+    if os.geteuid() != 0:
+        raise PermissionError("root required")
+
+    # group
+    if _run(["dscl", ".", "-read", f"/Groups/{SERVICE_USERNAME}"]).returncode != 0:
+        # pick free gid >= 502
+        gid = 502
+        existing = _run(["dscl", ".", "-list", "/Groups", "PrimaryGroupID"])
+        used = {line.split()[-1] for line in existing.stdout.splitlines() if line.strip()}
+        while str(gid) in used:
+            gid += 1
+        _run(["dscl", ".", "-create", f"/Groups/{SERVICE_USERNAME}"], check=True)
+        _run(
+            ["dscl", ".", "-create", f"/Groups/{SERVICE_USERNAME}", "PrimaryGroupID", str(gid)],
+            check=True,
         )
+        _run(
+            [
+                "dscl",
+                ".",
+                "-create",
+                f"/Groups/{SERVICE_USERNAME}",
+                "RealName",
+                "Sanctum hive service",
+            ],
+            check=True,
+        )
+
+    # user
+    if not service_user_exists():
+        uid = 502
+        existing_u = _run(["dscl", ".", "-list", "/Users", "UniqueID"])
+        used_u = {line.split()[-1] for line in existing_u.stdout.splitlines() if line.strip()}
+        while str(uid) in used_u:
+            uid += 1
+        # try sysadminctl first
+        rc = _run(
+            [
+                "sysadminctl",
+                "-addUser",
+                SERVICE_USERNAME,
+                "-fullName",
+                "Sanctum Service",
+                "-UID",
+                str(uid),
+                "-shell",
+                "/usr/bin/false",
+                "-home",
+                f"/Users/{SERVICE_USERNAME}",
+                "-password",
+                "-",
+            ]
+        )
+        if rc.returncode != 0 or not service_user_exists():
+            gid = pwd.getpwnam(SERVICE_USERNAME).pw_gid if service_user_exists() else 502
+            try:
+                gid = int(
+                    _run(["dscl", ".", "-read", f"/Groups/{SERVICE_USERNAME}", "PrimaryGroupID"])
+                    .stdout.split()[-1]
+                )
+            except (IndexError, ValueError):
+                gid = 502
+            home = f"/Users/{SERVICE_USERNAME}"
+            _run(["dscl", ".", "-create", f"/Users/{SERVICE_USERNAME}"], check=True)
+            _run(
+                ["dscl", ".", "-create", f"/Users/{SERVICE_USERNAME}", "UserShell", "/usr/bin/false"],
+                check=True,
+            )
+            _run(
+                [
+                    "dscl",
+                    ".",
+                    "-create",
+                    f"/Users/{SERVICE_USERNAME}",
+                    "RealName",
+                    "Sanctum Service",
+                ],
+                check=True,
+            )
+            _run(
+                ["dscl", ".", "-create", f"/Users/{SERVICE_USERNAME}", "UniqueID", str(uid)],
+                check=True,
+            )
+            _run(
+                [
+                    "dscl",
+                    ".",
+                    "-create",
+                    f"/Users/{SERVICE_USERNAME}",
+                    "PrimaryGroupID",
+                    str(gid),
+                ],
+                check=True,
+            )
+            _run(
+                [
+                    "dscl",
+                    ".",
+                    "-create",
+                    f"/Users/{SERVICE_USERNAME}",
+                    "NFSHomeDirectory",
+                    home,
+                ],
+                check=True,
+            )
+            import secrets
+
+            _run(
+                ["dscl", ".", "-passwd", f"/Users/{SERVICE_USERNAME}", secrets.token_urlsafe(24)],
+                check=False,
+            )
+            Path(home).mkdir(parents=True, exist_ok=True)
+            _run(["createhomedir", "-c", "-u", SERVICE_USERNAME], check=False)
+
+    # membership: sanctum + operator (SUDO_USER)
+    op = os.environ.get("SUDO_USER") or ""
+    for member in (SERVICE_USERNAME, op):
+        if member:
+            _run(
+                ["dseditgroup", "-o", "edit", "-a", member, "-t", "user", SERVICE_USERNAME],
+                check=False,
+            )
+
+    home = Path(f"/Users/{SERVICE_USERNAME}")
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "logs").mkdir(parents=True, exist_ok=True)
+    (home / "run").mkdir(parents=True, exist_ok=True)
+    try:
+        pw = pwd.getpwnam(SERVICE_USERNAME)
+        os.chown(home, pw.pw_uid, pw.pw_gid)
+        os.chown(home / "logs", pw.pw_uid, pw.pw_gid)
+        os.chown(home / "run", pw.pw_uid, pw.pw_gid)
+    except (KeyError, OSError):
+        pass
+
+
+def _acl_operator_tree(op_home: Path) -> None:
+    """Best-effort group share of operator .sanctum + .openclaw for service user."""
+    sanctum = op_home / ".sanctum"
+    sanctum.mkdir(parents=True, exist_ok=True)
+    # execute on home + openclaw parent
+    _run(["chmod", "g+x", str(op_home)], check=False)
+    openclaw = op_home / ".openclaw"
+    openclaw.mkdir(parents=True, exist_ok=True)
+    (openclaw / "logs").mkdir(parents=True, exist_ok=True)
+    _run(["chmod", "g+x", str(openclaw)], check=False)
+    _run(["chgrp", "-R", SERVICE_USERNAME, str(openclaw / "logs")], check=False)
+    _run(["chmod", "-R", "g+rwX", str(openclaw / "logs")], check=False)
+    # sanctum tree (skip locked files)
+    _run(["chgrp", "-R", SERVICE_USERNAME, str(sanctum)], check=False)
+    _run(["chmod", "-R", "g+rX", str(sanctum)], check=False)
+    for sub in ("state", "logs", "memory", "force-flow", "secrets", "credentials"):
+        p = sanctum / sub
+        if p.is_dir():
+            _run(["chgrp", "-R", SERVICE_USERNAME, str(p)], check=False)
+            mode = "g+rwX" if sub in ("state", "logs", "memory", "force-flow") else "g+rX"
+            _run(["chmod", "-R", mode, str(p)], check=False)
+
+
+def _install_plists(op_home: Path) -> None:
+    dest = Path("/Library/LaunchDaemons")
+    op_uid = None
+    sudo_user = os.environ.get("SUDO_USER")
+    if sudo_user:
+        try:
+            op_uid = pwd.getpwnam(sudo_user).pw_uid
+        except KeyError:
+            op_uid = None
+
+    for name in (
+        "com.sanctum.proxyd.plist",
+        "com.sanctum.force-flow.plist",
+        "com.sanctum.memory-vault.plist",
+    ):
+        label = name.removesuffix(".plist")
+        text = _package_asset(name).replace("@OPERATOR_HOME@", str(op_home))
+        target = dest / name
+        # backup once
+        pre = dest / f"{name}.pre-wave1"
+        if target.is_file() and not pre.is_file():
+            pre.write_bytes(target.read_bytes())
+        target.write_text(text, encoding="utf-8")
+        os.chmod(target, 0o644)
+        _run(["chown", "root:wheel", str(target)], check=False)
+
+        # bootout old system + gui
+        _run(["launchctl", "bootout", f"system/{label}"], check=False)
+        if op_uid is not None:
+            _run(["launchctl", "bootout", f"gui/{op_uid}/{label}"], check=False)
+        _run(["launchctl", "bootstrap", "system", str(target)], check=False)
+        _run(["launchctl", "enable", f"system/{label}"], check=False)
+        _run(["launchctl", "kickstart", "-k", f"system/{label}"], check=False)
+
+    # disable bert-side agents that would double-run
+    agents = op_home / "Library" / "LaunchAgents"
+    for label in ("com.sanctum.force-flow", "com.sanctum.memory-vault"):
+        agent = agents / f"{label}.plist"
+        disabled = agents / f"{label}.plist.disabled-wave1"
+        if agent.is_file() and not disabled.is_file():
+            agent.rename(disabled)
+            if op_uid is not None:
+                _run(["launchctl", "bootout", f"gui/{op_uid}/{label}"], check=False)
+
+
+def install_wave1_as_root() -> int:
+    """Full greenfield wave-1 install. Must run as root. Returns 0 on success."""
+    if os.geteuid() != 0:
+        raise PermissionError("install_wave1_as_root requires root")
+    op_home = operator_home()
+    materialize_assets(op_home)
+    _ensure_group_and_user()
+    _acl_operator_tree(op_home)
+    _install_plists(op_home)
+    return 0
+
+
+def run_install(*, dry_run: bool = False) -> int:
+    """Greenfield install — no pre-synced sanctum-config required.
+
+    Materializes packaged plists, creates user ``sanctum``, installs
+    LaunchDaemons, fixes ACLs. Prompts for admin via ``sudo`` when not root.
+
+    Returns the subprocess / install exit code.
+    """
     if dry_run:
+        # ensure assets can be read from the package
+        _ = _package_asset("com.sanctum.proxyd.plist")
+        materialize_assets(operator_home())
         return 0
-    # Preserve interactive TTY so sudo can prompt.
-    cmd = ["sudo", "/bin/bash", str(script)]
+
+    if os.geteuid() == 0:
+        return install_wave1_as_root()
+
+    # Re-enter as root with the same interpreter so package data stays available.
+    import sys
+
+    code = (
+        "import os, sys; "
+        "from sanctum_cli.service_user import install_wave1_as_root; "
+        "sys.exit(install_wave1_as_root())"
+    )
+    cmd = ["sudo", "-E", sys.executable, "-c", code]
     return subprocess.call(cmd)  # noqa: S603
+
+
+def main() -> None:
+    """``python -m sanctum_cli.service_user install`` (usually under sudo)."""
+    import sys
+
+    if len(sys.argv) > 1 and sys.argv[1] == "install":
+        raise SystemExit(install_wave1_as_root() if os.geteuid() == 0 else run_install())
+    raise SystemExit("usage: python -m sanctum_cli.service_user install")
+
+
+if __name__ == "__main__":
+    main()

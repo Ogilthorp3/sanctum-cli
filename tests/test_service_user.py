@@ -65,12 +65,28 @@ def test_check_exits_zero_when_ok(runner, monkeypatch):
 
 
 def test_install_dry_run(runner, monkeypatch, tmp_path):
-    script = tmp_path / "install-on-new-hub.sh"
-    script.write_text("#!/bin/bash\n")
-    monkeypatch.setattr(su, "install_script_path", lambda: script)
+    monkeypatch.setattr(su, "operator_home", lambda: tmp_path)
+    monkeypatch.setattr(
+        su,
+        "_package_asset",
+        lambda name: f"<plist>@OPERATOR_HOME@/{name}</plist>",
+    )
     result = runner.invoke(app, ["service-user", "install", "--dry-run"])
     assert result.exit_code == 0
-    assert "would run" in result.output
+    assert "dry-run" in result.output
+    assert (tmp_path / ".sanctum/launchdaemons/com.sanctum.proxyd.plist").is_file()
+
+
+def test_materialize_expands_operator_home(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        su,
+        "_package_asset",
+        lambda name: "HOME=@OPERATOR_HOME@\n",
+    )
+    dest = su.materialize_assets(tmp_path)
+    text = (dest / "com.sanctum.proxyd.plist").read_text()
+    assert str(tmp_path) in text
+    assert "@OPERATOR_HOME@" not in text
 
 
 def test_onboard_operator_lists_service_user_gate():

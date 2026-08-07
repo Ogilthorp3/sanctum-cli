@@ -247,6 +247,50 @@ def _run_gate(gate: str, *, yes: bool) -> bool:
     return False
 
 
+def _run_service_user_install(*, yes: bool) -> bool:
+    """Ensure wave-1 control plane runs as the dedicated sanctum service user.
+
+    Greenfield-safe: packaged plists live in the CLI wheel. Haus-operator only.
+    Under --yes, materialize assets and print the one-liner for a later sudo
+    install (no password prompt in scripted runs).
+    """
+    from sanctum_cli import service_user as su
+
+    # This gate is operator-recipe only — always greenfield-capable (packaged assets).
+    report = su.check_wave1()
+    if report.applicable and report.ok:
+        console.print("  [green]ok[/] wave-1 already running as sanctum")
+        return True
+    if yes:
+        su.materialize_assets()
+        console.print(
+            "  [yellow]skip[/] service principal needs an admin password — run once:\n"
+            "         sanctum service-user install"
+        )
+        return False
+    console.print(
+        "  Wave-1 control plane (proxyd / force-flow / memory-vault) should run as\n"
+        "  the dedicated [bold]sanctum[/] user, not your login session.\n"
+        "  Self-contained install (packaged plists; no extra repo sync)."
+    )
+    if not typer.confirm("  Install hive service principal now?", default=True):
+        console.print("  [dim]skipped by operator[/]")
+        return False
+    rc = su.run_install(dry_run=False)
+    if rc != 0:
+        console.print(f"  [red]install exited {rc}[/]")
+        return False
+    report2 = su.check_wave1()
+    if report2.applicable and report2.ok:
+        console.print("  [green]ok[/] service principal installed")
+        return True
+    console.print(
+        "  [yellow]install finished; some health checks still fail "
+        "(ok if binaries not on disk yet)[/]"
+    )
+    return True
+
+
 def _chapter_active_gates(chapter_title: str, recipe: str) -> tuple[str, ...]:
     """The gates for ``chapter_title`` that the active ``recipe`` actually lists.
 

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.15.4 — 2026-08-07
+
+### Added
+- **`sanctum service-user`** — greenfield hive service principal install (user `sanctum`,
+  wave-1 LaunchDaemons for proxyd / force-flow / memory-vault). Packaged plists;
+  no pre-synced sanctum-config required. Operator onboard gate + self-test + doctor.
+
 All notable changes to `sanctum-cli` are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),

@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Comment</key>
+  <string>Force Flow — sanctum service principal (wave-1).</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>@OPERATOR_HOME@</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>USER</key>
+    <string>sanctum</string>
+  </dict>
+  <key>GroupName</key>
+  <string>sanctum</string>
+  <key>KeepAlive</key>
+  <true/>
+  <key>Label</key>
+  <string>com.sanctum.force-flow</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>@OPERATOR_HOME@/.sanctum/bin/force-flow-launch.sh</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardErrorPath</key>
+  <string>/Users/sanctum/logs/force-flow.stderr.log</string>
+  <key>StandardOutPath</key>
+  <string>/Users/sanctum/logs/force-flow.stdout.log</string>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>UserName</key>
+  <string>sanctum</string>
+  <key>WorkingDirectory</key>
+  <string>@OPERATOR_HOME@/.sanctum/force-flow</string>
+</dict>
+</plist>

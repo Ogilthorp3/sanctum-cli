@@ -80,21 +80,22 @@ def check_cmd() -> None:
 def install_cmd(
     dry_run: Annotated[
         bool,
-        typer.Option("--dry-run", help="Only verify the install script is present."),
+        typer.Option(
+            "--dry-run",
+            help="Materialize packaged plists into ~/.sanctum/launchdaemons; no sudo.",
+        ),
     ] = False,
 ) -> None:
-    script = su.install_script_path()
-    if not script.is_file():
-        raise ConfigError(
-            f"install script missing: {script}",
-            fix="Sync sanctum-config so ~/.sanctum/scripts/service-user/ exists, "
-            "then re-run.",
-        )
     if dry_run:
-        console.print(f"[dim]would run:[/] sudo /bin/bash {script}")
+        dest = su.materialize_assets()
+        console.print(
+            f"[dim]dry-run:[/] packaged plists → {dest}\n"
+            f"[dim]would run as root:[/] create user sanctum + bootstrap LaunchDaemons"
+        )
         return
     console.print(
         "Installing hive service principal (user `sanctum` + wave-1 daemons).\n"
+        "Self-contained — no pre-synced sanctum-config required.\n"
         "macOS will ask for your administrator password once.\n"
     )
     try:
@@ -105,11 +106,15 @@ def install_cmd(
         raise LocalError(f"install failed to start: {exc}") from exc
     if rc != 0:
         raise LocalError(
-            f"install-on-new-hub exited {rc}",
-            fix="Read the script output above; then: sanctum service-user status",
+            f"service-user install exited {rc}",
+            fix="Read the output above; then: sanctum service-user status",
         )
-    # re-check
     report = su.check_wave1()
     _print_report(report)
+    # Plists+user may be OK while binaries are not yet on PATH — warn, don't always hard-fail
     if report.applicable and not report.ok:
+        console.print(
+            "[yellow]install finished; some checks still fail "
+            "(binaries under ~/.sanctum/bin may be missing on a brand-new hub)[/]"
+        )
         raise typer.Exit(code=1)
