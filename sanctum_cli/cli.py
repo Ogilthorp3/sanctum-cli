@@ -37,6 +37,7 @@ from sanctum_cli.commands import proxy as proxy_cmd
 from sanctum_cli.commands import schedule as schedule_cmd
 from sanctum_cli.commands import screen_time as screentime_cmd
 from sanctum_cli.commands import self_test as self_test_cmd
+from sanctum_cli.commands import service_user_cmd
 from sanctum_cli.commands import setup as setup_cmd
 from sanctum_cli.commands import uninstall as uninstall_cmd
 from sanctum_cli.commands import update as update_cmd
@@ -432,6 +433,7 @@ app.add_typer(tailnet_app, name="tailnet")
 # The seventh organ — hormone panel + creative-mode lever. Read-only/file-based;
 # adds no behavior to any seat until a seat opts into the receptor.
 app.add_typer(endocrine_cmd.app, name="endocrine")
+app.add_typer(service_user_cmd.app, name="service-user")
 
 keys_app = typer.Typer(help="Keychain-backed credential helpers.")
 app.add_typer(keys_app, name="keys")

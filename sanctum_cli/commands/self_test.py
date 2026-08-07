@@ -314,6 +314,25 @@ def probe_backup_recent() -> ProbeResult:
     return ProbeResult(True, f"last backup {age_h:.1f}h ago")
 
 
+
+
+def probe_service_user_wave1() -> ProbeResult:
+    """Wave-1 control plane runs as the dedicated ``sanctum`` service user.
+
+    Haus-tier only. Family Pass / CLI-only installs return n/a via ``_haus_only``.
+    """
+    from sanctum_cli import service_user as su
+
+    report = su.check_wave1()
+    if not report.applicable:
+        return ProbeResult(True, report.reason or "n/a", not_applicable=True, reason=report.reason)
+    if report.ok:
+        n_ok = sum(1 for i in report.items if i.ok and not i.skip)
+        return ProbeResult(True, f"{n_ok} checks ok — UserName=sanctum")
+    fails = "; ".join(f"{i.name}: {i.detail or 'fail'}" for i in report.failed[:3])
+    return ProbeResult(False, fails or "wave-1 incomplete")
+
+
 # ── Probe registry ────────────────────────────────────────────────────
 
 
@@ -330,6 +349,7 @@ PROBES: list[Probe] = [
     Probe("proxyd routing (:4040)", _haus_only("proxyd", probe_proxyd)),
     Probe("proxy key provisioned", _haus_only("proxy-key", probe_proxy_key)),
     Probe("Force Flow (:4077)", _haus_only("force-flow", probe_force_flow)),
+    Probe("service user wave-1", _haus_only("service-user", probe_service_user_wave1)),
     Probe("chitti samskara (:2188)", _haus_only("chitti", probe_chitti_samskara)),
     Probe("TCC grants", _haus_only("tcc", probe_tcc_grants)),
     Probe("R2D2 supervisor heartbeat", _haus_only("r2d2", probe_r2d2_heartbeat)),

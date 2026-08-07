@@ -403,6 +403,27 @@ def collect(cfg: config.Config) -> Report:
     return Report(agents=_agents(), providers=_providers(cfg), repos=_repos(cfg))
 
 
+def _print_service_user_wave1() -> None:
+    """Haus-tier: show whether wave-1 control plane runs as UserName=sanctum."""
+    try:
+        from sanctum_cli import service_user as su
+    except Exception:
+        return
+    if not su.haus_tier_present():
+        return
+    report = su.check_wave1()
+    if not report.applicable:
+        return
+    status = "OPERATIONAL" if report.ok else "FAILED"
+    detail = (
+        "proxyd/force-flow/memory-vault as sanctum"
+        if report.ok
+        else "run: sanctum service-user install"
+    )
+    console.print(f"[bold]Service principal (wave-1)[/]  {_color(status)}  {detail}")
+    console.print()
+
+
 def doctor_command(
     full: Annotated[bool, typer.Option("--full", help="Always print full per-row detail.")] = False,
     json_output: Annotated[
@@ -471,6 +492,7 @@ def doctor_command(
                         pass
 
     report = collect(cfg)
+    _print_service_user_wave1()
 
     if json_output:
         import json as _json

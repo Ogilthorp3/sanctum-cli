@@ -132,6 +132,7 @@ RECIPE_GATES: dict[str, tuple[str, ...]] = {
         "wifi-identity",
         "network-resilience",
         "mesh-join",
+        "service-user-install",
     ),
     "code": (
         "identity-setup",
@@ -187,6 +188,7 @@ _CHAPTER_GATES: dict[str, tuple[str, ...]] = {
         "ha-green",
         "network-resilience",
         "mesh-join",
+        "service-user-install",
     ),
 }
 
@@ -203,6 +205,7 @@ _GATE_LABELS: dict[str, str] = {
     "ha-green": "HA Green (Home Assistant)",
     "network-resilience": "Network resilience (self-heal)",
     "mesh-join": "Sanctum mesh (join the swarm)",
+    "service-user-install": "Hive service principal (sanctum user)",
 }
 
 
@@ -239,6 +242,8 @@ def _run_gate(gate: str, *, yes: bool) -> bool:
         return _run_network_resilience(yes=yes)
     if gate == "mesh-join":
         return _run_mesh_join(yes=yes)
+    if gate == "service-user-install":
+        return _run_service_user_install(yes=yes)
     return False
 
 
