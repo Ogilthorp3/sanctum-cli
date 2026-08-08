@@ -24,7 +24,14 @@ from sanctum_cli.commands import bridge as bridge_cmd
 from sanctum_cli.commands import chat as chat_cmd
 from sanctum_cli.commands import cloud as cloud_cmd
 from sanctum_cli.commands import code as code_cmd
-from sanctum_cli.commands import config_cmd, doctor, endocrine_cmd, init_cmd, status
+from sanctum_cli.commands import (
+    config_cmd,
+    doctor,
+    endocrine_cmd,
+    init_cmd,
+    service_user_cmd,
+    status,
+)
 from sanctum_cli.commands import council as council_cmd
 from sanctum_cli.commands import deadman as deadman_cmd
 from sanctum_cli.commands import devices as devices_cmd
@@ -37,7 +44,6 @@ from sanctum_cli.commands import proxy as proxy_cmd
 from sanctum_cli.commands import schedule as schedule_cmd
 from sanctum_cli.commands import screen_time as screentime_cmd
 from sanctum_cli.commands import self_test as self_test_cmd
-from sanctum_cli.commands import service_user_cmd
 from sanctum_cli.commands import setup as setup_cmd
 from sanctum_cli.commands import uninstall as uninstall_cmd
 from sanctum_cli.commands import update as update_cmd

@@ -113,9 +113,13 @@ def _plist_username(plist: Path) -> str | None:
         # flat dict under <dict>
         children = list(root.find("dict") or [])
         for i, el in enumerate(children):
-            if el.tag == "key" and (el.text or "") == "UserName":
-                if i + 1 < len(children) and children[i + 1].tag == "string":
-                    return children[i + 1].text
+            if (
+                el.tag == "key"
+                and (el.text or "") == "UserName"
+                and i + 1 < len(children)
+                and children[i + 1].tag == "string"
+            ):
+                return children[i + 1].text
     except (ET.ParseError, OSError):
         return None
     return None
@@ -154,7 +158,7 @@ def _http_status(url: str, timeout: float = 3.0, tls: bool = False) -> int:
 
     ctx = None
     if tls:
-        ctx = ssl._create_unverified_context()  # noqa: S323 — loopback health only
+        ctx = ssl._create_unverified_context()
     try:
         req = urllib.request.Request(url)
         with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
@@ -310,7 +314,7 @@ def materialize_assets(op_home: Path | None = None) -> Path:
 
 
 def _run(cmd: list[str], *, check: bool = False) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(  # noqa: S603
+    return subprocess.run(
         cmd,
         capture_output=True,
         text=True,
@@ -503,7 +507,7 @@ def _install_plists(op_home: Path) -> None:
         if target.is_file() and not pre.is_file():
             pre.write_bytes(target.read_bytes())
         target.write_text(text, encoding="utf-8")
-        os.chmod(target, 0o644)
+        target.chmod(0o644)
         _run(["chown", "root:wheel", str(target)], check=False)
 
         # bootout old system + gui
@@ -563,7 +567,7 @@ def run_install(*, dry_run: bool = False) -> int:
         "sys.exit(install_wave1_as_root())"
     )
     cmd = ["sudo", "-E", sys.executable, "-c", code]
-    return subprocess.call(cmd)  # noqa: S603
+    return subprocess.call(cmd)
 
 
 def main() -> None:
