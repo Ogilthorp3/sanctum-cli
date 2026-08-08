@@ -414,7 +414,7 @@ def _print_service_user_wave1() -> None:
     report = su.check_wave1()
     if not report.applicable:
         return
-    status = "OPERATIONAL" if report.ok else "FAILED"
+    status: Status = "OPERATIONAL" if report.ok else "FAILED"
     detail = (
         "proxyd/force-flow/memory-vault as sanctum"
         if report.ok
@@ -492,7 +492,6 @@ def doctor_command(
                         pass
 
     report = collect(cfg)
-    _print_service_user_wave1()
 
     if json_output:
         import json as _json
@@ -505,6 +504,9 @@ def doctor_command(
         }
         print(_json.dumps(payload, indent=2))
         return
+
+    # Human render only — must not pollute --json stdout (moved below the guard).
+    _print_service_user_wave1()
 
     if not full and report.overall == "OPERATIONAL":
         print(render_brief(report))

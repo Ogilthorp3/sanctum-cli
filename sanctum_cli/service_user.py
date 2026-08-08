@@ -110,8 +110,9 @@ def _plist_username(plist: Path) -> str | None:
     # fallback: rough XML parse
     try:
         root = ET.parse(plist).getroot()
-        # flat dict under <dict>
-        children = list(root.find("dict") or [])
+        # flat dict under <dict>  (ET Element truth-testing is deprecated → `is not None`)
+        dict_el = root.find("dict")
+        children = list(dict_el) if dict_el is not None else []
         for i, el in enumerate(children):
             if (
                 el.tag == "key"
@@ -448,15 +449,15 @@ def _ensure_group_and_user() -> None:
                 check=False,
             )
 
-    home = Path(f"/Users/{SERVICE_USERNAME}")
-    home.mkdir(parents=True, exist_ok=True)
-    (home / "logs").mkdir(parents=True, exist_ok=True)
-    (home / "run").mkdir(parents=True, exist_ok=True)
+    home_dir = Path(f"/Users/{SERVICE_USERNAME}")
+    home_dir.mkdir(parents=True, exist_ok=True)
+    (home_dir / "logs").mkdir(parents=True, exist_ok=True)
+    (home_dir / "run").mkdir(parents=True, exist_ok=True)
     try:
         pw = pwd.getpwnam(SERVICE_USERNAME)
-        os.chown(home, pw.pw_uid, pw.pw_gid)
-        os.chown(home / "logs", pw.pw_uid, pw.pw_gid)
-        os.chown(home / "run", pw.pw_uid, pw.pw_gid)
+        os.chown(home_dir, pw.pw_uid, pw.pw_gid)
+        os.chown(home_dir / "logs", pw.pw_uid, pw.pw_gid)
+        os.chown(home_dir / "run", pw.pw_uid, pw.pw_gid)
     except (KeyError, OSError):
         pass
 
