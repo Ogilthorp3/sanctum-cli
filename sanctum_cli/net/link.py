@@ -239,9 +239,7 @@ def classify(samples: list[Sample]) -> Diagnosis:
         p50_avg_ms=round(avgs[n // 2], 1),
         worst_avg_ms=round(avgs[-1], 1),
     )
-    return Diagnosis(
-        verdict=verdict, detail=detail, remedy=_REMEDY[verdict], metrics=metrics
-    )
+    return Diagnosis(verdict=verdict, detail=detail, remedy=_REMEDY[verdict], metrics=metrics)
 
 
 # ─── sentinel assets (shipped by `sanctum link install`) ─────────────
@@ -738,8 +736,14 @@ def probe_identity(run: CommandRunner | None = None, *, ping_gateway: bool = Tru
     iface = _parse_wifi_iface(runner(["networksetup", "-listallhardwareports"]))
     if not iface:
         return IdentityProbe(
-            iface="", ssid=None, current_mac="", hardware_mac="", security=None,
-            associated=False, router_arp_verified=None, gateway_reachable=None,
+            iface="",
+            ssid=None,
+            current_mac="",
+            hardware_mac="",
+            security=None,
+            associated=False,
+            router_arp_verified=None,
+            gateway_reachable=None,
         )
     current = _first_match(_ETHER_RE, runner(["ifconfig", iface])) or ""
     hardware = _first_match(_GETMAC_RE, runner(["networksetup", "-getmacaddress", iface])) or ""
@@ -759,9 +763,14 @@ def probe_identity(run: CommandRunner | None = None, *, ping_gateway: bool = Tru
             # None (unknown) so we never claim reachable from an unread ping.
             gw_reachable = float(loss) < 100.0 if loss is not None else None
     return IdentityProbe(
-        iface=iface, ssid=ssid, current_mac=current, hardware_mac=hardware,
-        security=security, associated=associated,
-        router_arp_verified=arp, gateway_reachable=gw_reachable,
+        iface=iface,
+        ssid=ssid,
+        current_mac=current,
+        hardware_mac=hardware,
+        security=security,
+        associated=associated,
+        router_arp_verified=arp,
+        gateway_reachable=gw_reachable,
     )
 
 
@@ -808,17 +817,27 @@ def diagnose_identity(probe: IdentityProbe) -> IdentityDiagnosis:
     )
     lan_dead = probe.router_arp_verified is False or probe.gateway_reachable is False
     if randomized and lan_dead:
-        v, detail = "IDENTITY_QUARANTINED", (
-            f"associated on {probe.iface} but gateway unreachable "
-            f"(RouterARPVerified={probe.router_arp_verified}) while presenting "
-            f"rotating MAC {probe.current_mac} ≠ hardware {probe.hardware_mac}"
+        v, detail = (
+            "IDENTITY_QUARANTINED",
+            (
+                f"associated on {probe.iface} but gateway unreachable "
+                f"(RouterARPVerified={probe.router_arp_verified}) while presenting "
+                f"rotating MAC {probe.current_mac} ≠ hardware {probe.hardware_mac}"
+            ),
         )
     elif randomized:
-        v, detail = "IDENTITY_ROTATING", (
-            f"rotating MAC {probe.current_mac} ≠ hardware {probe.hardware_mac}; reachable for now"
+        v, detail = (
+            "IDENTITY_ROTATING",
+            (
+                f"rotating MAC {probe.current_mac} ≠ hardware {probe.hardware_mac}; reachable for now"
+            ),
         )
     else:
-        note = "" if not lan_dead else " (gateway unreachable — see `sanctum link status` for a link-health read)"
+        note = (
+            ""
+            if not lan_dead
+            else " (gateway unreachable — see `sanctum link status` for a link-health read)"
+        )
         v, detail = "IDENTITY_STABLE", f"on hardware MAC {probe.hardware_mac}{note}"
     return IdentityDiagnosis(v, detail, _IDENTITY_REMEDY[v], probe)
 

@@ -217,9 +217,7 @@ def phone_mode_command(kid: str, mode: str, *, apply: bool = False) -> None:
 
     backup = path.parent / (path.name + ".bak")
     backup.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
-    path.write_text(
-        yaml.safe_dump(new, sort_keys=False, allow_unicode=True), encoding="utf-8"
-    )
+    path.write_text(yaml.safe_dump(new, sort_keys=False, allow_unicode=True), encoding="utf-8")
     console.print(
         f"[green]✓[/] {kid} set to [cyan]{mode_norm}[/] — wrote {path} "
         f"(backup: {backup.name}). Reload the screen-time engine to apply."
@@ -365,9 +363,7 @@ def assess_compat(
                 )
             )
         else:
-            checks.append(
-                CompatCheck("monitoring", "PASS", "all managed devices monitored", None)
-            )
+            checks.append(CompatCheck("monitoring", "PASS", "all managed devices monitored", None))
 
     return checks
 
@@ -426,7 +422,9 @@ def validate_firewalla_pairing(url: str, token: str, *, timeout: float = 10.0) -
     except httpx.HTTPError as exc:
         return PairingResult("unreachable", False, f"bridge unreachable at {url}: {exc}")
     if resp.status_code in (401, 403):
-        return PairingResult("auth_rejected", False, f"bridge rejected the token (HTTP {resp.status_code})")
+        return PairingResult(
+            "auth_rejected", False, f"bridge rejected the token (HTTP {resp.status_code})"
+        )
     if resp.status_code != 200:
         return PairingResult("bad_response", False, f"bridge returned HTTP {resp.status_code}")
     try:
@@ -490,7 +488,9 @@ def compat_command(*, strict: bool = False) -> None:
     checks = assess_compat(info, policy_count, monitored)
 
     box = info.get("box") or {}
-    table = Table(title=f"Firewalla compatibility — {box.get('modelDisplay') or '?'} ({mode or '?'} mode)")
+    table = Table(
+        title=f"Firewalla compatibility — {box.get('modelDisplay') or '?'} ({mode or '?'} mode)"
+    )
     table.add_column("check")
     table.add_column("status")
     table.add_column("detail")

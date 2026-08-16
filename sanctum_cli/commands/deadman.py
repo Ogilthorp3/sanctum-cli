@@ -79,7 +79,9 @@ def host_slug() -> str:
     return socket.gethostname().split(".", 1)[0].lower()
 
 
-def merge_heartbeat(data: dict[str, object], key: str, *, ts: int, max_hours: int) -> dict[str, object]:
+def merge_heartbeat(
+    data: dict[str, object], key: str, *, ts: int, max_hours: int
+) -> dict[str, object]:
     """Pure: return a copy of ``data`` with ``key`` set to {ts, max_hours}.
 
     Kept free of IO so it is trivially unit-testable.
@@ -137,11 +139,17 @@ def beat(
     for _ in range(MAX_RETRIES):
         sha, data = _read_remote(repo, path)
         data = merge_heartbeat(data, key, ts=now, max_hours=mh)
-        payload = base64.b64encode((json.dumps(data, indent=2, sort_keys=True) + "\n").encode()).decode()
+        payload = base64.b64encode(
+            (json.dumps(data, indent=2, sort_keys=True) + "\n").encode()
+        ).decode()
         put_args = [
-            "-X", "PUT", f"repos/{repo}/contents/{path}",
-            "-f", f"message=beat: {key}",
-            "-f", f"content={payload}",
+            "-X",
+            "PUT",
+            f"repos/{repo}/contents/{path}",
+            "-f",
+            f"message=beat: {key}",
+            "-f",
+            f"content={payload}",
         ]
         if sha is not None:
             put_args += ["-f", f"sha={sha}"]

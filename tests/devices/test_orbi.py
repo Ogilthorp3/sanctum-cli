@@ -229,9 +229,7 @@ def test_auth_ok_false_before_connect() -> None:
     assert OrbiProvider().auth_ok() is False
 
 
-def test_disconnect_resets_auth_ok(
-    patched: FakeNetgear, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_disconnect_resets_auth_ok(patched: FakeNetgear, monkeypatch: pytest.MonkeyPatch) -> None:
     """disconnect() drops the authed flag so a stale session never reads as authed."""
     p = _connected(monkeypatch, patched)
     assert p.auth_ok() is True
@@ -457,9 +455,7 @@ def test_disconnect_is_idempotent_and_safe_unconnected(
     assert p._client is None
 
 
-def test_disconnect_drops_client(
-    patched: FakeNetgear, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_disconnect_drops_client(patched: FakeNetgear, monkeypatch: pytest.MonkeyPatch) -> None:
     p = _connected(monkeypatch, patched)
     assert p._client is not None
     p.disconnect()

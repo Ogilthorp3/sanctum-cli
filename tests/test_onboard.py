@@ -284,7 +284,10 @@ def _invoke_family_onboard_interactive(input_text: str) -> tuple[int, str]:
     and "run the real backup now?" confirms at their defaults. Stdout is
     whitespace-normalized against rich's 80-column wrapping.
     """
+    import sys
+
     with (
+        patch("getpass.getpass", side_effect=lambda *a, **k: sys.stdin.readline().rstrip("\n")),
         patch("sanctum_cli.commands.onboard.backup_cmd.backup_estimate"),
         patch("sanctum_cli.commands.onboard.backup_cmd.backup_run"),
         patch("sanctum_cli.commands.onboard._dispatch_cloud_setup"),
@@ -303,6 +306,8 @@ def _invoke_family_onboard_interactive(input_text: str) -> tuple[int, str]:
         # Network-resilience is the last interactive gate (own tests); mock it so a
         # real posture probe / DHCP flip / daemon install never runs here.
         patch("sanctum_cli.commands.onboard._run_network_resilience"),
+        patch("sanctum_cli.commands.onboard._run_wifi_identity"),
+        patch("sanctum_cli.commands.onboard._run_first_hello"),
     ):
         result = runner.invoke(app, ["onboard", "--recipe", "family"], input=input_text)
     return result.exit_code, " ".join(result.stdout.split())

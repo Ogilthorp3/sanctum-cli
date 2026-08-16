@@ -69,7 +69,12 @@ def test_chat_passes_max_tokens_and_temperature() -> None:
         return httpx.Response(200, json={"choices": [{"message": {"content": ""}}]})
 
     p = _make_provider(httpx.MockTransport(handler))
-    list(p.chat([Message(role="user", content="x")], ChatOpts(stream=False, max_tokens=128, temperature=0.7)))
+    list(
+        p.chat(
+            [Message(role="user", content="x")],
+            ChatOpts(stream=False, max_tokens=128, temperature=0.7),
+        )
+    )
     assert captured["max_tokens"] == 128
     assert captured["temperature"] == pytest.approx(0.7)
 
@@ -107,9 +112,7 @@ def test_health_handles_connection_error() -> None:
 
 
 def test_cost_is_zero_for_local() -> None:
-    cfg = MlxLocalProviderConfig(
-        endpoint="http://x", model="m", timeout_s=1, always_available=True
-    )
+    cfg = MlxLocalProviderConfig(endpoint="http://x", model="m", timeout_s=1, always_available=True)
     with patch.object(MlxLocalProvider, "__init__", return_value=None):
         p = MlxLocalProvider.__new__(MlxLocalProvider)
         p._cfg = cfg  # type: ignore[attr-defined]

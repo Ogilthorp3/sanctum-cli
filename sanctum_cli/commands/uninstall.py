@@ -56,13 +56,13 @@ KEYCHAIN_SERVICES = [
     ("openrouter-mgmt-key", "sanctum"),
     ("openrouter-mgmt-key-backup", "sanctum"),
     ("anthropic-api-key", "sanctum"),
-    ("google-ai-api-key", "sanctum"),   # was gemini-api-key (never written)
+    ("google-ai-api-key", "sanctum"),  # was gemini-api-key (never written)
     ("r2-account-id", "sanctum"),
     ("r2-access-key-id", "sanctum"),
     ("r2-secret-access-key", "sanctum"),
-    ("b2-account-id", "sanctum"),        # was b2-application-key-id
+    ("b2-account-id", "sanctum"),  # was b2-application-key-id
     ("b2-application-key", "sanctum"),
-    ("bell-hub-admin", "admin"),         # default device-admin entries
+    ("bell-hub-admin", "admin"),  # default device-admin entries
     ("orbi-admin", "admin"),
 ]
 
@@ -161,7 +161,8 @@ def _revoke_keychain_entries() -> list[str]:
 def _untap_homebrew() -> bool:
     result = subprocess.run(
         ["brew", "untap", "ogilthorp3/sanctum"],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     return result.returncode == 0
 
@@ -191,13 +192,14 @@ def _purge_data_dirs() -> list[str]:
 def uninstall_command(
     purge: Annotated[
         bool,
-        typer.Option("--purge", help="Also remove ~/.sanctum/ (audit log, memory, backups). DESTRUCTIVE."),
+        typer.Option(
+            "--purge", help="Also remove ~/.sanctum/ (audit log, memory, backups). DESTRUCTIVE."
+        ),
     ] = False,
-    yes: Annotated[
-        bool, typer.Option("--yes", "-y", help="Skip confirmation prompt.")
-    ] = False,
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip confirmation prompt.")] = False,
     dry_run: Annotated[
-        bool, typer.Option("--dry-run", help="Show what would happen, don't do it."),
+        bool,
+        typer.Option("--dry-run", help="Show what would happen, don't do it."),
     ] = False,
 ) -> None:
     """Remove sanctum from this machine. Preserve user data by default."""

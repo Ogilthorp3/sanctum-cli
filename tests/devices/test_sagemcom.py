@@ -87,9 +87,7 @@ class FakeSahClient:
         self._assert_same_loop()
         return self._v.get(xpath)
 
-    async def set_value_by_xpath(
-        self, xpath: str, value: str, options: dict | None = None
-    ) -> dict:
+    async def set_value_by_xpath(self, xpath: str, value: str, options: dict | None = None) -> dict:
         self._assert_same_loop()
         self.set_calls.append((xpath, value))
         self._v[xpath] = value
@@ -139,7 +137,9 @@ def test_sagemcom_get_set_snapshot(patched: FakeSahClient, monkeypatch: pytest.M
     assert p.get(BRIDGE_PATH) == "off"
 
 
-def test_connect_logs_in_via_keychain(patched: FakeSahClient, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_connect_logs_in_via_keychain(
+    patched: FakeSahClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
     p = _connected(monkeypatch, patched)
     assert patched.logged_in is True
     # provider should be usable post-connect
@@ -465,9 +465,7 @@ class _ReplyClient(FakeSahClient):
         super().__init__(values)
         self._reply = reply
 
-    async def set_value_by_xpath(
-        self, xpath: str, value: str, options: dict | None = None
-    ) -> dict:
+    async def set_value_by_xpath(self, xpath: str, value: str, options: dict | None = None) -> dict:
         self._assert_same_loop()
         self.set_calls.append((xpath, value))
         return self._reply

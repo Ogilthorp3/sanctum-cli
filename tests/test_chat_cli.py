@@ -38,9 +38,7 @@ class _FakeProvider(Provider):
         return Decimal(0)
 
 
-def test_chat_streams_to_stdout(
-    full_instance_yaml: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_chat_streams_to_stdout(full_instance_yaml: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SANCTUM_INSTANCE_FILE", str(full_instance_yaml))
     fake = _FakeProvider(["Hello, ", "world."])
     with patch("sanctum_cli.commands.chat.make_provider", return_value=fake) as mp:

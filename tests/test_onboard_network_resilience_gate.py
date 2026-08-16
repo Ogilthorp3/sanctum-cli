@@ -128,9 +128,7 @@ def test_gate_skipped_under_yes_no_probe(monkeypatch: pytest.MonkeyPatch) -> Non
 
 def test_unverified_posture_configures_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
     """A posture we cannot read (UNVERIFIED) → fail-closed, no flip, no install, False."""
-    monkeypatch.setattr(
-        heal, "probe_posture", lambda *a, **k: _posture(iface="", config_method="")
-    )
+    monkeypatch.setattr(heal, "probe_posture", lambda *a, **k: _posture(iface="", config_method=""))
     flipped: list[int] = []
     installed: list[int] = []
     monkeypatch.setattr(onboard, "_flip_to_dhcp", lambda: flipped.append(1))

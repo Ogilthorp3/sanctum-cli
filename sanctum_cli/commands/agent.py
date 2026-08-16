@@ -67,7 +67,9 @@ def _launchctl_list() -> list[AgentRow]:
         if not label.startswith(SANCTUM_PREFIX):
             continue
         rows.append(
-            AgentRow(label=label, pid=pid, last_exit=last_exit, status=_compute_status(pid, last_exit))
+            AgentRow(
+                label=label, pid=pid, last_exit=last_exit, status=_compute_status(pid, last_exit)
+            )
         )
     rows.sort(key=lambda r: r.label)
     return rows
@@ -143,7 +145,9 @@ def agent_list(json_output: bool = False) -> None:
     if not rows:
         console.print("[dim]no com.sanctum.* agents loaded[/]")
         return
-    t = Table(title=f"com.sanctum.* LaunchAgents ({len(rows)})", show_header=True, header_style="bold")
+    t = Table(
+        title=f"com.sanctum.* LaunchAgents ({len(rows)})", show_header=True, header_style="bold"
+    )
     t.add_column("label")
     t.add_column("pid", justify="right")
     t.add_column("last exit", justify="right")
@@ -184,7 +188,9 @@ def _run_launchctl(args: list[str]) -> None:
         check=False,
     )
     if proc.returncode != 0:
-        msg = f"launchctl {' '.join(args)} failed (rc={proc.returncode}): {proc.stderr.strip()[:160]}"
+        msg = (
+            f"launchctl {' '.join(args)} failed (rc={proc.returncode}): {proc.stderr.strip()[:160]}"
+        )
         raise LocalError(msg)
 
 

@@ -50,7 +50,9 @@ BRIDGE_MODE_PATH = "Device/Services/BellNetworkCfg/SetBridgeMode"
 # Bell's PPPoE/GPON path black-holes >1492-byte DF packets: after bridge mode the
 # downstream router's WAN MTU must be 1492 (+ MSS clamp) or HTTPS silently hangs
 # while ping still works. Surfaced in every plan so the operator sets it.
-MTU_NOTE = "After cutover, set the downstream router's WAN MTU to 1492 (+MSS clamp) — Bell's path MTU."
+MTU_NOTE = (
+    "After cutover, set the downstream router's WAN MTU to 1492 (+MSS clamp) — Bell's path MTU."
+)
 
 
 def _resolve_bridge_op(provider: DeviceProvider) -> CapabilityOp:

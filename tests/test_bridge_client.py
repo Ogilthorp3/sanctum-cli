@@ -497,9 +497,7 @@ def test_429_rate_limited_returns_provider_error_with_backoff_fix():
 @respx.mock
 def test_413_body_too_large_surfaces_byte_limit():
     respx.post("https://bridge.test/sharepoint/upload").mock(
-        return_value=httpx.Response(
-            413, json={"error": "body_too_large", "limit_bytes": 262144000}
-        )
+        return_value=httpx.Response(413, json={"error": "body_too_large", "limit_bytes": 262144000})
     )
     with httpx.Client() as http:
         c = _client_with(http)
@@ -517,9 +515,7 @@ def test_413_body_too_large_surfaces_byte_limit():
 
 @respx.mock
 def test_transport_failure_raises_network_error():
-    respx.get("https://bridge.test/_manifest").mock(
-        side_effect=httpx.ConnectError("nope")
-    )
+    respx.get("https://bridge.test/_manifest").mock(side_effect=httpx.ConnectError("nope"))
     with httpx.Client() as http:
         c = _client_with(http)
         with pytest.raises(NetworkError):
@@ -558,8 +554,9 @@ def test_encode_file_rejects_non_files(tmp_path):
 def test_from_keychain_user_error_when_entry_missing():
     from sanctum_cli import keychain as kc
 
-    with patch.object(
-        kc, "read", side_effect=kc.KeychainEntryMissingError("missing")
-    ), pytest.raises(UserError) as exc:
+    with (
+        patch.object(kc, "read", side_effect=kc.KeychainEntryMissingError("missing")),
+        pytest.raises(UserError) as exc,
+    ):
         BridgeCreds.from_keychain()
     assert "Keychain" in exc.value.message

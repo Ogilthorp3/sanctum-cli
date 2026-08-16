@@ -42,7 +42,12 @@ def test_subcommand_implied(base_cfg: CliConfig) -> None:
 
 def test_config_rule_matches_image() -> None:
     cfg = CliConfig.model_validate(
-        {"routing": {"rules": [{"when": {"has_image": True}, "then": "gemini"}], "fallback": "claude"}}
+        {
+            "routing": {
+                "rules": [{"when": {"has_image": True}, "then": "gemini"}],
+                "fallback": "claude",
+            }
+        }
     )
     d = route(Intent(), [Attachment(kind="image")], Flags(), cfg)
     assert d.provider == "gemini"
@@ -74,7 +79,12 @@ def test_offline_routes_to_mlx_local_when_available(base_cfg: CliConfig) -> None
 
 def test_unknown_when_key_is_a_no_match() -> None:
     cfg = CliConfig.model_validate(
-        {"routing": {"rules": [{"when": {"unsupported_key": True}, "then": "gemini"}], "fallback": "claude"}}
+        {
+            "routing": {
+                "rules": [{"when": {"unsupported_key": True}, "then": "gemini"}],
+                "fallback": "claude",
+            }
+        }
     )
     d = route(Intent(), [], Flags(), cfg)
     assert d.provider == "claude"
@@ -98,7 +108,12 @@ def test_fallback_is_terminal(base_cfg: CliConfig) -> None:
 def test_explicit_flag_always_wins(flag: str, has_image: bool, offline: bool) -> None:
     """No matter what config or attachments say, the CLI flag has priority."""
     cfg = CliConfig.model_validate(
-        {"routing": {"rules": [{"when": {"has_image": True}, "then": "gemini"}], "fallback": "mlx_local"}}
+        {
+            "routing": {
+                "rules": [{"when": {"has_image": True}, "then": "gemini"}],
+                "fallback": "mlx_local",
+            }
+        }
     )
     attachments = [Attachment(kind="image")] if has_image else []
     d = route(
@@ -115,7 +130,12 @@ def test_explicit_flag_always_wins(flag: str, has_image: bool, offline: bool) ->
 def test_route_returns_valid_provider_name(rule_then: str) -> None:
     """Whatever path is taken, the result is one of the known providers."""
     cfg = CliConfig.model_validate(
-        {"routing": {"rules": [{"when": {"has_image": True}, "then": rule_then}], "fallback": "claude"}}
+        {
+            "routing": {
+                "rules": [{"when": {"has_image": True}, "then": rule_then}],
+                "fallback": "claude",
+            }
+        }
     )
     d = route(Intent(), [Attachment(kind="image")], Flags(), cfg)
     assert d.provider in {"claude", "gemini", "mlx_local"}

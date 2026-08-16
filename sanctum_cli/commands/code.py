@@ -11,7 +11,9 @@ from sanctum_cli.commands import chat as chat_cmd
 
 
 def code_command(
-    prompt: Annotated[str | None, typer.Argument(help="Prompt text. Omit to read from stdin.")] = None,
+    prompt: Annotated[
+        str | None, typer.Argument(help="Prompt text. Omit to read from stdin.")
+    ] = None,
     file: Annotated[
         Path | None,
         typer.Option("--file", "-f", help="Read prompt from a file."),

@@ -21,25 +21,25 @@ from rich.console import Console
 console = Console()
 
 LOG_MAP: dict[str, list[Path]] = {
-    "r2d2":             [Path.home() / ".sanctum/logs/r2d2-audit.jsonl"],
-    "kitchen-loop":     [Path.home() / ".sanctum/logs/kitchen-loop.log"],
-    "proxyd":           [Path.home() / ".openclaw/logs/proxyd.log"],
-    "yoda":             [Path.home() / ".openclaw/logs/sanctum-mlx.log"],
-    "coder":            [Path.home() / ".openclaw/logs/sanctum-mlx-coder.log"],
-    "cathedral":        [
+    "r2d2": [Path.home() / ".sanctum/logs/r2d2-audit.jsonl"],
+    "kitchen-loop": [Path.home() / ".sanctum/logs/kitchen-loop.log"],
+    "proxyd": [Path.home() / ".openclaw/logs/proxyd.log"],
+    "yoda": [Path.home() / ".openclaw/logs/sanctum-mlx.log"],
+    "coder": [Path.home() / ".openclaw/logs/sanctum-mlx-coder.log"],
+    "cathedral": [
         Path.home() / ".openclaw/logs/sanctum-mlx.log",
         Path.home() / ".openclaw/logs/sanctum-mlx-coder.log",
     ],
-    "bridge":           [Path.home() / ".openclaw/logs/sanctum-bridge.log"],
-    "force-flow":       [Path.home() / ".openclaw/logs/force-flow.log"],
-    "watchdog":         [Path.home() / ".openclaw/logs/watchdog-rust.log"],
-    "agent-trace":      [Path.home() / ".sanctum/logs/agent-trace.log"],
-    "ram-sentinel":     [Path.home() / ".sanctum/logs/ram-sentinel.log"],
-    "launchd-health":   [Path.home() / ".sanctum/logs/launchd-health.log"],
-    "signal":           [Path.home() / ".sanctum/logs/signal-health.log"],
-    "backup":           [Path.home() / ".sanctum/logs/backup.log"],
-    "self-test":        [Path.home() / ".sanctum/logs/self-test.log"],
-    "log-rotate":       [Path.home() / ".sanctum/logs/log-rotate.log"],
+    "bridge": [Path.home() / ".openclaw/logs/sanctum-bridge.log"],
+    "force-flow": [Path.home() / ".openclaw/logs/force-flow.log"],
+    "watchdog": [Path.home() / ".openclaw/logs/watchdog-rust.log"],
+    "agent-trace": [Path.home() / ".sanctum/logs/agent-trace.log"],
+    "ram-sentinel": [Path.home() / ".sanctum/logs/ram-sentinel.log"],
+    "launchd-health": [Path.home() / ".sanctum/logs/launchd-health.log"],
+    "signal": [Path.home() / ".sanctum/logs/signal-health.log"],
+    "backup": [Path.home() / ".sanctum/logs/backup.log"],
+    "self-test": [Path.home() / ".sanctum/logs/self-test.log"],
+    "log-rotate": [Path.home() / ".sanctum/logs/log-rotate.log"],
 }
 
 
@@ -49,13 +49,16 @@ def logs_command(
         typer.Argument(help="Service name. `sanctum logs --list` to see all known services."),
     ],
     follow: Annotated[
-        bool, typer.Option("--follow/--once", "-f", help="Stream (default) or one-shot snapshot."),
+        bool,
+        typer.Option("--follow/--once", "-f", help="Stream (default) or one-shot snapshot."),
     ] = True,
     lines: Annotated[
-        int, typer.Option("--lines", "-n", help="How many lines of history to show first."),
+        int,
+        typer.Option("--lines", "-n", help="How many lines of history to show first."),
     ] = 50,
     list_services: Annotated[
-        bool, typer.Option("--list", help="List known services + their log file paths."),
+        bool,
+        typer.Option("--list", help="List known services + their log file paths."),
     ] = False,
 ) -> None:
     if list_services or service == "list":

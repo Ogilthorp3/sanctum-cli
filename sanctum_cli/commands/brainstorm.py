@@ -1,18 +1,22 @@
 """``sanctum brainstorm "<topic>"`` — convene the heterogeneous Jedi Council.
 
 Fans a topic out to each council seat IN PARALLEL and prints every Jedi's take,
-so the operator can pressure-test a plan against five DIFFERENT model families at
-once. Per the neurodiversity doctrine, a single model in five robes is not a
+so the operator can pressure-test a plan against distinct model families at
+once. Per the neurodiversity doctrine, a single model in seven robes is not a
 council — so this command treats **model family** as a first-class value and
 makes any collapse toward homogeneity *impossible to miss*:
 
   - Each seat is tagged with its resolved family; diversity is counted in
-    FAMILIES, never seats (5 seats all answering as Qwen = 1 family = homogenized).
+    FAMILIES, never seats (7 seats all answering as Qwen = 1 family = homogenized).
   - A fallback / degradation / absence can never masquerade as a healthy voice:
     degraded seats render with a loud badge, absent seats in red with the verbatim
     error, and a council-summary footer states families AND seat-liveness.
   - Losing any DESIGNED family (e.g. Gemini dies) always surfaces a notice, even
     if the family floor is still met.
+
+Roster (aligned with OpenClaw agents + proxyd):
+  Yoda=max-thinking (Fable), Windu=spacial (Gemini), Qui-Gon=code (Devstral),
+  Mundi=finance (Grok), Cilghal=heretic (27B :6669), Jocasta+Mothma=brain (Opus 5).
 
 Seats route through the house smart-router *proxyd* (``:4040``), which owns auth
 and per-seat backend routing. A seat whose model fails or returns empty degrades
@@ -63,11 +67,23 @@ FALLBACK_MODEL = os.environ.get("COUNCIL_FALLBACK_MODEL", "council-mlx")
 # ─── Model-family resolution (neurodiversity is computed on FAMILY, not strings) ───
 _FAMILY_BY_MODEL: dict[str, str] = {
     "council-max-thinking": "claude",
+    "council-brain": "claude",
+    "council-ops": "claude",
     "council-code": "codestral",
+    "council-devstral": "codestral",
+    "council-finance": "grok",
+    "council-spacial": "gemini",
+    "council-secure": "gemini",
+    "council-heretic": "heretic",
+    "cilghal-health": "heretic",
     "council-mlx": "qwen",
+    "council-local-think": "qwen",
     "gemini-31-pro": "gemini",
     "gemini-3-pro": "gemini",
     "gemini-25-pro": "gemini",
+    "grok-best": "grok",
+    "grok-oauth": "grok",
+    "grok-4.5": "grok",
 }
 # Env override so a new backend can be tagged without a release: "model=family,..."
 for _pair in os.environ.get("COUNCIL_FAMILY_MAP", "").split(","):
@@ -77,10 +93,12 @@ for _pair in os.environ.get("COUNCIL_FAMILY_MAP", "").split(","):
 
 # Ordered substring patterns (first hit wins; specific families before generic tokens).
 _FAMILY_PATTERNS: tuple[tuple[tuple[str, ...], str], ...] = (
-    (("council-max-thinking", "max-thinking", "opus", "sonnet", "haiku", "claude"), "claude"),
-    (("gemini",), "gemini"),
-    (("codestral", "council-code", "mistral"), "codestral"),
-    (("council-mlx", "mlx", "qwen"), "qwen"),
+    (("council-max-thinking", "council-brain", "council-ops", "max-thinking", "opus", "sonnet", "haiku", "claude"), "claude"),
+    (("council-heretic", "cilghal-health", "heretic"), "heretic"),
+    (("gemini", "council-spacial", "council-secure"), "gemini"),
+    (("codestral", "council-code", "council-devstral", "devstral", "mistral"), "codestral"),
+    (("council-finance", "grok-best", "grok-oauth", "grok"), "grok"),
+    (("council-mlx", "council-local-think", "mlx", "qwen"), "qwen"),
 )
 
 
@@ -110,7 +128,10 @@ FALLBACK_FAMILY = _family_of(FALLBACK_MODEL)
 MIN_FAMILIES = int(os.environ.get("SANCTUM_COUNCIL_MIN_FAMILIES", "3"))
 
 
-# ─── Seats — each a DIFFERENT family (neurodiversity doctrine) ───
+# ─── Seats — neurodiversity doctrine (aligned with OpenClaw agents) ───
+# Yoda=Fable-max, Windu=Gemini, Qui-Gon=Devstral, Mundi=Grok, Cilghal=Heretic,
+# Jocasta+Mothma=Opus-medium. Claude appears on multiple seats (different effort
+# tiers) — family accounting dedups; the footer flags designed redundancy.
 SEATS: dict[str, dict[str, str]] = {
     "Yoda": {
         "model": os.environ.get("YODA_MODEL", "council-max-thinking"),
@@ -118,6 +139,13 @@ SEATS: dict[str, dict[str, str]] = {
             "You are Yoda, chief of the Council. Step all the way back and judge the WHOLE "
             "approach: is this the right path, what is being missed, what is the wisest move? "
             "Strategy over detail."
+        ),
+    },
+    "Windu": {
+        "model": os.environ.get("WINDU_MODEL", "council-spacial"),
+        "lens": (
+            "You are Windu, security and correctness, with fresh eyes. Name the non-obvious "
+            "failure mode, the wrong assumption, the threat. Be blunt and direct."
         ),
     },
     "Qui-Gon": {
@@ -128,26 +156,36 @@ SEATS: dict[str, dict[str, str]] = {
             "code-level lever being overlooked."
         ),
     },
-    "Cilghal": {
-        "model": os.environ.get("CILGHAL_MODEL", "council-mlx"),
-        "lens": (
-            "You are Cilghal, architect and healer. Focus on system invariants, correctness, and "
-            "long-term health. What breaks the contracts or the design over time?"
-        ),
-    },
-    "Windu": {
-        "model": os.environ.get("WINDU_MODEL", "gemini-31-pro"),
-        "lens": (
-            "You are Windu, security and correctness, with fresh eyes. Name the non-obvious "
-            "failure mode, the wrong assumption, the threat. Be blunt and direct."
-        ),
-    },
     "Mundi": {
-        "model": os.environ.get("MUNDI_MODEL", "council-max-thinking"),
+        "model": os.environ.get("MUNDI_MODEL", "council-finance"),
         "lens": (
             "You are Ki-Adi-Mundi, the data and analysis seat. Challenge the premise with "
             "evidence: what does the data actually say, what is being measured wrong, where is "
-            "the proof? Numbers over vibes."
+            "the proof? Numbers over vibes. Costs, capacity, ROI."
+        ),
+    },
+    "Cilghal": {
+        "model": os.environ.get("CILGHAL_MODEL", "council-heretic"),
+        "lens": (
+            "You are Cilghal, architect and healer. Focus on system invariants, correctness, and "
+            "long-term health — of the haus and of Bert. What breaks the contracts or the design "
+            "over time? Symptoms, evidence, honest uncertainty."
+        ),
+    },
+    "Jocasta": {
+        "model": os.environ.get("JOCASTA_MODEL", "council-brain"),
+        "lens": (
+            "You are Jocasta Nu, keeper of records. What is written and recorded — iMessage, "
+            "Calendar, Contacts, Mail, CRM, tech-lookout. Cite sources when you can; say plainly "
+            "when a record is missing rather than guess."
+        ),
+    },
+    "Mothma": {
+        "model": os.environ.get("MOTHMA_MODEL", "council-brain"),
+        "lens": (
+            "You are Mon Mothma, chief of operations. Deployments, cutovers, runbooks, drift, "
+            "backups, secret rotation, upgrades. Is it deployed, is it stable, is it backed up, "
+            "what breaks at 3 a.m.?"
         ),
     },
 }
@@ -155,7 +193,13 @@ SEATS: dict[str, dict[str, str]] = {
 # Canonical DESIGNED family per seat — names a lost voice ("gemini voice lost") even
 # when the seat's model is env-overridden to an unrecognized string.
 _CANONICAL_SEAT_FAMILY: dict[str, str] = {
-    "Yoda": "claude", "Qui-Gon": "codestral", "Cilghal": "qwen", "Windu": "gemini", "Mundi": "claude",
+    "Yoda": "claude",
+    "Windu": "gemini",
+    "Qui-Gon": "codestral",
+    "Mundi": "grok",
+    "Cilghal": "heretic",
+    "Jocasta": "claude",
+    "Mothma": "claude",
 }
 # Derive each seat's (possibly env-overridden) family from its RESOLVED model.
 for _name, _seat in SEATS.items():
@@ -172,7 +216,14 @@ _TRANSIENT_STATUS = frozenset({429, 503})
 RETRY_BACKOFF_CAP_S = float(os.environ.get("COUNCIL_RETRY_BACKOFF_CAP_S", "5"))
 # Per-family per-call timeouts: opus-via-Max-bridge legitimately thinks ~120s; local
 # seats should fail fast. The operator --timeout is a CEILING for non-claude families.
-SEAT_TIMEOUTS: dict[str, float] = {"claude": 150.0, "gemini": 60.0, "codestral": 45.0, "qwen": 60.0}
+SEAT_TIMEOUTS: dict[str, float] = {
+    "claude": 150.0,
+    "gemini": 60.0,
+    "codestral": 200.0,  # Devstral cold-prefill can exceed 3 min after :3301 restart
+    "qwen": 60.0,
+    "grok": 150.0,
+    "heretic": 90.0,
+}
 SEAT_TIMEOUT_FLOOR = 30.0
 
 SHARED_INSTRUCTION = (
@@ -555,7 +606,7 @@ def brainstorm_command(
     topic: Annotated[str | None, typer.Argument(help="Topic to brainstorm. Omit to read stdin.")] = None,
     file: Annotated[Path | None, typer.Option("--file", "-f", help="Read the topic from a file.")] = None,
     seats: Annotated[
-        str | None, typer.Option("--seats", "-s", help="Comma list to subset seats (default: all five).")
+        str | None, typer.Option("--seats", "-s", help="Comma list to subset seats (default: all seven).")
     ] = None,
     url: Annotated[str, typer.Option("--url", help="proxyd base URL.", envvar="SANCTUM_COUNCIL_URL")] = DEFAULT_URL,
     max_tokens: Annotated[int, typer.Option("--max-tokens", "-t", help="Per-seat response cap.", min=1)] = 900,

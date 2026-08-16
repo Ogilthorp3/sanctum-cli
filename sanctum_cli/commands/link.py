@@ -257,9 +257,7 @@ def _render_mac_audit(probe: link.WifiProbe, audit: link.MacAudit) -> None:
             "[yellow]⚠[/] MAC stability: [yellow]UNVERIFIED[/] — could not read the "
             f"Wi-Fi MAC on [bold]{escape(probe.iface)}[/]"
         )
-        console.print(
-            "  [dim]Is this node on Wi-Fi? Connect to the network, then re-run.[/]"
-        )
+        console.print("  [dim]Is this node on Wi-Fi? Connect to the network, then re-run.[/]")
         return
     if audit.randomized:
         console.print(
@@ -304,8 +302,7 @@ def _write_profile(probe: link.WifiProbe, profile_out: Path, *, enc: str = "WPA3
         raise typer.Exit(code=int(err.exit_code))
     if not probe.hardware_mac:
         err = LocalError(
-            "cannot render a MAC-stability profile: could not read this node's "
-            "hardware MAC.",
+            "cannot render a MAC-stability profile: could not read this node's hardware MAC.",
             fix="confirm the node has a Wi-Fi interface, then re-run.",
         )
         _report(err)
@@ -326,9 +323,7 @@ def _write_profile(probe: link.WifiProbe, profile_out: Path, *, enc: str = "WPA3
         _report(err)
         raise typer.Exit(code=int(err.exit_code)) from exc
 
-    console.print(
-        f"[green]✓[/] wrote stability profile {escape(str(profile_out))} [dim](0644)[/]"
-    )
+    console.print(f"[green]✓[/] wrote stability profile {escape(str(profile_out))} [dim](0644)[/]")
     console.print(
         f"  [dim]scoped to SSID[/] [bold]{escape(probe.ssid)}[/] "
         f"[dim]· pins MAC[/] [bold]{escape(probe.hardware_mac)}[/]"
@@ -348,17 +343,14 @@ def _write_profile(probe: link.WifiProbe, profile_out: Path, *, enc: str = "WPA3
         "[bold]Wi-Fi MAC Stability[/]"
     )
     console.print(
-        "  3. Confirm Wi-Fi ▸ [your network] ▸ Details… shows "
-        "[bold]Private Wi-Fi Address: Off[/]."
+        "  3. Confirm Wi-Fi ▸ [your network] ▸ Details… shows [bold]Private Wi-Fi Address: Off[/]."
     )
     console.print(
         "[yellow]⚠ on a sole-link node:[/] this is a managed Wi-Fi payload — macOS "
         "may re-prompt for the password and briefly re-associate on approval. Do it "
         "[bold]attended[/] and confirm the connection survives before trusting it."
     )
-    console.print(
-        "[dim]The tool generates + guides + verifies; it never toggles the radio.[/]"
-    )
+    console.print("[dim]The tool generates + guides + verifies; it never toggles the radio.[/]")
 
 
 def _node_signals() -> link.NodeSignals:
@@ -523,8 +515,7 @@ def link_optimize(
     console.print("[bold]Wi-Fi link hardening — identity + MAC stability[/]")
     _render_identity(diag)
     console.print(
-        f"[bold]NODE CLASS:[/] [bold]{escape(node.klass)}[/] "
-        f"[dim]({escape(node.reason)})[/]"
+        f"[bold]NODE CLASS:[/] [bold]{escape(node.klass)}[/] [dim]({escape(node.reason)})[/]"
     )
 
     # Legacy MAC-stability audit is preserved as the headline hardening check

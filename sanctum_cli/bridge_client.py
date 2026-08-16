@@ -94,9 +94,7 @@ class BridgeClient:
     # ---------------------------------------------------------------- helpers
     def _client(self) -> httpx.Client:
         if self._http is None:
-            self._http = httpx.Client(
-                timeout=self._timeout, headers={"User-Agent": USER_AGENT}
-            )
+            self._http = httpx.Client(timeout=self._timeout, headers={"User-Agent": USER_AGENT})
         return self._http
 
     def close(self) -> None:
@@ -110,9 +108,7 @@ class BridgeClient:
     def __exit__(self, *_: object) -> None:
         self.close()
 
-    def _sign(
-        self, *, method: str, path: str, body: bytes
-    ) -> dict[str, str]:
+    def _sign(self, *, method: str, path: str, body: bytes) -> dict[str, str]:
         ts = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         nonce = str(uuid.uuid4())
         body_hash = hashlib.sha256(body).hexdigest()
@@ -133,9 +129,7 @@ class BridgeClient:
             "X-Sanctum-Signature": sig,
         }
 
-    def _request(
-        self, method: str, path: str, *, body: bytes = b""
-    ) -> Any:
+    def _request(self, method: str, path: str, *, body: bytes = b"") -> Any:
         headers = self._sign(method=method, path=path, body=body)
         if body:
             headers["Content-Type"] = "application/json"
@@ -178,9 +172,7 @@ class BridgeClient:
         body = json.dumps({"path": path}, separators=(",", ":")).encode()
         return cast("dict[str, Any]", self._request("POST", "/sharepoint/children", body=body))
 
-    def download(
-        self, path: str, *, extract_text: bool = False
-    ) -> dict[str, Any]:
+    def download(self, path: str, *, extract_text: bool = False) -> dict[str, Any]:
         """Download a SharePoint file (read). With ``extract_text`` the bridge
         also returns best-effort extracted plain text for .docx/.pdf/.xlsx."""
         payload = {"path": path, "extract_text": extract_text}
@@ -219,9 +211,7 @@ class BridgeClient:
         body = json.dumps(payload, separators=(",", ":")).encode()
         return cast("dict[str, Any]", self._request("POST", "/sharepoint/delete", body=body))
 
-    def move(
-        self, path: str, dest_folder: str, *, new_name: str | None = None
-    ) -> dict[str, Any]:
+    def move(self, path: str, dest_folder: str, *, new_name: str | None = None) -> dict[str, Any]:
         """Move a SharePoint item into ``dest_folder`` (write).
 
         The bridge gates BOTH the source ``path`` AND the ``dest_folder`` on the

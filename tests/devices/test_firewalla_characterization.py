@@ -70,15 +70,11 @@ class _Recorder:
         self.timeout = request.extensions.get("timeout", {}).get("connect")
         if self.status is None:
             raise httpx.ConnectError("simulated unreachable")
-        content = (
-            _json.dumps(self.body).encode() if self.body is not None else b"not json"
-        )
+        content = _json.dumps(self.body).encode() if self.body is not None else b"not json"
         return httpx.Response(self.status, request=request, content=content)
 
 
-def _install(
-    monkeypatch: pytest.MonkeyPatch, *, status: int | None, body: object
-) -> _Recorder:
+def _install(monkeypatch: pytest.MonkeyPatch, *, status: int | None, body: object) -> _Recorder:
     rec = _Recorder(status=status, body=body)
     # Drive the REAL httpx path; intercept only the socket via MockTransport.
     monkeypatch.setattr(
@@ -91,9 +87,7 @@ def _install(
 
 
 class TestFetchBridgeJson:
-    def test_default_url_and_bearer_header(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_default_url_and_bearer_header(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(st._BRIDGE_URL_ENV, raising=False)
         rec = _install(monkeypatch, status=200, body={"ok": True})
         out = st._fetch_bridge_json("/info")
@@ -113,28 +107,20 @@ class TestFetchBridgeJson:
         _install(monkeypatch, status=503, body={"error": "down"})
         assert st._fetch_bridge_json("/info") is None
 
-    def test_auth_rejected_returns_none(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_auth_rejected_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _install(monkeypatch, status=401, body={"error": "unauthorized"})
         assert st._fetch_bridge_json("/info") is None
 
-    def test_non_json_body_returns_none(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_non_json_body_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _install(monkeypatch, status=200, body=None)  # 200 but body is "not json"
         assert st._fetch_bridge_json("/info") is None
 
-    def test_non_dict_json_returns_none(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_non_dict_json_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # A JSON list is valid JSON but not a mapping — current code returns None.
         _install(monkeypatch, status=200, body=[1, 2, 3])
         assert st._fetch_bridge_json("/hosts") is None
 
-    def test_transport_error_returns_none(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_transport_error_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _install(monkeypatch, status=None, body=None)  # ConnectError
         assert st._fetch_bridge_json("/info") is None
 
@@ -278,9 +264,7 @@ class TestCompatCommandMonitoringLoop:
         captured: dict[str, object] = {}
         real_assess = st.assess_compat
 
-        def spy_assess(
-            info: dict, policy_count: int | None, monitored: object
-        ) -> list:
+        def spy_assess(info: dict, policy_count: int | None, monitored: object) -> list:
             captured["monitored"] = monitored
             return real_assess(info, policy_count, monitored)  # type: ignore[arg-type]
 
@@ -325,9 +309,7 @@ class TestCompatCommandMonitoringLoop:
         captured: dict[str, object] = {}
         real_assess = st.assess_compat
 
-        def spy_assess(
-            info: dict, policy_count: int | None, monitored: object
-        ) -> list:
+        def spy_assess(info: dict, policy_count: int | None, monitored: object) -> list:
             captured["monitored"] = monitored
             return real_assess(info, policy_count, monitored)  # type: ignore[arg-type]
 

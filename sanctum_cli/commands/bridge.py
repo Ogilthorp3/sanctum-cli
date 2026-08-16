@@ -47,6 +47,7 @@ err_console = Console(stderr=True)
 # Helpers
 # --------------------------------------------------------------------------- #
 
+
 def _client(module: str = "sharepoint") -> BridgeClient:
     return BridgeClient(
         BridgeCreds.from_keychain(),
@@ -77,6 +78,7 @@ def _parse_kv_list(items: list[str] | None) -> dict[str, str]:
 # Command implementations
 # --------------------------------------------------------------------------- #
 
+
 def health_command(json_output: bool = False) -> None:
     with _client() as c:
         data = c.health()
@@ -85,8 +87,7 @@ def health_command(json_output: bool = False) -> None:
         return
     modules = ", ".join(data.get("modules", [])) or "(none)"
     console.print(
-        f"[green]ok[/green]  v{data.get('version', '?')}  modules: {modules}  "
-        f"@ {c.base_url}"
+        f"[green]ok[/green]  v{data.get('version', '?')}  modules: {modules}  @ {c.base_url}"
     )
 
 
@@ -235,7 +236,9 @@ def download_command(
     raw = base64.b64decode(data["content_b64"])
     if out is not None:
         out.write_bytes(raw)
-        console.print(f"[green]downloaded[/green]  {path} → {out} ({data.get('size', len(raw))} bytes)")
+        console.print(
+            f"[green]downloaded[/green]  {path} → {out} ({data.get('size', len(raw))} bytes)"
+        )
     else:
         console.print(
             f"[green]downloaded[/green]  {path}  "
@@ -469,9 +472,12 @@ def _kc_any(service: str) -> bool:
     """``keychain.exists`` accepts an account; we don't always know it. Fall
     back to a service-only lookup via the security CLI."""
     import subprocess
+
+    from sanctum_cli.keychain import SECURITY_BIN
+
     try:
         r = subprocess.run(
-            ["/usr/bin/security", "find-generic-password", "-s", service, "-w"],
+            [SECURITY_BIN, "find-generic-password", "-s", service, "-w"],
             capture_output=True,
             timeout=3,
             check=False,
@@ -589,8 +595,7 @@ def doctor_command(json_output: bool = False) -> None:
             data={
                 "base_url": base,
                 "checks": [
-                    {"name": c_.name, "status": c_.status, "detail": c_.detail}
-                    for c_ in checks
+                    {"name": c_.name, "status": c_.status, "detail": c_.detail} for c_ in checks
                 ],
                 "overall": _overall(checks),
             }

@@ -74,7 +74,9 @@ def test_pairing_empty_token_is_unpaired(monkeypatch: pytest.MonkeyPatch) -> Non
 
 def test_set_firewalla_bridge_writes_only_on_paired(tmp_path: Path) -> None:
     inst = tmp_path / "instance.yaml"
-    inst.write_text("instance:\n  name: X\n  slug: x\nservices:\n  proxyd:\n    port: 4040\n", encoding="utf-8")
+    inst.write_text(
+        "instance:\n  name: X\n  slug: x\nservices:\n  proxyd:\n    port: 4040\n", encoding="utf-8"
+    )
     secrets = tmp_path / "fw-token"
     onboard.set_firewalla_bridge(
         path=inst,

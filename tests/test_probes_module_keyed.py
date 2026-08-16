@@ -8,6 +8,7 @@ Part (b): a module that declares ``probes: [...]`` contributes those probes
 
 Part (c): ``run_soak`` populates ``red_probes`` from a failing module probe.
 """
+
 from __future__ import annotations
 
 import json
@@ -25,15 +26,18 @@ from sanctum_cli.soak.harness import (
 
 # ── helpers ──────────────────────────────────────────────────────────────
 
+
 def _make_manifest(name: str, probes: list[str] | None = None) -> ModuleManifest:
-    return ModuleManifest.model_validate({
-        "module": name,
-        "version": "1.0.0",
-        "description": name,
-        "probes": probes or [],
-        "docs": "https://x.invalid",
-        "demo": "true",
-    })
+    return ModuleManifest.model_validate(
+        {
+            "module": name,
+            "version": "1.0.0",
+            "description": name,
+            "probes": probes or [],
+            "docs": "https://x.invalid",
+            "demo": "true",
+        }
+    )
 
 
 def _make_registry(*modules: tuple[str, list[str]]) -> ModuleRegistry:
@@ -43,6 +47,7 @@ def _make_registry(*modules: tuple[str, list[str]]) -> ModuleRegistry:
 
 
 # ── Part (a): regression guard — existing CLI+haus probes ────────────────
+
 
 @pytest.fixture
 def cli_runner() -> CliRunner:
@@ -54,7 +59,7 @@ def all_pass_probes(monkeypatch):
     """Patch PROBES to a controlled set (same interface as test_self_test.py)."""
     fake = [
         st.Probe("alpha probe", lambda: st.ProbeResult(True, "ok")),
-        st.Probe("beta probe",  lambda: st.ProbeResult(True, "ok")),
+        st.Probe("beta probe", lambda: st.ProbeResult(True, "ok")),
         st.Probe("gamma probe", lambda: st.ProbeResult(True, "ok")),
     ]
     monkeypatch.setattr(st, "PROBES", fake)
@@ -92,13 +97,14 @@ def test_regression_json_output_shape(cli_runner, all_pass_probes):
     result = cli_runner.invoke(app, ["self-test", "--json"])
     assert result.exit_code == 0
     start = result.output.find("{")
-    payload = json.loads(result.output[start: result.output.rfind("}") + 1])
+    payload = json.loads(result.output[start : result.output.rfind("}") + 1])
     assert payload["total"] == 3
     assert payload["passed"] == 3
     assert payload["failed"] == 0
 
 
 # ── Part (b): module_probes() contributes under the module key ───────────
+
 
 def test_module_probes_returns_probes_for_module():
     """module_probes(registry) returns probes keyed by module name."""
@@ -153,6 +159,7 @@ def test_module_probes_multiple_modules():
 
 # ── Part (c): run_soak populates red_probes from a failing probe ─────────
 
+
 class _FakeManifest:
     """Minimal manifest stub for testing the soak runner."""
 
@@ -204,9 +211,7 @@ def test_run_soak_populates_red_probes_when_probe_fails(tmp_path, monkeypatch):
     data = json.loads(result_file.read_text())
     assert data["samples"], "expected at least one sample"
     sample = data["samples"][0]
-    assert "testmod.always_fail" in sample["red_probes"], (
-        "failing probe must appear in red_probes"
-    )
+    assert "testmod.always_fail" in sample["red_probes"], "failing probe must appear in red_probes"
 
 
 def test_run_soak_red_probes_empty_when_all_probes_pass(tmp_path, monkeypatch):

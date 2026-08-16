@@ -4,11 +4,10 @@ Mocks only the macOS `security` CLI with an in-memory (account, service) dict;
 openssl + tar run for real, so this proves the encrypted bundle actually
 decrypts and restores — including the restic passphrase that was missing.
 """
+
 from __future__ import annotations
 
 import subprocess
-
-import pytest
 
 from sanctum_cli.commands import keys_backup as kb
 
@@ -66,7 +65,7 @@ def test_keychain_services_names_match_the_real_write_sites():
     services = {s for (s, _a) in kb.KEYCHAIN_SERVICES}
     assert b2.KEYCHAIN_SERVICE_RESTIC in services  # sanctum-backup-key
     assert b2.KEYCHAIN_SERVICE_KEY_ID in services  # b2-account-id (not b2-application-key-id)
-    assert "google-ai-api-key" in services         # not the never-written gemini-api-key
+    assert "google-ai-api-key" in services  # not the never-written gemini-api-key
     assert "gemini-api-key" not in services
     assert "b2-application-key-id" not in services
     # The restic passphrase must be paired with its own account.

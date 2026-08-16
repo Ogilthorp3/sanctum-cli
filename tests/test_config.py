@@ -51,11 +51,7 @@ def test_invalid_yaml_raises(tmp_path: Path) -> None:
 def test_unknown_key_in_cli_block_rejected(tmp_path: Path) -> None:
     target = tmp_path / "extra.yaml"
     target.write_text(
-        "instance:\n"
-        "  name: t\n"
-        "  slug: t\n"
-        "cli:\n"
-        "  bogus_key: 1\n",
+        "instance:\n  name: t\n  slug: t\ncli:\n  bogus_key: 1\n",
         encoding="utf-8",
     )
     with pytest.raises(ConfigError) as ei:
@@ -93,8 +89,7 @@ def test_env_override_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
 def test_telemetry_path_is_expanded(tmp_path: Path) -> None:
     target = tmp_path / "tel.yaml"
     target.write_text(
-        "instance:\n  name: t\n  slug: t\ncli:\n"
-        "  telemetry:\n    path: ~/.sanctum/cli.jsonl\n",
+        "instance:\n  name: t\n  slug: t\ncli:\n  telemetry:\n    path: ~/.sanctum/cli.jsonl\n",
         encoding="utf-8",
     )
     cfg = config.load(target)

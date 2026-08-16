@@ -11,6 +11,7 @@ operates on the real ``backup`` manifest or any real ``r2-*`` / live
 pointed at by ``SANCTUM_MODULES_DIR`` (the filesystem layer is safe to exercise
 for real).
 """
+
 from __future__ import annotations
 
 import os
@@ -172,9 +173,7 @@ def test_install_resolves_known_module_by_name(tmp_path: Path) -> None:
     assert (modules_dir / "backup.module.yaml").is_file()
     assert result.minted == []
     # the three R2 creds are operator-supplied
-    assert {"r2-account-id", "r2-access-key-id", "r2-secret-access-key"} <= set(
-        result.must_supply
-    )
+    assert {"r2-account-id", "r2-access-key-id", "r2-secret-access-key"} <= set(result.must_supply)
 
 
 # ── uninstall ────────────────────────────────────────────────────────

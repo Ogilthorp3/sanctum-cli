@@ -31,9 +31,7 @@ def test_firewalla_key_path_honors_instance_yaml(
     assert _firewalla_key_path() == custom
 
 
-def test_firewalla_key_path_expands_tilde(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_firewalla_key_path_expands_tilde(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A configured key path with ~ is expanded to the user's home."""
     inst = tmp_path / "instance.yaml"
     inst.write_text("firewalla:\n  ssh_key: ~/.ssh/custom_fw\n", encoding="utf-8")
@@ -217,9 +215,7 @@ class _HealFakeRunner:
     so a test can assert whether a mutating / reverting command was issued.
     """
 
-    def __init__(
-        self, before: dict[str, str], after: dict[str, str] | None = None
-    ) -> None:
+    def __init__(self, before: dict[str, str], after: dict[str, str] | None = None) -> None:
         self._before = before
         self._after = after if after is not None else before
         self._table = before
@@ -288,9 +284,7 @@ def test_net_heal_dry_run_reports_static_drift_no_mutation() -> None:
     assert "STATIC_DRIFT" in out
     assert "flip_dhcp" in out
     # Dry-run must never mutate: no setdhcp / no ipconfig-set command was issued.
-    assert not any(
-        "-setdhcp" in " ".join(c) or "set en1 DHCP" in " ".join(c) for c in fake.calls
-    )
+    assert not any("-setdhcp" in " ".join(c) or "set en1 DHCP" in " ".join(c) for c in fake.calls)
 
 
 def test_net_heal_dry_run_shows_spine_state() -> None:
@@ -315,9 +309,7 @@ def test_net_heal_apply_non_root_prints_sudo_hint_no_mutation() -> None:
     assert result.exit_code == 0, result.stdout
     assert "sudo" in result.stdout.lower()
     # Non-root: still no mutation.
-    assert not any(
-        "-setdhcp" in " ".join(c) or "set en1 DHCP" in " ".join(c) for c in fake.calls
-    )
+    assert not any("-setdhcp" in " ".join(c) or "set en1 DHCP" in " ".join(c) for c in fake.calls)
 
 
 def test_net_heal_apply_heals_and_verifies() -> None:
@@ -461,9 +453,7 @@ def test_wrapper_success_detector_matches_healed_but_not_revert_output() -> None
 
     def grep_matches(text: str) -> bool:
         # The real `grep -q '<token>'` the wrapper runs (RC 0 == matched).
-        proc = subprocess.run(
-            ["grep", "-q", pattern], input=text, text=True, check=False
-        )
+        proc = subprocess.run(["grep", "-q", pattern], input=text, text=True, check=False)
         return proc.returncode == 0
 
     healed_out = cli_apply_output(_HealFakeRunner(_STATIC_DRIFT_BEFORE, _STATIC_DRIFT_AFTER))
@@ -559,9 +549,14 @@ def _stable_identity_diag():
     from sanctum_cli.net.link import IdentityDiagnosis, IdentityProbe
 
     probe = IdentityProbe(
-        iface="en1", ssid="Manoir", current_mac="d0:11:e5:1c:88:59",
-        hardware_mac="d0:11:e5:1c:88:59", security="WPA3", associated=True,
-        router_arp_verified=True, gateway_reachable=True,
+        iface="en1",
+        ssid="Manoir",
+        current_mac="d0:11:e5:1c:88:59",
+        hardware_mac="d0:11:e5:1c:88:59",
+        security="WPA3",
+        associated=True,
+        router_arp_verified=True,
+        gateway_reachable=True,
     )
     return IdentityDiagnosis("IDENTITY_STABLE", "on hardware MAC", "ok", probe)
 
@@ -570,9 +565,14 @@ def _quarantined_identity_diag():
     from sanctum_cli.net.link import IdentityDiagnosis, IdentityProbe
 
     probe = IdentityProbe(
-        iface="en1", ssid="Manoir", current_mac="32:a6:f4:de:54:cf",
-        hardware_mac="d0:11:e5:1c:88:59", security="WPA3", associated=True,
-        router_arp_verified=False, gateway_reachable=False,
+        iface="en1",
+        ssid="Manoir",
+        current_mac="32:a6:f4:de:54:cf",
+        hardware_mac="d0:11:e5:1c:88:59",
+        security="WPA3",
+        associated=True,
+        router_arp_verified=False,
+        gateway_reachable=False,
     )
     return IdentityDiagnosis("IDENTITY_QUARANTINED", "rotating, gw dead", "pin it", probe)
 
@@ -581,9 +581,15 @@ def _healthy_posture_diag():
     from sanctum_cli.net.heal import HealAction, PostureDiagnosis
 
     posture = heal.NetPosture(
-        iface="en1", config_method="DHCP", ip="192.168.2.20",
-        subnet="255.255.255.0", gateway="192.168.2.1", gateway_reachable=True,
-        associated=True, on_tailnet=True, tb5_up=True,
+        iface="en1",
+        config_method="DHCP",
+        ip="192.168.2.20",
+        subnet="255.255.255.0",
+        gateway="192.168.2.1",
+        gateway_reachable=True,
+        associated=True,
+        on_tailnet=True,
+        tb5_up=True,
     )
     return PostureDiagnosis(
         "HEALTHY", "healthy", "", HealAction("none", safe=True, detail="no action"), posture
@@ -594,9 +600,15 @@ def _single_nat_topology():
     from sanctum_cli.net.types import Nat, TopologyReport
 
     return TopologyReport(
-        firewalla_present=True, firewalla_wan_mac="20:6d:31:51:67:82",
-        firewalla_wan_mtu=1500, nat=Nat.SINGLE, gateway_ip="192.168.2.1",
-        isp="bell", public_ip="1.2.3.4", applicable=False, reason="optimal",
+        firewalla_present=True,
+        firewalla_wan_mac="20:6d:31:51:67:82",
+        firewalla_wan_mtu=1500,
+        nat=Nat.SINGLE,
+        gateway_ip="192.168.2.1",
+        isp="bell",
+        public_ip="1.2.3.4",
+        applicable=False,
+        reason="optimal",
     )
 
 
@@ -605,12 +617,27 @@ def _patch_all_green_status():
     from sanctum_cli.net.status import DaemonInfo, GuardianInfo, SpineInfo
 
     return [
-        patch("sanctum_cli.commands.net._status_probe_posture", return_value=_healthy_posture_diag()),
-        patch("sanctum_cli.commands.net._status_probe_spine", return_value=SpineInfo(on_tailnet=True, tb5_up=True)),
-        patch("sanctum_cli.commands.net._status_probe_daemon", return_value=DaemonInfo(loaded=True, last_result="healed")),
-        patch("sanctum_cli.commands.net._status_probe_identity", return_value=_stable_identity_diag()),
-        patch("sanctum_cli.commands.net._status_probe_topology", return_value=_single_nat_topology()),
-        patch("sanctum_cli.commands.net._status_probe_guardian", return_value=GuardianInfo(reachable=True, fresh=True, age_seconds=120)),
+        patch(
+            "sanctum_cli.commands.net._status_probe_posture", return_value=_healthy_posture_diag()
+        ),
+        patch(
+            "sanctum_cli.commands.net._status_probe_spine",
+            return_value=SpineInfo(on_tailnet=True, tb5_up=True),
+        ),
+        patch(
+            "sanctum_cli.commands.net._status_probe_daemon",
+            return_value=DaemonInfo(loaded=True, last_result="healed"),
+        ),
+        patch(
+            "sanctum_cli.commands.net._status_probe_identity", return_value=_stable_identity_diag()
+        ),
+        patch(
+            "sanctum_cli.commands.net._status_probe_topology", return_value=_single_nat_topology()
+        ),
+        patch(
+            "sanctum_cli.commands.net._status_probe_guardian",
+            return_value=GuardianInfo(reachable=True, fresh=True, age_seconds=120),
+        ),
     ]
 
 
@@ -720,8 +747,12 @@ def test_net_status_all_probes_fail_renders_all_unknown() -> None:
         raise RuntimeError("no network")
 
     seams = (
-        "_status_probe_posture", "_status_probe_spine", "_status_probe_daemon",
-        "_status_probe_identity", "_status_probe_topology", "_status_probe_guardian",
+        "_status_probe_posture",
+        "_status_probe_spine",
+        "_status_probe_daemon",
+        "_status_probe_identity",
+        "_status_probe_topology",
+        "_status_probe_guardian",
     )
     with ExitStack() as stack:
         for seam in seams:
@@ -748,7 +779,10 @@ def test_parse_daemon_heartbeat_extracts_status_and_age() -> None:
     # A fresh heartbeat 90s before "now".
     hb_time = datetime(2026, 7, 2, 12, 0, 0)
     now = datetime(2026, 7, 2, 12, 1, 30)  # +90s
-    text = "2026-07-02T11:58:00 healed spine=up rc=0\n" + f"{hb_time.strftime('%Y-%m-%dT%H:%M:%S')} healed spine=up rc=0\n"
+    text = (
+        "2026-07-02T11:58:00 healed spine=up rc=0\n"
+        + f"{hb_time.strftime('%Y-%m-%dT%H:%M:%S')} healed spine=up rc=0\n"
+    )
     last, age, fresh = _parse_daemon_heartbeat(text, now=now)
     assert last == "healed spine=up rc=0"
     assert age == 90

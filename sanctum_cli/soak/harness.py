@@ -19,6 +19,7 @@ Live signal sources (in ``run_soak``):
  - Module's ``probes`` list via the registry (future: call probe callables)
  - ``launchctl list`` exit codes for the module's declared services
 """
+
 from __future__ import annotations
 
 import contextlib
@@ -52,6 +53,7 @@ def module_probes(registry: ModuleRegistry) -> dict[str, list[Probe]]:
     from sanctum_cli.commands.self_test import (
         module_probes as _real_module_probes,
     )
+
     return _real_module_probes(registry)
 
 
@@ -125,9 +127,7 @@ def classify_soak(result: SoakResult) -> tuple[float, bool]:
     for i, sample in enumerate(samples):
         if sample.pressure_level == 4:
             # look for any later sample that shows recovery
-            recovered = any(
-                samples[j].pressure_level <= 2 for j in range(i + 1, len(samples))
-            )
+            recovered = any(samples[j].pressure_level <= 2 for j in range(i + 1, len(samples)))
             if not recovered:
                 return days, False
 
@@ -213,11 +213,7 @@ def _collect_sample(
     pressure = _read_pressure_level()
     swap_mb = _read_swap_used_mb()
     exit_codes = _launchctl_exit_codes()
-    service_nonzero = [
-        label
-        for label in service_labels
-        if exit_codes.get(label, 0) != 0
-    ]
+    service_nonzero = [label for label in service_labels if exit_codes.get(label, 0) != 0]
 
     # Run the module's declared probes and collect any that went red.
     red: list[str] = []
@@ -300,9 +296,7 @@ def run_soak(
         once:         Capture exactly one sample and exit immediately.
     """
     manifest = registry.get(module)
-    result_path = Path(
-        manifest.soak.result_path.replace("{module}", module)
-    ).expanduser()
+    result_path = Path(manifest.soak.result_path.replace("{module}", module)).expanduser()
     service_labels = [s.label for s in manifest.services]
 
     result = _load_or_init(result_path, module)

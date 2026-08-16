@@ -6,6 +6,7 @@ Covers the four dirty conditions:
  3. Any sample with service_nonzero.
  4. A pressure_level==4 sample not followed by a strictly-later pressure_level<=2 sample.
 """
+
 from sanctum_cli.soak.harness import Sample, SoakResult, classify_soak
 
 
@@ -32,7 +33,15 @@ def test_red_probe_marks_dirty() -> None:
 
 
 def test_service_nonzero_marks_dirty() -> None:
-    s = [Sample(ts="t", pressure_level=1, swap_used_mb=100, red_probes=[], service_nonzero=["com.sanctum.x"])]
+    s = [
+        Sample(
+            ts="t",
+            pressure_level=1,
+            swap_used_mb=100,
+            red_probes=[],
+            service_nonzero=["com.sanctum.x"],
+        )
+    ]
     _, clean = classify_soak(_r(s))
     assert clean is False
 
@@ -65,7 +74,9 @@ def test_days_computed_from_started_and_last() -> None:
         module="m",
         started_at="2026-06-01T00:00:00Z",
         last_at="2026-06-04T12:00:00Z",  # 3.5 days later
-        samples=[Sample(ts="t", pressure_level=1, swap_used_mb=0, red_probes=[], service_nonzero=[])],
+        samples=[
+            Sample(ts="t", pressure_level=1, swap_used_mb=0, red_probes=[], service_nonzero=[])
+        ],
         faults=[],
     )
     days, _ = classify_soak(result)

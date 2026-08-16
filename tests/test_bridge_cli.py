@@ -272,9 +272,7 @@ def test_bridge_children_json():
     try:
         with respx.mock(assert_all_called=False) as rx:
             rx.post("https://bridge.test/sharepoint/children").mock(
-                return_value=httpx.Response(
-                    200, json={"children": [], "truncated": True}
-                )
+                return_value=httpx.Response(200, json={"children": [], "truncated": True})
             )
             r = runner.invoke(app, ["bridge", "children", "Deals", "--json"])
     finally:
@@ -734,9 +732,7 @@ def test_bridge_move_json():
                     },
                 )
             )
-            r = runner.invoke(
-                app, ["bridge", "move", "Deals/memo.docx", "Deals/Archive", "--json"]
-            )
+            r = runner.invoke(app, ["bridge", "move", "Deals/memo.docx", "Deals/Archive", "--json"])
     finally:
         _exit_all(patches)
     assert r.exit_code == 0, r.output
@@ -770,9 +766,7 @@ def test_bridge_move_blocked_dest_surfaces_error():
                     json={"error": "destination_not_allowed", "path": "Random/X"},
                 )
             )
-            r = runner.invoke(
-                app, ["bridge", "move", "Deals/memo.docx", "Random/X"]
-            )
+            r = runner.invoke(app, ["bridge", "move", "Deals/memo.docx", "Random/X"])
     finally:
         _exit_all(patches)
     assert r.exit_code != 0

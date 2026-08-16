@@ -37,12 +37,14 @@ from sanctum_cli.commands import proxy as proxy_cmd
 from sanctum_cli.commands import schedule as schedule_cmd
 from sanctum_cli.commands import screen_time as screentime_cmd
 from sanctum_cli.commands import self_test as self_test_cmd
+from sanctum_cli.commands import setup as setup_cmd
 from sanctum_cli.commands import uninstall as uninstall_cmd
 from sanctum_cli.commands import update as update_cmd
 from sanctum_cli.commands import vision as vision_cmd
 from sanctum_cli.commands.link import link_app
 from sanctum_cli.commands.module import module_app
 from sanctum_cli.commands.net import net_app
+from sanctum_cli.commands.tailnet import tailnet_app
 from sanctum_cli.errors import ExitCode, SanctumError
 from sanctum_cli.haus import haus_required
 
@@ -210,12 +212,21 @@ def brainstorm_top(
     cacert: Annotated[
         Path, typer.Option("--cacert", help="CA to verify proxyd's TLS chain.")
     ] = brainstorm_cmd.DEFAULT_CACERT,
-    json_output: Annotated[bool, typer.Option("--json", help="Emit JSON instead of panels.")] = False,
+    json_output: Annotated[
+        bool, typer.Option("--json", help="Emit JSON instead of panels.")
+    ] = False,
     min_families: Annotated[
-        int, typer.Option("--min-families", min=0, help="Warn/fail below N distinct own-model families; 0=auto.")
+        int,
+        typer.Option(
+            "--min-families", min=0, help="Warn/fail below N distinct own-model families; 0=auto."
+        ),
     ] = 0,
     strict: Annotated[
-        bool, typer.Option("--strict", help="Treat a duplicate-family fallback as a lost voice; exit 2 below floor.")
+        bool,
+        typer.Option(
+            "--strict",
+            help="Treat a duplicate-family fallback as a lost voice; exit 2 below floor.",
+        ),
     ] = False,
 ) -> None:
     try:
@@ -253,6 +264,7 @@ def doctor_top(
             help="(--ship only) Exit 0 when the verdict is AMBER (conditionally ready).",
         ),
     ] = False,
+    fix: Annotated[bool, typer.Option("--fix", help="Auto-remediate known drifts.")] = False,
 ) -> None:
     if ship is not None:
         from sanctum_cli.commands.ship import default_adapters, evaluate, render
@@ -262,7 +274,7 @@ def doctor_top(
         raise typer.Exit(render(report, json_out=json_output, allow_amber=allow_amber))
 
     try:
-        doctor.doctor_command(full=full, json_output=json_output)
+        doctor.doctor_command(full=full, json_output=json_output, fix=fix)
     except SanctumError as exc:
         _report(exc)
         raise typer.Exit(code=int(exc.exit_code)) from exc
@@ -399,6 +411,7 @@ def screentime_phone_mode(
 app.add_typer(module_app, name="module")
 app.add_typer(net_app, name="net")
 app.add_typer(link_app, name="link")
+app.add_typer(tailnet_app, name="tailnet")
 
 # The seventh organ — hormone panel + creative-mode lever. Read-only/file-based;
 # adds no behavior to any seat until a seat opts into the receptor.
@@ -416,7 +429,9 @@ def keys_backup_top(
     keys_backup_cmd.keys_backup_command(out=out, yes=yes)
 
 
-@keys_app.command("restore", help="Restore Keychain entries from an encrypted `keys backup` bundle.")
+@keys_app.command(
+    "restore", help="Restore Keychain entries from an encrypted `keys backup` bundle."
+)
 def keys_restore_top(
     path: Annotated[Path, typer.Argument(help="The encrypted bundle to restore from.")],
 ) -> None:
@@ -626,7 +641,9 @@ def init_top(
     yes: Annotated[
         bool, typer.Option("--yes", "-y", help="Accept the hostname-derived default; no prompts.")
     ] = False,
-    force: Annotated[bool, typer.Option("--force", help="Overwrite an existing instance.yaml.")] = False,
+    force: Annotated[
+        bool, typer.Option("--force", help="Overwrite an existing instance.yaml.")
+    ] = False,
 ) -> None:
     try:
         init_cmd.init_command(name=name, yes=yes, force=force)
@@ -651,6 +668,29 @@ def onboard_top(
 ) -> None:
     try:
         onboard_cmd.onboard_command(recipe=recipe, backend=backend, no_open=no_open, yes=yes)
+    except SanctumError as exc:
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code)) from exc
+
+
+@app.command(
+    "setup",
+    help="Open the first-run Setup Assistant — a friendly GUI over onboard, in your browser.",
+)
+def setup_top(
+    no_open: Annotated[
+        bool, typer.Option("--no-open", help="Start the server but don't open a browser window.")
+    ] = False,
+    port: Annotated[
+        int, typer.Option("--port", help="Bind to a specific loopback port (0 = pick a free one).")
+    ] = 0,
+    install_app: Annotated[
+        bool,
+        typer.Option("--install-app", help="Build a double-clickable Sanctum Setup.app in ~/Applications."),
+    ] = False,
+) -> None:
+    try:
+        setup_cmd.setup_command(no_open=no_open, port=port, install_app=install_app)
     except SanctumError as exc:
         _report(exc)
         raise typer.Exit(code=int(exc.exit_code)) from exc

@@ -49,9 +49,15 @@ def test_snapshot_records_wan_ip(tmp_path: Path) -> None:
 
 def test_snapshot_path_is_under_root_timestamped(tmp_path: Path) -> None:
     rep = TopologyReport(
-        firewalla_present=True, firewalla_wan_mac=None, firewalla_wan_mtu=None,
-        nat=Nat.DOUBLE, gateway_ip=None, isp="generic", public_ip=None,
-        applicable=True, reason="x",
+        firewalla_present=True,
+        firewalla_wan_mac=None,
+        firewalla_wan_mtu=None,
+        nat=Nat.DOUBLE,
+        gateway_ip=None,
+        isp="generic",
+        public_ip=None,
+        applicable=True,
+        reason="x",
     )
     path = safety.snapshot(rep, root=tmp_path, stamp="20260614-160000")
     assert path == tmp_path / "20260614-160000" / "baseline.json"

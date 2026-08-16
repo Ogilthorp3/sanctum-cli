@@ -59,14 +59,18 @@ def schedule_command() -> None:
             wake = person.get("wake", "—")
             table.add_row(
                 str(person.get("name", person_id)),
-                str(weekday), str(weekend), str(wake),
+                str(weekday),
+                str(weekend),
+                str(wake),
             )
         console.print(table)
         console.print()
 
     shared = data.get("shared_devices", [])
     if any(d.get("hard_curfew") for d in shared):
-        table = Table(title="Shared-device hard curfews", show_header=True, header_style="bold cyan")
+        table = Table(
+            title="Shared-device hard curfews", show_header=True, header_style="bold cyan"
+        )
         table.add_column("Device")
         table.add_column("Hard curfew")
         for d in shared:
@@ -78,5 +82,5 @@ def schedule_command() -> None:
 
     console.print(
         "[dim]To extend a child's curfew once (e.g., for a school event):[/]\n"
-        "  curl -X POST http://127.0.0.1:4077/screen/override -d '{\"target\":\"NAME\",\"minutes\":30}'"
+        '  curl -X POST http://127.0.0.1:4077/screen/override -d \'{"target":"NAME","minutes":30}\''
     )

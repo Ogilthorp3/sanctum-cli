@@ -6,6 +6,7 @@ stranger on a brand-new Mac hit a wall on the documented one-command path.
 ``config.ensure()`` fixes that by scaffolding a minimal, valid instance file
 when none exists, then loading it.
 """
+
 from __future__ import annotations
 
 from sanctum_cli import config

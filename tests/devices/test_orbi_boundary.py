@@ -150,9 +150,7 @@ def test_provider_guest_set_lands_in_soap_body_through_real_pynetgear(
 
     provider = OrbiProvider()
     try:
-        provider.connect(
-            Creds(host="192.168.1.1", username="admin", secret=None, key_path=None)
-        )
+        provider.connect(Creds(host="192.168.1.1", username="admin", secret=None, key_path=None))
         # Re-establish an authenticated-session cookie post-connect. ``connect``'s
         # best-effort ``login()`` cannot truly authenticate against the mocked
         # socket (the fake reply is not a real login response), and pynetgear's
@@ -204,9 +202,7 @@ def test_provider_does_not_pre_encode_a_hostile_path(
     hostile_path = "guest_wifi/abc%41 café/5g"
     provider = OrbiProvider()
     try:
-        provider.connect(
-            Creds(host="192.168.1.1", username="admin", secret=None, key_path=None)
-        )
+        provider.connect(Creds(host="192.168.1.1", username="admin", secret=None, key_path=None))
         provider._client.cookie = "c"  # type: ignore[union-attr] # authed-session seam
         captured.clear()  # drop the connect-time login POST; assert only on the set
         result = provider.set(hostile_path, HOSTILE_VALUE)

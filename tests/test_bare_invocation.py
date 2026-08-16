@@ -21,7 +21,8 @@ runner = CliRunner()
 def quiet_status(monkeypatch: pytest.MonkeyPatch):
     calls: list[str] = []
     monkeypatch.setattr(
-        cli.status, "status_command",
+        cli.status,
+        "status_command",
         lambda json_output=False, oneline=False: calls.append("banner"),
     )
     return calls

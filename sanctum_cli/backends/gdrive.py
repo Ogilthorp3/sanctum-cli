@@ -56,12 +56,8 @@ RCLONE_TIMEOUT_S = 30
 RECONNECT_TIMEOUT_S = 300  # 5 minutes for the OAuth click-through
 
 CONSOLE_URL_PROJECT = "https://console.cloud.google.com/projectcreate"
-CONSOLE_URL_ENABLE_DRIVE = (
-    "https://console.cloud.google.com/apis/library/drive.googleapis.com"
-)
-CONSOLE_URL_OAUTH_CONSENT = (
-    "https://console.cloud.google.com/apis/credentials/consent"
-)
+CONSOLE_URL_ENABLE_DRIVE = "https://console.cloud.google.com/apis/library/drive.googleapis.com"
+CONSOLE_URL_OAUTH_CONSENT = "https://console.cloud.google.com/apis/credentials/consent"
 CONSOLE_URL_CREDENTIALS = "https://console.cloud.google.com/apis/credentials"
 
 
@@ -78,7 +74,9 @@ class _SetupResult:
 def _preflight() -> None:
     if not shutil.which("rclone"):
         msg = "rclone not installed"
-        raise UserError(msg, fix="brew install rclone && re-run `sanctum cloud setup --backend gdrive`")
+        raise UserError(
+            msg, fix="brew install rclone && re-run `sanctum cloud setup --backend gdrive`"
+        )
     if not shutil.which("restic"):
         msg = "restic not installed"
         raise UserError(msg, fix="brew install restic")
@@ -86,7 +84,11 @@ def _preflight() -> None:
 
 def _existing_remote() -> bool:
     out = subprocess.run(
-        ["rclone", "listremotes"], capture_output=True, text=True, check=False, timeout=RCLONE_TIMEOUT_S
+        ["rclone", "listremotes"],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=RCLONE_TIMEOUT_S,
     )
     if out.returncode != 0:
         return False
@@ -398,8 +400,14 @@ def _persist_gdrive(
         _override_repo(instance_path, slot="primary", repo=repo)
         return
     # secondary slot
-    _override_repo(instance_path, slot="secondary", repo=repo, create_keychain_ref=True,
-                   keychain_service=keychain_service_restic, keychain_account=keychain_account)
+    _override_repo(
+        instance_path,
+        slot="secondary",
+        repo=repo,
+        create_keychain_ref=True,
+        keychain_service=keychain_service_restic,
+        keychain_account=keychain_account,
+    )
 
 
 def _override_repo(
@@ -430,9 +438,7 @@ def _override_repo(
     else:
         cb_block.setdefault(slot, {})
         cb_block[slot]["repo"] = repo
-    cb_block.setdefault(
-        "retention", {"keep_daily": 7, "keep_weekly": 4, "keep_monthly": 12}
-    )
+    cb_block.setdefault("retention", {"keep_daily": 7, "keep_weekly": 4, "keep_monthly": 12})
     cli_block["cloud_backup"] = cb_block
     raw["cli"] = cli_block
     stamp = datetime.now(tz=UTC).strftime("%Y%m%dT%H%M%SZ")

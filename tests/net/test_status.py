@@ -84,9 +84,7 @@ def _stable_identity():
         router_arp_verified=True,
         gateway_reachable=True,
     )
-    return IdentityDiagnosis(
-        "IDENTITY_STABLE", "on hardware MAC", "identity is correct", probe
-    )
+    return IdentityDiagnosis("IDENTITY_STABLE", "on hardware MAC", "identity is correct", probe)
 
 
 def _quarantined_identity():
@@ -224,9 +222,14 @@ def test_identity_rotating_is_attention_not_degraded() -> None:
     from sanctum_cli.net.link import IdentityDiagnosis, IdentityProbe
 
     probe = IdentityProbe(
-        iface="en1", ssid="Manoir", current_mac="32:a6:f4:de:54:cf",
-        hardware_mac="d0:11:e5:1c:88:59", security="WPA3", associated=True,
-        router_arp_verified=True, gateway_reachable=True,
+        iface="en1",
+        ssid="Manoir",
+        current_mac="32:a6:f4:de:54:cf",
+        hardware_mac="d0:11:e5:1c:88:59",
+        security="WPA3",
+        associated=True,
+        router_arp_verified=True,
+        gateway_reachable=True,
     )
     inp = _all_green_inputs()
     inp["identity"] = IdentityDiagnosis(
@@ -297,8 +300,15 @@ def test_posture_unverified_is_unknown() -> None:
     from sanctum_cli.net.heal import HealAction, NetPosture, PostureDiagnosis
 
     posture = NetPosture(
-        iface="", config_method="", ip="", subnet="", gateway="",
-        gateway_reachable=None, associated=False, on_tailnet=False, tb5_up=False,
+        iface="",
+        config_method="",
+        ip="",
+        subnet="",
+        gateway="",
+        gateway_reachable=None,
+        associated=False,
+        on_tailnet=False,
+        tb5_up=False,
     )
     diag = PostureDiagnosis(
         verdict="UNVERIFIED",
@@ -316,9 +326,7 @@ def test_posture_unverified_is_unknown() -> None:
 
 def test_daemon_last_result_surfaced_in_detail() -> None:
     inp = _all_green_inputs()
-    inp["daemon"] = DaemonInfo(
-        loaded=True, last_result="reverted", age_seconds=30, fresh=True
-    )
+    inp["daemon"] = DaemonInfo(loaded=True, last_result="reverted", age_seconds=30, fresh=True)
     rep = build_status_report(**inp)
     daemon_row = next(r for r in rep.rows if r.label == "Heal daemon")
     assert "reverted" in daemon_row.detail
@@ -343,9 +351,7 @@ def test_daemon_loaded_but_stale_heartbeat_is_down_and_degraded() -> None:
     # wedged daemon that stopped firing). It must NOT read OK/GREEN — the
     # continuous-protection layer is effectively DOWN → overall DEGRADED.
     inp = _all_green_inputs()
-    inp["daemon"] = DaemonInfo(
-        loaded=True, last_result="healed", age_seconds=7200, fresh=False
-    )
+    inp["daemon"] = DaemonInfo(loaded=True, last_result="healed", age_seconds=7200, fresh=False)
     rep = build_status_report(**inp)
     daemon_row = next(r for r in rep.rows if r.label == "Heal daemon")
     assert daemon_row.status is RowStatus.DOWN
@@ -357,9 +363,7 @@ def test_daemon_loaded_but_stale_heartbeat_is_down_and_degraded() -> None:
 def test_daemon_loaded_and_fresh_heartbeat_is_ok() -> None:
     # Loaded AND heart-beating within the freshness window → OK, overall GREEN.
     inp = _all_green_inputs()
-    inp["daemon"] = DaemonInfo(
-        loaded=True, last_result="healed", age_seconds=60, fresh=True
-    )
+    inp["daemon"] = DaemonInfo(loaded=True, last_result="healed", age_seconds=60, fresh=True)
     rep = build_status_report(**inp)
     daemon_row = next(r for r in rep.rows if r.label == "Heal daemon")
     assert daemon_row.status is RowStatus.OK
@@ -372,9 +376,7 @@ def test_daemon_loaded_unknown_age_is_ok_not_stale() -> None:
     # stays OK (an unread freshness is not proof of a wedge, matching the
     # fail-open-on-unknown doctrine of the roll-up).
     inp = _all_green_inputs()
-    inp["daemon"] = DaemonInfo(
-        loaded=True, last_result="healed", age_seconds=None, fresh=None
-    )
+    inp["daemon"] = DaemonInfo(loaded=True, last_result="healed", age_seconds=None, fresh=None)
     rep = build_status_report(**inp)
     daemon_row = next(r for r in rep.rows if r.label == "Heal daemon")
     assert daemon_row.status is RowStatus.OK

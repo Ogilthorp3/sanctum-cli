@@ -60,9 +60,7 @@ def _patch_connect(
     return captured
 
 
-def _connected(
-    monkeypatch: pytest.MonkeyPatch, **kw: Any
-) -> Any:
+def _connected(monkeypatch: pytest.MonkeyPatch, **kw: Any) -> Any:
     captured = _patch_connect(monkeypatch, **kw)
     from sanctum_cli.devices.firewalla import FirewallaProvider
 

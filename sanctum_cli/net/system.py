@@ -158,7 +158,7 @@ _FW_COMBINED_REMOTE = (
     "if ip -o link show type ppp 2>/dev/null | grep -q ppp; then echo pppoe; "
     "else "
     "D=$(ip -o route get 1.1.1.1 2>/dev/null | grep -oE 'dev [a-z0-9.]+' | cut -d' ' -f2); "
-    "if pgrep -f \"dhclient.*$D\" >/dev/null 2>&1 || pgrep -x dhcpcd >/dev/null 2>&1; "
+    'if pgrep -f "dhclient.*$D" >/dev/null 2>&1 || pgrep -x dhcpcd >/dev/null 2>&1; '
     "then echo dhcp; else echo static; fi; "
     "fi"
 )

@@ -203,8 +203,12 @@ class TestPathologyVsLegitimateCrisis:
     def test_out_of_range_level_is_still_pathological(self) -> None:
         # The genuine "mis-running gland" signal (out-of-[0,1]) must still page.
         bad = Panel(
-            dopamine=0.3, cortisol=1.7, noradrenaline=0.1,
-            oxytocin=0.5, melatonin=0.2, serotonin=0.6,
+            dopamine=0.3,
+            cortisol=1.7,
+            noradrenaline=0.1,
+            oxytocin=0.5,
+            melatonin=0.2,
+            serotonin=0.6,
         )
         path, reason = gland.is_pathological(bad)
         assert path and "out of [0,1]" in reason
@@ -213,8 +217,12 @@ class TestPathologyVsLegitimateCrisis:
         # A cortisol pinned ABOVE the reachable target (only a stuck axis can do
         # this) must still page — the detector isn't deleted, just made honest.
         stuck = Panel(
-            dopamine=0.1, cortisol=0.99, noradrenaline=0.8,
-            oxytocin=0.5, melatonin=0.2, serotonin=0.2,
+            dopamine=0.1,
+            cortisol=0.99,
+            noradrenaline=0.8,
+            oxytocin=0.5,
+            melatonin=0.2,
+            serotonin=0.2,
         )
         path, reason = gland.is_pathological(stuck)
         assert path and "pinned high" in reason

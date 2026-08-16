@@ -90,3 +90,28 @@ def test_commit_and_push_commits_clean_staged_set(tmp_path: Path) -> None:
 
     assert pushed is True
     assert _git(repo, "rev-list", "--all", "--count").strip() == "2"
+
+
+def test_commit_and_push_stages_clean_files_on_finding(tmp_path: Path) -> None:
+    """If findings are detected, stage only the clean files, and leave the dirty files unstaged."""
+    repo = tmp_path / "clone"
+    _init_repo(repo)
+
+    (repo / "clean.txt").write_text("alias ll='ls -la'\n", encoding="utf-8")
+    (repo / "dirty.txt").write_text("aws_access_key_id = AKIA" + "A" * 16 + "\n", encoding="utf-8")
+
+    with pytest.raises(UserError) as excinfo:
+        gh_backend._commit_and_push(repo, "sanctum cloud sync")
+
+    assert "refused" in excinfo.value.message.lower()
+
+    # The clean file must be staged
+    staged = _git(repo, "diff", "--cached", "--name-only").strip().splitlines()
+    assert "clean.txt" in staged
+    assert "dirty.txt" not in staged
+
+    # The dirty file remains in working tree, unstaged
+    assert (repo / "dirty.txt").exists()
+    unstaged = _git(repo, "status", "--porcelain").strip().splitlines()
+    # It should be untracked or modified
+    assert any("dirty.txt" in line and (line.startswith("??") or line.startswith(" M") or line.startswith("? ")) for line in unstaged)

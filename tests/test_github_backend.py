@@ -28,10 +28,7 @@ def test_hostname_slug_normalizes() -> None:
 
 
 def test_repo_name_format() -> None:
-    assert (
-        gh_backend._repo_name("acme", "my-host")
-        == "acme/sanctum-host-my-host"
-    )
+    assert gh_backend._repo_name("acme", "my-host") == "acme/sanctum-host-my-host"
 
 
 def test_preflight_refuses_when_gh_missing() -> None:
@@ -68,9 +65,15 @@ def test_preflight_refuses_when_gh_unauthenticated() -> None:
 
 
 def test_repo_exists_branches_on_gh_exit_code() -> None:
-    with patch("sanctum_cli.backends.github.subprocess.run", return_value=_completed(rc=0, stdout='{"name":"x"}')):
+    with patch(
+        "sanctum_cli.backends.github.subprocess.run",
+        return_value=_completed(rc=0, stdout='{"name":"x"}'),
+    ):
         assert gh_backend._repo_exists("acme/x") is True
-    with patch("sanctum_cli.backends.github.subprocess.run", return_value=_completed(rc=1, stderr="not found")):
+    with patch(
+        "sanctum_cli.backends.github.subprocess.run",
+        return_value=_completed(rc=1, stderr="not found"),
+    ):
         assert gh_backend._repo_exists("acme/x") is False
 
 
@@ -98,21 +101,11 @@ def test_full_wizard_refuses_when_secret_detected(
         ),
         patch("sanctum_cli.backends.github.LOCAL_CLONE_DIR", fake_clone),
         patch("sanctum_cli.backends.github.DEFAULT_SOURCES", [leaky]),
-        patch(
-            "sanctum_cli.backends.github._capture_inventories", return_value=[]
-        ),
-        patch(
-            "sanctum_cli.backends.github._copy_sanctum_launchagents", return_value=[]
-        ),
-        patch(
-            "sanctum_cli.backends.github._ensure_clone", return_value=None
-        ),
-        patch(
-            "sanctum_cli.backends.github._repo_exists", return_value=True
-        ),
-        patch(
-            "sanctum_cli.backends.github.Confirm.ask", return_value=True
-        ),
+        patch("sanctum_cli.backends.github._capture_inventories", return_value=[]),
+        patch("sanctum_cli.backends.github._copy_sanctum_launchagents", return_value=[]),
+        patch("sanctum_cli.backends.github._ensure_clone", return_value=None),
+        patch("sanctum_cli.backends.github._repo_exists", return_value=True),
+        patch("sanctum_cli.backends.github.Confirm.ask", return_value=True),
     ):
         result = runner.invoke(app, ["cloud", "setup", "--backend", "github", "--no-persist"])
 
@@ -146,9 +139,7 @@ def test_full_wizard_happy_path_clean_dotfile(
         patch("sanctum_cli.backends.github._ensure_clone", return_value=None),
         patch("sanctum_cli.backends.github._repo_exists", return_value=True),
     ):
-        result = runner.invoke(
-            app, ["cloud", "setup", "--backend", "github", "--no-persist"]
-        )
+        result = runner.invoke(app, ["cloud", "setup", "--backend", "github", "--no-persist"])
 
     assert result.exit_code == 0, result.stdout + (result.stderr or "")
     assert "no secrets detected" in result.stdout.lower()

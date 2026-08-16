@@ -43,11 +43,11 @@ KEYCHAIN_SERVICES = [
     ("openrouter-mgmt-key", "sanctum"),
     ("openrouter-mgmt-key-backup", "sanctum"),
     ("anthropic-api-key", "sanctum"),
-    ("google-ai-api-key", "sanctum"),          # was gemini-api-key (never written)
+    ("google-ai-api-key", "sanctum"),  # was gemini-api-key (never written)
     ("r2-account-id", "sanctum"),
     ("r2-access-key-id", "sanctum"),
     ("r2-secret-access-key", "sanctum"),
-    ("b2-account-id", "sanctum"),              # was b2-application-key-id
+    ("b2-account-id", "sanctum"),  # was b2-application-key-id
     ("b2-application-key", "sanctum"),
     ("sanctum-backup-key", "sanctum-backup"),  # restic passphrase — decrypts the backups
 ]
@@ -56,7 +56,8 @@ KEYCHAIN_SERVICES = [
 def _read_keychain(service: str, account: str = "sanctum") -> str | None:
     r = subprocess.run(
         ["security", "find-generic-password", "-a", account, "-s", service, "-w"],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     if r.returncode != 0:
         return None
@@ -71,7 +72,8 @@ def keys_backup_command(
         ),
     ],
     yes: Annotated[
-        bool, typer.Option("--yes", "-y", help="Skip the confirmation prompt."),
+        bool,
+        typer.Option("--yes", "-y", help="Skip the confirmation prompt."),
     ] = False,
 ) -> None:
     """Export sanctum Keychain entries to an AES-256-encrypted bundle."""
@@ -81,14 +83,16 @@ def keys_backup_command(
         raise typer.Exit(code=1)
 
     console.print()
-    console.print(Panel.fit(
-        f"[bold]sanctum keys backup → {out}[/]\n\n"
-        f"Will export up to {len(KEYCHAIN_SERVICES)} sanctum Keychain entries "
-        f"into an AES-256-encrypted tar bundle. The bundle is portable: copy "
-        f"it to another Mac, run [cyan]sanctum keys restore <path>[/], enter "
-        f"the same passphrase.",
-        border_style="cyan",
-    ))
+    console.print(
+        Panel.fit(
+            f"[bold]sanctum keys backup → {out}[/]\n\n"
+            f"Will export up to {len(KEYCHAIN_SERVICES)} sanctum Keychain entries "
+            f"into an AES-256-encrypted tar bundle. The bundle is portable: copy "
+            f"it to another Mac, run [cyan]sanctum keys restore <path>[/], enter "
+            f"the same passphrase.",
+            border_style="cyan",
+        )
+    )
     console.print()
 
     if not yes and not typer.confirm("Continue?", default=True):
@@ -120,12 +124,14 @@ def keys_backup_command(
                 continue
             (bundle_dir / service).write_text(value, encoding="utf-8")
             (bundle_dir / service).chmod(0o600)
-            manifest["services"].append({
-                "service": service,
-                "account": account,  # restore must write it back to the right account
-                "length": len(value),
-                "prefix": value[:4] + "…" if len(value) > 8 else "***",
-            })
+            manifest["services"].append(
+                {
+                    "service": service,
+                    "account": account,  # restore must write it back to the right account
+                    "length": len(value),
+                    "prefix": value[:4] + "…" if len(value) > 8 else "***",
+                }
+            )
             captured += 1
 
         (bundle_dir / "MANIFEST.json").write_text(json.dumps(manifest, indent=2))
@@ -140,10 +146,22 @@ def keys_backup_command(
         # AES-256-CBC encrypt with PBKDF2
         out.parent.mkdir(parents=True, exist_ok=True)
         r = subprocess.run(
-            ["openssl", "enc", "-aes-256-cbc", "-pbkdf2", "-salt",
-             "-in", str(tar_path), "-out", str(out),
-             "-pass", "stdin"],
-            input=p1, text=True, capture_output=True,
+            [
+                "openssl",
+                "enc",
+                "-aes-256-cbc",
+                "-pbkdf2",
+                "-salt",
+                "-in",
+                str(tar_path),
+                "-out",
+                str(out),
+                "-pass",
+                "stdin",
+            ],
+            input=p1,
+            text=True,
+            capture_output=True,
         )
         if r.returncode != 0:
             console.print(f"[red]openssl encryption failed:[/] {r.stderr.strip()}")
@@ -151,23 +169,25 @@ def keys_backup_command(
         out.chmod(0o600)
 
     console.print()
-    console.print(Panel(
-        f"[bold green]Wrote {captured} key(s) to {out}[/]\n\n"
-        f"File is encrypted (AES-256-CBC, PBKDF2). Mode 600. "
-        f"Keep the passphrase somewhere safe (your password manager).\n\n"
-        f"To restore on another machine:\n"
-        f"  [cyan]sanctum keys restore {out.name}[/]",
-        border_style="green",
-        padding=(1, 2),
-    ))
+    console.print(
+        Panel(
+            f"[bold green]Wrote {captured} key(s) to {out}[/]\n\n"
+            f"File is encrypted (AES-256-CBC, PBKDF2). Mode 600. "
+            f"Keep the passphrase somewhere safe (your password manager).\n\n"
+            f"To restore on another machine:\n"
+            f"  [cyan]sanctum keys restore {out.name}[/]",
+            border_style="green",
+            padding=(1, 2),
+        )
+    )
 
 
 def _write_keychain(service: str, account: str, value: str) -> bool:
     """security add-generic-password -U (update-in-place). True on success."""
     r = subprocess.run(
-        ["security", "add-generic-password", "-a", account, "-s", service,
-         "-w", value, "-U"],
-        capture_output=True, text=True,
+        ["security", "add-generic-password", "-a", account, "-s", service, "-w", value, "-U"],
+        capture_output=True,
+        text=True,
     )
     return r.returncode == 0
 
@@ -184,9 +204,22 @@ def keys_restore_command(
     with tempfile.TemporaryDirectory() as td:
         tar_path = Path(td) / "bundle.tar.gz"
         r = subprocess.run(
-            ["openssl", "enc", "-d", "-aes-256-cbc", "-pbkdf2",
-             "-in", str(path), "-out", str(tar_path), "-pass", "stdin"],
-            input=p1, text=True, capture_output=True,
+            [
+                "openssl",
+                "enc",
+                "-d",
+                "-aes-256-cbc",
+                "-pbkdf2",
+                "-in",
+                str(path),
+                "-out",
+                str(tar_path),
+                "-pass",
+                "stdin",
+            ],
+            input=p1,
+            text=True,
+            capture_output=True,
         )
         if r.returncode != 0:
             console.print("[red]Decryption failed[/] — wrong passphrase or corrupt bundle.")

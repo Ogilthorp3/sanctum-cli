@@ -82,6 +82,7 @@ def default_owner() -> str:
         fix="set vcs.github_owner in ~/.sanctum/instance.yaml (or run `gh auth login`)",
     )
 
+
 # Curated list of dotfiles + inventories that are safe-by-design. Anything
 # in this list still gets secret-scanned before it lands in git, but the
 # default sources should never trip the scanner on a clean install.
@@ -150,7 +151,15 @@ def _repo_exists(repo: str) -> bool:
 
 def _create_repo(repo: str) -> None:
     proc = subprocess.run(
-        [GH_BIN, "repo", "create", repo, "--private", "--description", "Sanctum host configuration (Tier 0)"],
+        [
+            GH_BIN,
+            "repo",
+            "create",
+            repo,
+            "--private",
+            "--description",
+            "Sanctum host configuration (Tier 0)",
+        ],
         capture_output=True,
         text=True,
         timeout=GH_TIMEOUT_S,
@@ -305,23 +314,41 @@ def _git(target: Path, *args: str, check: bool = True, timeout: int = GH_TIMEOUT
 
 
 def _commit_and_push(target: Path, message: str) -> bool:
-    _git(target, "add", "-A")
-    status = _git(target, "status", "--porcelain", check=True)
-    if not status.strip():
+    status_out = _git(target, "status", "--porcelain", "-z", check=True)
+    if not status_out.strip():
         return False
-    # Authoritative pre-push scan. ``git add -A`` stages the ENTIRE persistent
-    # clone, not just this run's files — a secret that entered the clone some
-    # other way (a prior run, a manual edit, an unrelated file dropped in the
-    # working tree) would ride along on the push. The wizard's Step-4 pre-scan
-    # only covers this run's ``written`` list, so it is UX, not a guarantee.
-    # Scan the actual staged set here and refuse before committing.
-    staged = _git(target, "diff", "--cached", "--name-only", "-z", check=True)
-    staged_paths = [target / rel for rel in staged.split("\0") if rel]
-    findings = secret_scanner.scan_paths(staged_paths)
+
+    parts = [p for p in status_out.split("\0") if p]
+    files_to_scan = []
+    i = 0
+    while i < len(parts):
+        part = parts[i]
+        if len(part) < 4:
+            i += 1
+            continue
+        status = part[:2]
+        if status.startswith("R") or status.startswith("C"):
+            if i + 1 < len(parts):
+                rel_path = parts[i+1]
+                i += 1
+            else:
+                rel_path = part[3:]
+        else:
+            rel_path = part[3:]
+
+        full_path = target / rel_path
+        if full_path.is_file() and not full_path.is_symlink():
+            files_to_scan.append((rel_path, full_path))
+        i += 1
+
+    paths_to_scan = [fp for rp, fp in files_to_scan]
+    findings = secret_scanner.scan_paths(paths_to_scan)
     if findings:
-        # Unstage everything (leave the working tree intact) so a re-run after
-        # remediation starts clean; then refuse.
         _git(target, "reset", check=False)
+        dirty_paths = {f.path for f in findings}
+        for rel_path, full_path in files_to_scan:
+            if full_path not in dirty_paths:
+                _git(target, "add", rel_path)
         _render_findings(findings)
         msg = f"refused to push: {len(findings)} secret-scanner finding(s) in staged set"
         raise UserError(
@@ -331,6 +358,7 @@ def _commit_and_push(target: Path, message: str) -> bool:
                 "via `sanctum backup run --recipe family`) and re-run."
             ),
         )
+    _git(target, "add", "-A")
     _git(target, "commit", "-m", message)
     _git(target, "push", "origin", "HEAD", timeout=GH_TIMEOUT_S * 4)
     return True
@@ -406,9 +434,7 @@ def run_wizard(*, persist: bool = True, owner: str | None = None) -> _SetupResul
         console.print("  [dim]aborted by user; staged files remain in the clone[/]")
         return _SetupResult(repo=repo, clone_dir=clone_dir, files_synced=len(written))
 
-    pushed = _commit_and_push(
-        clone_dir, message=f"sanctum cloud sync from {socket.gethostname()}"
-    )
+    pushed = _commit_and_push(clone_dir, message=f"sanctum cloud sync from {socket.gethostname()}")
     if pushed:
         console.print("  [green]✓[/] pushed to origin/HEAD")
     else:

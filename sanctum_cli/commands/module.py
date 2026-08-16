@@ -28,6 +28,7 @@ or launchd on their own — they only call what they're handed.
 On unknown module name, prints the ``ManifestError`` message and exits with
 code 2.
 """
+
 from __future__ import annotations
 
 import os
@@ -63,7 +64,7 @@ module_app = typer.Typer(help="Inspect, install, and remove Sanctum modules.")
 
 console = Console()
 
-SECURITY_BIN = "/usr/bin/security"
+from sanctum_cli.keychain import SECURITY_BIN
 
 
 def _load_soak_result(module: str, result_path_template: str) -> SoakResult | None:
@@ -144,11 +145,13 @@ def module_status(
             present = keychain.exists(sec.account, sec.service)
             mark = Text("present", style="green") if present else Text("missing", style="red")
             req_note = "" if sec.required else " [dim](optional)[/dim]"
-            console.print(Text.assemble(
-                Text(f"  {sec.service}  "),
-                mark,
-                Text(req_note),
-            ))
+            console.print(
+                Text.assemble(
+                    Text(f"  {sec.service}  "),
+                    mark,
+                    Text(req_note),
+                )
+            )
     else:
         console.print("[bold]Secrets:[/] [dim]none declared[/]")
     console.print()
@@ -206,9 +209,7 @@ class UninstallResult:
 
 def _user_modules_dir() -> Path:
     """The directory installed manifests live in (env override for tests)."""
-    return Path(
-        os.environ.get("SANCTUM_MODULES_DIR", Path("~/.sanctum/modules").expanduser())
-    )
+    return Path(os.environ.get("SANCTUM_MODULES_DIR", Path("~/.sanctum/modules").expanduser()))
 
 
 def _resolve_manifest(source: str) -> ModuleManifest:
@@ -317,6 +318,7 @@ def uninstall_module(
     label_to_kind = {svc.label: svc.kind for svc in manifest.services}
     for label in manifest.uninstall.bootout_labels:
         from sanctum_cli.modules.manifest import ServiceKind
+
         kind = label_to_kind.get(label)
         domain = "system" if kind is ServiceKind.launchdaemon else f"gui/{os.getuid()}"
         # Pass the full launchctl target string (domain/label) to the injected
@@ -401,9 +403,7 @@ def _real_keychain_mint(account: str, service: str) -> None:
     accepted for minting; operators must not run ``ps`` during the call.
     """
     if not shutil.which(SECURITY_BIN):
-        raise ManifestError(
-            f"missing {SECURITY_BIN}; install Xcode Command Line Tools"
-        )
+        raise ManifestError(f"missing {SECURITY_BIN}; install Xcode Command Line Tools")
     value = _secrets.token_hex(32)  # 64 hex chars
     proc = subprocess.run(
         [SECURITY_BIN, "add-generic-password", "-a", account, "-s", service, "-w", value, "-U"],
@@ -474,15 +474,9 @@ def install_command(
     if result.minted:
         console.print(f"  minted {len(result.minted)} secret(s): {', '.join(result.minted)}")
     if result.must_supply:
-        console.print(
-            "  [yellow]you must supply these operator secrets[/] "
-            "(never auto-generated):"
-        )
+        console.print("  [yellow]you must supply these operator secrets[/] (never auto-generated):")
         for svc in result.must_supply:
-            console.print(
-                f"    · {svc}  →  "
-                f"sanctum keychain rotate {svc} --value <your-value>"
-            )
+            console.print(f"    · {svc}  →  sanctum keychain rotate {svc} --value <your-value>")
 
 
 @module_app.command("uninstall", help="Tear down a module (bootout, revoke, rename).")

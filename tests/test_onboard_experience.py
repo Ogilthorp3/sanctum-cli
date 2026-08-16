@@ -302,7 +302,10 @@ def _invoke_onboard_interactive(input_text: str) -> tuple[int, str]:
     that feed the recap rows we DON'T assert on (You / Your Network) to return False
     explicitly, keeping the focus on the AI row's honesty.
     """
+    import sys
+
     with (
+        patch("getpass.getpass", side_effect=lambda *a, **k: sys.stdin.readline().rstrip("\n")),
         patch("sanctum_cli.commands.onboard.backup_cmd.backup_estimate"),
         patch("sanctum_cli.commands.onboard.backup_cmd.backup_run"),
         patch("sanctum_cli.commands.onboard._dispatch_cloud_setup"),
@@ -397,12 +400,8 @@ def test_interactive_ai_chapter_rejected_key_persists_nothing_and_recap_says_ski
         "sanctum_cli.commands.onboard._provider_health",
         lambda kind, cfg: ux_health_bad(),
     )
-    monkeypatch.setattr(
-        "sanctum_cli.commands.onboard.store_device_secret", lambda **k: None
-    )
-    monkeypatch.setattr(
-        "sanctum_cli.commands.onboard._revoke_device_secret", lambda **k: None
-    )
+    monkeypatch.setattr("sanctum_cli.commands.onboard.store_device_secret", lambda **k: None)
+    monkeypatch.setattr("sanctum_cli.commands.onboard._revoke_device_secret", lambda **k: None)
 
     # API path → a rejected key → skip Gemini.
     code, out = _invoke_onboard_interactive("\n\n2\nsk-bad\n\n")
@@ -432,9 +431,7 @@ def test_interactive_ai_chapter_verified_key_persists_and_recap_says_connected(
         "sanctum_cli.commands.onboard._provider_health",
         lambda kind, cfg: ux_health_ok(),
     )
-    monkeypatch.setattr(
-        "sanctum_cli.commands.onboard.store_device_secret", lambda **k: None
-    )
+    monkeypatch.setattr("sanctum_cli.commands.onboard.store_device_secret", lambda **k: None)
 
     # API path → an accepted key → skip Gemini.
     code, out = _invoke_onboard_interactive("\n\n2\nsk-good\n\n")
@@ -449,6 +446,7 @@ def test_interactive_ai_chapter_verified_key_persists_and_recap_says_connected(
 # ── First Hello — the DOD1 finish line (fail-soft contract) ──────────────
 # The guided path's closing beat. It must reach the operator when installed,
 # and must NEVER turn a completed onboarding into a failure when it can't.
+
 
 def test_first_hello_absent_script_is_a_silent_skip(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -475,9 +473,10 @@ def test_first_hello_runs_script_and_passes_the_name(
     script = tmp_path / ".sanctum" / "bin" / "sanctum-first-hello.py"
     script.parent.mkdir(parents=True)
     script.write_text("#!/usr/bin/env python3\n")
-    with patch("subprocess.run") as mock_run, patch(
-        "sanctum_cli.commands.onboard.console"
-    ) as mock_console:
+    with (
+        patch("subprocess.run") as mock_run,
+        patch("sanctum_cli.commands.onboard.console") as mock_console,
+    ):
         onboard._run_first_hello("Bert")
     assert mock_run.called, "First Hello must invoke the installed script"
     env = mock_run.call_args.kwargs.get("env", {})
@@ -494,8 +493,11 @@ def test_first_hello_never_breaks_onboarding_when_script_raises(
     script = tmp_path / ".sanctum" / "bin" / "sanctum-first-hello.py"
     script.parent.mkdir(parents=True)
     script.write_text("#!/usr/bin/env python3\n")
-    with patch(
-        "subprocess.run",
-        side_effect=OSError("no audio device"),
-    ), patch("sanctum_cli.commands.onboard.console"):
+    with (
+        patch(
+            "subprocess.run",
+            side_effect=OSError("no audio device"),
+        ),
+        patch("sanctum_cli.commands.onboard.console"),
+    ):
         onboard._run_first_hello("Bert")  # must swallow the error, not raise

@@ -482,9 +482,7 @@ class FirewallaProvider:
         data: dict[str, str] = {}
         policies = _fetch_bridge_json(_POLICIES_PATH)
         if policies is not None:
-            data[_POLICIES_PATH] = json.dumps(
-                policies, separators=(",", ":"), ensure_ascii=False
-            )
+            data[_POLICIES_PATH] = json.dumps(policies, separators=(",", ":"), ensure_ascii=False)
         return Snapshot(
             brand=self.brand,
             taken_at=datetime.now(tz=UTC).isoformat(),

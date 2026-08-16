@@ -101,6 +101,8 @@ def test_playbook_new_optional_fields_settable() -> None:
     assert pb.prechecks == ("Check the LAN.",)
     assert pb.mtu == 1492
     assert pb.alt_playbook == "example-alt"
+
+
 def test_speed_report_defaults_and_shape() -> None:
     r = SpeedReport(
         multi_gbps=7.9,
