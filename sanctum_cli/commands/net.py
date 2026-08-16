@@ -36,6 +36,7 @@ from sanctum_cli.net import (
     status as net_status,
 )
 from sanctum_cli.net.types import SpeedReport, Verdict
+from sanctum_cli.commands.home_net import home_app
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -267,7 +268,8 @@ def build_speed_report(runner: Runner, *, firewalla_present: bool, run_live: boo
         raw = runner(("live_test",))
         multi, single, inconclusive = _parse_live(raw)
 
-    pppoe = "pppoe" in runner(("wan_kind",)).lower()
+    wan_kind = runner(("wan_kind",))
+    pppoe = "pppoe" in (wan_kind or "").lower()
     verdict, advice = speedtest.classify_throughput(
         multi_gbps=multi,
         single_gbps=single,
@@ -379,7 +381,7 @@ _GETINFO_ROUTER_RE = re.compile(r"^Router:\s*(\S+)", re.MULTILINE)
 # Bounded verify-back after a heal: poll the re-probe a few times for a lease +
 # reachable gateway before deciding it failed (a DHCP flip takes a moment). These
 # are small so a test's stateful runner settles immediately; the daemon reuses them.
-_HEAL_VERIFY_TRIES = 3
+_HEAL_VERIFY_TRIES = 20
 _HEAL_VERIFY_DELAY_S = 1.0
 
 
@@ -538,9 +540,7 @@ def _install_heal_daemon() -> None:
             "\n[yellow]![/] --install writes a system LaunchDaemon to "
             f"{escape(str(plist_path))} — that needs root."
         )
-        console.print(
-            "  → run it with sudo: [bold]sudo sanctum net heal --install[/]"
-        )
+        console.print("  → run it with sudo: [bold]sudo sanctum net heal --install[/]")
         return
 
     try:
@@ -580,8 +580,7 @@ def _install_heal_daemon() -> None:
             f"confirmed: {escape(detail)}"
         )
         console.print(
-            f"  [dim]load it manually: sudo launchctl bootstrap system "
-            f"{escape(str(plist_path))}[/]"
+            f"  [dim]load it manually: sudo launchctl bootstrap system {escape(str(plist_path))}[/]"
         )
 
 
@@ -706,9 +705,7 @@ def net_heal(
 
     # Heal did not come up healthy → revert to the snapshot and stop + alert.
     ip, mask, router = snap
-    console.print(
-        "[red]✗ not healed[/] — re-probe still unhealthy; reverting to the snapshot."
-    )
+    console.print("[red]✗ not healed[/] — re-probe still unhealthy; reverting to the snapshot.")
     runner(["networksetup", "-setmanual", "Wi-Fi", ip, mask, router])
     console.print(
         f"  [yellow]↩ reverted[/] Wi-Fi to manual {escape(ip)} / {escape(mask)} / "
@@ -801,17 +798,13 @@ def _status_probe_daemon() -> net_status.DaemonInfo:
     Read-only: `launchctl print system/<label>` returns 0 when the daemon is
     loaded, non-zero otherwise. The last-known result comes from the daemon's own
     heartbeat log (never a live heal)."""
-    loaded, _ = _heal_launchctl(
-        ["print", f"system/{heal.HEAL_DAEMON_LABEL}"], check=True
-    )
+    loaded, _ = _heal_launchctl(["print", f"system/{heal.HEAL_DAEMON_LABEL}"], check=True)
     try:
         text = heal._HEAL_HEARTBEAT_FILE.read_text(encoding="utf-8")
     except OSError:
         text = ""
     last, age, fresh = _parse_daemon_heartbeat(text)
-    return net_status.DaemonInfo(
-        loaded=loaded, last_result=last, age_seconds=age, fresh=fresh
-    )
+    return net_status.DaemonInfo(loaded=loaded, last_result=last, age_seconds=age, fresh=fresh)
 
 
 def _status_probe_identity() -> IdentityDiagnosis:
@@ -839,9 +832,7 @@ def _status_probe_guardian() -> net_status.GuardianInfo:
     if epoch is None:
         return net_status.GuardianInfo(reachable=False, fresh=None, age_seconds=None)
     age = max(0, int(time.time()) - epoch)
-    return net_status.GuardianInfo(
-        reachable=True, fresh=age < _GUARDIAN_FRESH_S, age_seconds=age
-    )
+    return net_status.GuardianInfo(reachable=True, fresh=age < _GUARDIAN_FRESH_S, age_seconds=age)
 
 
 def _firewalla_guardian_epoch(gateway: str, key: str, user: str = "pi") -> int | None:
@@ -957,6 +948,7 @@ _ = sagemcom
 
 hub_app = typer.Typer(help="Drive the network gateway (hub) through the device-provider rails.")
 net_app.add_typer(hub_app, name="hub")
+net_app.add_typer(home_app, name="home")
 
 # DeviceInfo read paths the status summary surfaces. These are the generic
 # TR-069 DeviceInfo leaves; a provider that does not expose one returns None and

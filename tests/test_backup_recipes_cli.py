@@ -38,9 +38,7 @@ def test_recipes_lists_built_ins(
     assert payload["family"]["user_override"] is False
 
 
-def test_recipes_marks_user_overrides(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_recipes_marks_user_overrides(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     target = tmp_path / "instance.yaml"
     target.write_text(
         "instance:\n  name: T\n  slug: t\n"
@@ -124,8 +122,7 @@ def test_run_recipe_invokes_restic_with_excludes_file(
     test_yaml = tmp_path / "instance.yaml"
     full_text = full_instance_yaml.read_text()
     test_yaml.write_text(
-        full_text
-        + "\n  recipes:\n    test-tiny:\n      description: t\n      sources:\n"
+        full_text + "\n  recipes:\n    test-tiny:\n      description: t\n      sources:\n"
         f"        - '{tmp_path}'\n      target: primary\n      auto_exclude_icloud_photos: false\n"
         "  default_recipe: test-tiny\n",
         encoding="utf-8",
@@ -143,6 +140,24 @@ def test_run_recipe_invokes_restic_with_excludes_file(
             def __init__(self) -> None:
                 self.stdout = io.StringIO("processed 0 files\n")
                 self.returncode = 0
+                self.args = cmd
+
+            def __enter__(self) -> FakeProc:
+                return self
+
+            def __exit__(self, exc_type: object, exc_val: object, exc_tb: object) -> None:
+                pass
+
+            def kill(self) -> None:
+                pass
+
+            def communicate(
+                self, input: str | bytes | None = None, timeout: float | None = None
+            ) -> tuple[str, str]:
+                return "", ""
+
+            def poll(self) -> int | None:
+                return 0
 
             def wait(self, timeout: float | None = None) -> int:  # type: ignore[no-untyped-def, override]
                 return 0
@@ -172,8 +187,7 @@ def test_run_recipe_dry_run_passes_flag(
     test_yaml = tmp_path / "instance.yaml"
     full_text = full_instance_yaml.read_text()
     test_yaml.write_text(
-        full_text
-        + "\n  recipes:\n    test-tiny:\n      description: t\n      sources:\n"
+        full_text + "\n  recipes:\n    test-tiny:\n      description: t\n      sources:\n"
         f"        - '{tmp_path}'\n      target: primary\n",
         encoding="utf-8",
     )
@@ -190,6 +204,24 @@ def test_run_recipe_dry_run_passes_flag(
             def __init__(self) -> None:
                 self.stdout = io.StringIO("")
                 self.returncode = 0
+                self.args = cmd
+
+            def __enter__(self) -> FakeProc:
+                return self
+
+            def __exit__(self, exc_type: object, exc_val: object, exc_tb: object) -> None:
+                pass
+
+            def kill(self) -> None:
+                pass
+
+            def communicate(
+                self, input: str | bytes | None = None, timeout: float | None = None
+            ) -> tuple[str, str]:
+                return "", ""
+
+            def poll(self) -> int | None:
+                return 0
 
             def wait(self, timeout: float | None = None) -> int:  # type: ignore[no-untyped-def, override]
                 return 0
@@ -227,6 +259,24 @@ def test_run_no_recipe_falls_back_to_legacy_script(
             def __init__(self) -> None:
                 self.stdout = io.StringIO("legacy ran\n")
                 self.returncode = 0
+                self.args = cmd
+
+            def __enter__(self) -> FakeProc:
+                return self
+
+            def __exit__(self, exc_type: object, exc_val: object, exc_tb: object) -> None:
+                pass
+
+            def kill(self) -> None:
+                pass
+
+            def communicate(
+                self, input: str | bytes | None = None, timeout: float | None = None
+            ) -> tuple[str, str]:
+                return "", ""
+
+            def poll(self) -> int | None:
+                return 0
 
             def wait(self, timeout: float | None = None) -> int:  # type: ignore[no-untyped-def, override]
                 return 0

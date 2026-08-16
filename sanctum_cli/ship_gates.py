@@ -1,6 +1,7 @@
 """Pure ship-bar gate functions. Side effects are injected so each gate is
 unit-testable against hostile inputs (dead sink, false-green probe, missing
 secret) without touching the real haus."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -40,15 +41,18 @@ def gate_secrets(
     keychain_has: Callable[[str, str], bool],
     is_default: Callable[[str, str], bool],
 ) -> GateResult:
-    missing = [s.service for s in m.secrets
-               if s.required and not keychain_has(s.account, s.service)]
+    missing = [
+        s.service for s in m.secrets if s.required and not keychain_has(s.account, s.service)
+    ]
     if missing:
-        return GateResult("secrets-bootstrap", GateStatus.RED,
-                          f"missing required secrets: {missing}")
+        return GateResult(
+            "secrets-bootstrap", GateStatus.RED, f"missing required secrets: {missing}"
+        )
     defaulted = [s.service for s in m.secrets if is_default(s.account, s.service)]
     if defaulted:
-        return GateResult("secrets-bootstrap", GateStatus.AMBER,
-                          f"secrets look like author-defaults: {defaulted}")
+        return GateResult(
+            "secrets-bootstrap", GateStatus.AMBER, f"secrets look like author-defaults: {defaulted}"
+        )
     return GateResult("secrets-bootstrap", GateStatus.GREEN, "present + non-default")
 
 
@@ -59,13 +63,12 @@ def gate_self_heal(
     keepalive = [s for s in m.services if s.keepalive]
     no_probe = [s.label for s in keepalive if not s.health_probe]
     if no_probe:
-        return GateResult("self-heal", GateStatus.RED,
-                          f"keepalive services without a health probe: {no_probe}")
-    crashing = [s.label for s in keepalive
-                if s.health_probe and not heal_action_ok(s.label)]
+        return GateResult(
+            "self-heal", GateStatus.RED, f"keepalive services without a health probe: {no_probe}"
+        )
+    crashing = [s.label for s in keepalive if s.health_probe and not heal_action_ok(s.label)]
     if crashing:
-        return GateResult("self-heal", GateStatus.RED,
-                          f"heal action missing/crashing: {crashing}")
+        return GateResult("self-heal", GateStatus.RED, f"heal action missing/crashing: {crashing}")
     if not keepalive:
         return GateResult("self-heal", GateStatus.GREEN, "no long-running services")
     return GateResult("self-heal", GateStatus.AMBER, "heal wired, soak-unproven")
@@ -77,15 +80,22 @@ def gate_alert_hygiene(
     probe_is_false_green: Callable[[str], bool],
 ) -> GateResult:
     if not sink_live(m.alerts.sink):
-        return GateResult("alert-hygiene", GateStatus.RED,
-                          f"alert sink '{m.alerts.sink}' is not reachable")
+        return GateResult(
+            "alert-hygiene", GateStatus.RED, f"alert sink '{m.alerts.sink}' is not reachable"
+        )
     liars = [p for p in m.probes if probe_is_false_green(p)]
     if liars:
-        return GateResult("alert-hygiene", GateStatus.RED,
-                          f"false-green probes (report ok while failing): {liars}")
+        return GateResult(
+            "alert-hygiene",
+            GateStatus.RED,
+            f"false-green probes (report ok while failing): {liars}",
+        )
     if len(m.alerts.pager_conditions) > 3:
-        return GateResult("alert-hygiene", GateStatus.AMBER,
-                          "pager conditions look broad; keep P0/P1 crucial-only")
+        return GateResult(
+            "alert-hygiene",
+            GateStatus.AMBER,
+            "pager conditions look broad; keep P0/P1 crucial-only",
+        )
     return GateResult("alert-hygiene", GateStatus.GREEN, "live sink, minimal pager")
 
 
@@ -100,8 +110,9 @@ def gate_soak(
     if not soak_clean(m):
         return GateResult("soak", GateStatus.RED, f"soak recorded faults ({days:.1f}d)")
     if days < m.soak.min_days:
-        return GateResult("soak", GateStatus.AMBER,
-                          f"soak {days:.1f}d < required {m.soak.min_days}d")
+        return GateResult(
+            "soak", GateStatus.AMBER, f"soak {days:.1f}d < required {m.soak.min_days}d"
+        )
     return GateResult("soak", GateStatus.GREEN, f"clean {days:.1f}d soak")
 
 
@@ -115,8 +126,11 @@ def gate_docs_demo(
     if ok_docs and ok_demo:
         return GateResult("docs+demo", GateStatus.GREEN, "docs resolve, demo exits 0")
     if ok_docs or ok_demo:
-        return GateResult("docs+demo", GateStatus.AMBER,
-                          f"docs={'ok' if ok_docs else 'X'} demo={'ok' if ok_demo else 'X'}")
+        return GateResult(
+            "docs+demo",
+            GateStatus.AMBER,
+            f"docs={'ok' if ok_docs else 'X'} demo={'ok' if ok_demo else 'X'}",
+        )
     return GateResult("docs+demo", GateStatus.RED, "neither docs nor demo verified")
 
 

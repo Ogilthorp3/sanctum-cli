@@ -54,6 +54,21 @@ def test_parse_mtu_from_ifconfig() -> None:
     assert detect.parse_mtu(out) == 1500
 
 
+def test_parse_mtu_for_specific_iface() -> None:
+    out = (
+        "lo0: flags=8049<UP,LOOPBACK,RUNNING,MULTICAST> mtu 16384\n"
+        "\toptions=1203<RXCSUM,TXCSUM,TXSTATUS,TSO4,TSO6>\n"
+        "en1: flags=8863<UP> mtu 1500\n"
+        "\tinet 192.168.2.10 netmask 0xffffff00\n"
+    )
+    # Global matches lo0 first -> 16384
+    assert detect.parse_mtu(out) == 16384
+    # Specific interface matches en1 -> 1500
+    assert detect.parse_mtu(out, "en1") == 1500
+    # Specific interface that doesn't exist -> None
+    assert detect.parse_mtu(out, "en9") is None
+
+
 def test_detect_double_nat_bell() -> None:
     rep = detect.detect(
         runner=fx.FakeRunner(fx.DOUBLE_NAT),

@@ -61,6 +61,8 @@ def test_render_no_precheck_block_when_empty() -> None:
     # Playbooks without prechecks (e.g. generic) must not grow a stray header.
     text = render.render_plan(_report(isp="generic"), BUILTINS["generic"])
     assert "before you start" not in text.lower()
+
+
 # ─── speed report ────────────────────────────────────────────────────
 
 

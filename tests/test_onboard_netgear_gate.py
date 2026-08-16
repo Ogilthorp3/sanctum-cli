@@ -314,9 +314,7 @@ def test_store_device_secret_threads_hostile_value_through_both_tiers(
     monkeypatch.setattr("sanctum_cli.commands.onboard._keychain_write", fake_keychain_write)
     monkeypatch.setattr("sanctum_cli.commands.onboard._mirror_to_trifecta", fake_mirror)
 
-    onboard.store_device_secret(
-        service="bell-hub-admin", account="admin", secret=HOSTILE_PASSWORD
-    )
+    onboard.store_device_secret(service="bell-hub-admin", account="admin", secret=HOSTILE_PASSWORD)
     assert seen["keychain"] == HOSTILE_PASSWORD
     assert seen["mirror"] == HOSTILE_PASSWORD
 
@@ -356,9 +354,12 @@ def test_paired_gate_writes_hostile_password_verbatim_to_keychain_seam(
         ),
     )
 
+    import sys
+
     import yaml
 
     with (
+        patch("getpass.getpass", side_effect=lambda *a, **k: sys.stdin.readline().rstrip("\n")),
         patch("sanctum_cli.commands.onboard.backup_cmd.backup_estimate"),
         patch("sanctum_cli.commands.onboard.backup_cmd.backup_run"),
         patch("sanctum_cli.commands.onboard._dispatch_cloud_setup"),

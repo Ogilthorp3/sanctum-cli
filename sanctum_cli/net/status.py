@@ -196,9 +196,7 @@ def _daemon_row(daemon: DaemonInfo | None) -> StatusRow:
     # 5. Loaded and fresh (or freshness unknown — fail-open, an unread age is not
     #    proof of a wedge). It is running / guarding → OK, even if the last cycle
     #    reverted/noop'd (those are normal per-cycle outcomes, not an outage).
-    return StatusRow(
-        "Heal daemon", RowStatus.OK, f"com.sanctum.net-heal loaded · {last}"
-    )
+    return StatusRow("Heal daemon", RowStatus.OK, f"com.sanctum.net-heal loaded · {last}")
 
 
 def _identity_row(identity: IdentityDiagnosis | None) -> StatusRow:
@@ -247,9 +245,7 @@ def _guardian_row(guardian: GuardianInfo | None) -> StatusRow:
     age = f"{guardian.age_seconds}s ago" if guardian.age_seconds is not None else "age unknown"
     if guardian.fresh:
         return StatusRow("Guardian", RowStatus.OK, f"trust-guardian heartbeat fresh ({age})")
-    return StatusRow(
-        "Guardian", RowStatus.DOWN, f"trust-guardian heartbeat STALE ({age})"
-    )
+    return StatusRow("Guardian", RowStatus.DOWN, f"trust-guardian heartbeat STALE ({age})")
 
 
 def build_status_report(

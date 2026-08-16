@@ -13,8 +13,7 @@ class DependencyError(ManifestError):
 
 
 def _user_dir() -> Path:
-    return Path(os.environ.get("SANCTUM_MODULES_DIR",
-                               Path("~/.sanctum/modules").expanduser()))
+    return Path(os.environ.get("SANCTUM_MODULES_DIR", Path("~/.sanctum/modules").expanduser()))
 
 
 class ModuleRegistry:
@@ -24,7 +23,7 @@ class ModuleRegistry:
     @classmethod
     def discover(cls) -> ModuleRegistry:
         found: dict[str, ModuleManifest] = {}
-        for d in (BUILTIN_DIR, _user_dir()):   # user dir second => overrides
+        for d in (BUILTIN_DIR, _user_dir()):  # user dir second => overrides
             if not d.is_dir():
                 continue
             for f in sorted(d.glob("*.module.yaml")):
@@ -34,8 +33,7 @@ class ModuleRegistry:
 
     def get(self, name: str) -> ModuleManifest:
         if name not in self.manifests:
-            raise ManifestError(f"unknown module '{name}' "
-                                f"(installed: {sorted(self.manifests)})")
+            raise ManifestError(f"unknown module '{name}' (installed: {sorted(self.manifests)})")
         return self.manifests[name]
 
     def names(self) -> list[str]:

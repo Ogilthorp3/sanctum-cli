@@ -109,9 +109,7 @@ def test_wizard_promotes_to_secondary_when_primary_present(
         patch("sanctum_cli.backends.gdrive.keychain.exists", return_value=True),
         patch("sanctum_cli.backends.gdrive.keychain.read", return_value="passphrase"),
     ):
-        result = runner.invoke(
-            app, ["cloud", "setup", "--backend", "gdrive", "--no-open"]
-        )
+        result = runner.invoke(app, ["cloud", "setup", "--backend", "gdrive", "--no-open"])
 
     assert result.exit_code == 0, result.stdout + (result.stderr or "")
     parsed_after = _yaml.safe_load(target.read_text())

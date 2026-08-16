@@ -42,9 +42,7 @@ def test_resolve_builtin() -> None:
 def test_resolve_user_override_wins() -> None:
     cfg = CliConfig(
         recipes={
-            "family": Recipe(
-                description="user's version", sources=["~/MyDocs"], target="primary"
-            )
+            "family": Recipe(description="user's version", sources=["~/MyDocs"], target="primary")
         }
     )
     r = recipes.resolve("family", cfg)

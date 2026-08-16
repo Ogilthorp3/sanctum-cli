@@ -47,9 +47,7 @@ def _resolve_recipe_target(cfg: config.Config, recipe: config.Recipe) -> _Repo:
     cb = cfg.cli.cloud_backup
     if cb is None:
         msg = "no cloud_backup configured in instance.yaml"
-        raise UserError(
-            msg, fix="run `sanctum cloud setup` to configure a backup target"
-        )
+        raise UserError(msg, fix="run `sanctum cloud setup` to configure a backup target")
     slot = recipe.target
     repo_cfg = cb.primary if slot == "primary" else cb.secondary
     if repo_cfg is None:
@@ -82,12 +80,10 @@ def _load_password(cfg: config.Config) -> str:
     if cb is None or cb.primary is None:
         msg = "cannot find Keychain pointer (cloud_backup.primary missing)"
         raise UserError(msg)
-    return keychain.read(
-        account=cb.primary.keychain.account, service=cb.primary.keychain.service
-    )
+    return keychain.read(account=cb.primary.keychain.account, service=cb.primary.keychain.service)
 
 
-def _restic_env(cfg: config.Config, repo: "_Repo") -> dict[str, str]:
+def _restic_env(cfg: config.Config, repo: _Repo) -> dict[str, str]:
     """Env for a restic invocation against ``repo``: RESTIC_PASSWORD plus the
     cloud-backend credentials restic needs to actually reach the repo. Without
     the cloud creds, run/verify/restore/snapshots against b2:/s3:/r2: repos
@@ -192,6 +188,21 @@ def _backup_recipe(name: str, *, dry_run: bool) -> None:
         raise LocalError(msg, fix="brew install restic")
 
     env = _restic_env(cfg, repo)
+
+    # Clean up stale locks from previous interrupted runs
+    try:
+        subprocess.run(
+            ["restic", "-r", repo.path, "unlock"],
+            env=env,
+            capture_output=True,
+            timeout=RESTIC_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise LocalError(
+            "restic unlock timed out",
+            fix="check network connectivity to the remote backup repository or unlock manually",
+        ) from e
+
 
     # Write excludes to a temp file (restic --exclude-file)
     import tempfile
@@ -336,9 +347,7 @@ def backup_estimate(
             per_source.append({"path": str(src), "size_kb": None, "note": "timeout"})
             continue
         if out.returncode != 0:
-            per_source.append(
-                {"path": str(src), "size_kb": None, "note": out.stderr.strip()[:80]}
-            )
+            per_source.append({"path": str(src), "size_kb": None, "note": out.stderr.strip()[:80]})
             continue
         kb = int(out.stdout.split("\t", 1)[0])
         total_kb += kb
@@ -371,11 +380,7 @@ def backup_estimate(
     t.add_column("size", justify="right")
     t.add_column("note")
     for s in per_source:
-        size = (
-            f"{s['size_kb'] / 1024 / 1024:.2f} GB"
-            if isinstance(s["size_kb"], int)
-            else "?"
-        )
+        size = f"{s['size_kb'] / 1024 / 1024:.2f} GB" if isinstance(s["size_kb"], int) else "?"
         t.add_row(str(s["path"]), size, str(s.get("note", "")))
     console.print(t)
     console.print()

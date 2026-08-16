@@ -32,7 +32,7 @@ def all_pass_probes(monkeypatch):
     """Force every probe in the registry to return passed=True."""
     fake = [
         st.Probe("alpha probe", lambda: st.ProbeResult(True, "ok")),
-        st.Probe("beta probe",  lambda: st.ProbeResult(True, "ok")),
+        st.Probe("beta probe", lambda: st.ProbeResult(True, "ok")),
         st.Probe("gamma probe", lambda: st.ProbeResult(True, "ok")),
     ]
     monkeypatch.setattr(st, "PROBES", fake)
@@ -43,7 +43,7 @@ def all_pass_probes(monkeypatch):
 def one_fail_probes(monkeypatch):
     fake = [
         st.Probe("alpha probe", lambda: st.ProbeResult(True, "ok")),
-        st.Probe("beta probe",  lambda: st.ProbeResult(False, "intentional test failure")),
+        st.Probe("beta probe", lambda: st.ProbeResult(False, "intentional test failure")),
         st.Probe("gamma probe", lambda: st.ProbeResult(True, "ok")),
     ]
     monkeypatch.setattr(st, "PROBES", fake)
@@ -82,7 +82,7 @@ def test_json_output_all_pass(runner, all_pass_probes):
     assert result.exit_code == 0
     # Extract the JSON block from output (Rich wraps it); parse leniently.
     start = result.output.find("{")
-    payload = json.loads(result.output[start:result.output.rfind("}") + 1])
+    payload = json.loads(result.output[start : result.output.rfind("}") + 1])
     assert payload["total"] == 3
     assert payload["passed"] == 3
     assert payload["failed"] == 0
@@ -93,7 +93,7 @@ def test_json_output_one_fail(runner, one_fail_probes):
     result = runner.invoke(app, ["self-test", "--json"])
     assert result.exit_code == 1
     start = result.output.find("{")
-    payload = json.loads(result.output[start:result.output.rfind("}") + 1])
+    payload = json.loads(result.output[start : result.output.rfind("}") + 1])
     assert payload["passed"] == 2
     assert payload["failed"] == 1
 
@@ -120,7 +120,8 @@ def test_haus_only_probe_returns_na_on_cli_only_install(runner, monkeypatch, tmp
 
     # Point _haus_tier_installed at a fresh-fake home with no haus markers.
     monkeypatch.setattr(
-        st, "_haus_tier_installed",
+        st,
+        "_haus_tier_installed",
         lambda: False,
     )
 
@@ -134,15 +135,17 @@ def test_haus_only_probe_returns_na_on_cli_only_install(runner, monkeypatch, tmp
     result = fake_probe()
 
     assert result.not_applicable is True
-    assert result.passed is True   # n/a counts as passing for exit-code purposes
+    assert result.passed is True  # n/a counts as passing for exit-code purposes
     assert inner_called["value"] is False, "inner probe must NOT run when n/a"
     assert "CLI-only" in result.reason
 
 
 def test_probe_that_raises_is_caught_as_fail(runner, monkeypatch):
     """A probe that throws an exception should fail-but-not-crash."""
+
     def boom() -> st.ProbeResult:
         raise RuntimeError("boom")
+
     fake = [
         st.Probe("alpha probe", lambda: st.ProbeResult(True, "ok")),
         st.Probe("exploding probe", boom),

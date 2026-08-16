@@ -48,7 +48,9 @@ _INET_RE = re.compile(r"\binet\s+(\d{1,3}(?:\.\d{1,3}){3})\b")
 # bridge (e.g. a Thunderbolt point-to-point link) is the other never-strand spine —
 # an OOB path that survives a LAN renumber / gateway death. The bridge subnet is
 # per-operator (default is the reference 10.0.5.0/24); override with SANCTUM_OOB_PREFIX.
-_TAILNET_NET = ipaddress.ip_network("100.64.0.0/10")  # ip-allow: RFC-6598 CGNAT range Tailscale uses for ALL tailnets (product-generic)
+_TAILNET_NET = ipaddress.ip_network(
+    "100.64.0.0/10"
+)  # ip-allow: RFC-6598 CGNAT range Tailscale uses for ALL tailnets (product-generic)
 _TB5_PREFIX = os.environ.get("SANCTUM_OOB_PREFIX", "10.0.5.")
 
 # no-loop guard: after this many heal attempts (persisted across daemon runs) we
@@ -259,9 +261,7 @@ def _gateway_off_subnet(posture: NetPosture) -> bool:
     return gw not in net
 
 
-def diagnose_posture(
-    posture: NetPosture, *, overlap: bool = False
-) -> PostureDiagnosis:
+def diagnose_posture(posture: NetPosture, *, overlap: bool = False) -> PostureDiagnosis:
     """Classify a :class:`NetPosture` into a verdict + a guarded remedy (pure).
 
     The truth table, in priority order:
@@ -307,7 +307,7 @@ def diagnose_posture(
         return PostureDiagnosis(
             verdict="STATIC_DRIFT",
             detail="Interface is on a Manual (static) address — strands the node on any foreign LAN.",
-            remedy="Flip Wi-Fi to DHCP (networksetup -setdhcp \"Wi-Fi\").",
+            remedy='Flip Wi-Fi to DHCP (networksetup -setdhcp "Wi-Fi").',
             action=HealAction("flip_dhcp", safe=True, detail="Manual → DHCP"),
             posture=posture,
         )
@@ -585,9 +585,7 @@ def heal_err_path() -> Path:
     return _HEAL_STATE_DIR / "net-heal.err"
 
 
-def render_heal_plist(
-    *, wrapper: Path | None = None, err_log: Path | None = None
-) -> str:
+def render_heal_plist(*, wrapper: Path | None = None, err_log: Path | None = None) -> str:
     """Render :data:`HEAL_PLIST` with absolute paths.
 
     Defaults resolve from the path helpers so the caller normally renders with no

@@ -75,10 +75,7 @@ def minimal_instance_yaml(tmp_path: Path) -> Path:
     """A tiny but valid instance.yaml — instance block only, defaults everywhere else."""
     p = tmp_path / "instance.yaml"
     p.write_text(
-        "instance:\n"
-        "  name: Test Instance\n"
-        "  slug: test-instance\n"
-        "  timezone: UTC\n",
+        "instance:\n  name: Test Instance\n  slug: test-instance\n  timezone: UTC\n",
         encoding="utf-8",
     )
     return p
@@ -141,3 +138,13 @@ cli:
         encoding="utf-8",
     )
     return p
+
+
+@pytest.fixture(autouse=True)
+def _fast_heal_verify_delay(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Speed up net-heal verification polling in tests."""
+    try:
+        import sanctum_cli.commands.net
+        monkeypatch.setattr(sanctum_cli.commands.net, "_HEAL_VERIFY_DELAY_S", 0.001)
+    except ImportError:
+        pass

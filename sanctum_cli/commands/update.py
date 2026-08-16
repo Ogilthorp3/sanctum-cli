@@ -24,7 +24,8 @@ def update_command(
         bool, typer.Option("--dry-run", help="Show what would happen, don't do it.")
     ] = False,
     skip_self_test: Annotated[
-        bool, typer.Option("--skip-self-test", help="Don't run self-test after upgrade."),
+        bool,
+        typer.Option("--skip-self-test", help="Don't run self-test after upgrade."),
     ] = False,
 ) -> None:
     """Pull the latest sanctum-cli + run self-test as the gate."""
@@ -48,7 +49,8 @@ def update_command(
     else:
         r = subprocess.run(
             ["brew", "upgrade", "ogilthorp3/sanctum/sanctum-cli"],
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
         )
         # `brew upgrade` exits 0 even if already up-to-date; useful messages
         # land on stderr. Look for the "already installed" hint.
@@ -63,7 +65,9 @@ def update_command(
 
     if skip_self_test:
         console.print()
-        console.print("[dim]--skip-self-test: not running the gate. Run `sanctum self-test` manually.[/]")
+        console.print(
+            "[dim]--skip-self-test: not running the gate. Run `sanctum self-test` manually.[/]"
+        )
         raise typer.Exit(code=0)
 
     console.print()
@@ -74,17 +78,22 @@ def update_command(
 
     # Invoke the self-test command in-process so the user sees the panel.
     from sanctum_cli.commands import self_test as st
+
     try:
         st.self_test_command(json_output=False, only=None)
     except typer.Exit as exc:
         if exc.exit_code == 0:
-            console.print(Panel(
-                "[bold green]Update complete.[/] Self-test passed.",
-                border_style="green",
-            ))
+            console.print(
+                Panel(
+                    "[bold green]Update complete.[/] Self-test passed.",
+                    border_style="green",
+                )
+            )
         else:
-            console.print(Panel(
-                "[bold red]Update applied, but self-test failed.[/] Investigate before relying on the new version.",
-                border_style="red",
-            ))
+            console.print(
+                Panel(
+                    "[bold red]Update applied, but self-test failed.[/] Investigate before relying on the new version.",
+                    border_style="red",
+                )
+            )
         raise

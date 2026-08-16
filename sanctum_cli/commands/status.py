@@ -317,7 +317,9 @@ def render_table(snap: dict[str, Any]) -> None:
         console.print(bk)
         console.print()
 
-    console.print(f"telemetry: {tel.request_count} requests · {tel.error_count} errors · last {tel.window_days}d")
+    console.print(
+        f"telemetry: {tel.request_count} requests · {tel.error_count} errors · last {tel.window_days}d"
+    )
 
 
 def render_json(snap: dict[str, Any]) -> str:

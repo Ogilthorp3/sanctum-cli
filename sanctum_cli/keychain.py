@@ -12,12 +12,13 @@ prompt — callers can surface this to the user with a fix suggestion.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 
 from sanctum_cli.errors import LocalError
 
-SECURITY_BIN = "/usr/bin/security"
+SECURITY_BIN = os.environ.get("SANCTUM_SECURITY_BIN", "/usr/bin/security")
 TIMEOUT_S = 5
 
 

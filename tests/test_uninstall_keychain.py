@@ -1,8 +1,9 @@
 """Uninstall Keychain-revoke correctness (deep-audit M9)."""
+
 from __future__ import annotations
 
-from sanctum_cli.commands import uninstall
 from sanctum_cli.backends import b2
+from sanctum_cli.commands import uninstall
 
 
 def test_revoke_list_matches_real_write_sites_and_preserves_restic():
@@ -22,7 +23,9 @@ def test_revoke_list_matches_real_write_sites_and_preserves_restic():
 def test_revoke_uses_the_paired_account(monkeypatch):
     calls = []
     monkeypatch.setattr(
-        uninstall, "revoke_keychain_entry", lambda account, service: calls.append((account, service)) or True
+        uninstall,
+        "revoke_keychain_entry",
+        lambda account, service: calls.append((account, service)) or True,
     )
     uninstall._revoke_keychain_entries()
     # Every call uses the account paired with the service (not a hardcoded 'sanctum').

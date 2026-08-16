@@ -19,7 +19,9 @@ if TYPE_CHECKING:
 runner = CliRunner()
 
 
-def _completed(stdout: str = "", returncode: int = 0, stderr: str = "") -> subprocess.CompletedProcess[str]:
+def _completed(
+    stdout: str = "", returncode: int = 0, stderr: str = ""
+) -> subprocess.CompletedProcess[str]:
     return subprocess.CompletedProcess(args=[], returncode=returncode, stdout=stdout, stderr=stderr)
 
 
@@ -139,6 +141,7 @@ def test_backup_invalid_repo_filter_user_error(
 # ── _restic_env injects cloud creds by repo scheme (M8 fix) ──────────────
 def test_restic_env_injects_b2_creds(monkeypatch):
     from sanctum_cli.commands import backup
+
     monkeypatch.setattr(backup, "_load_password", lambda cfg: "pw")
     monkeypatch.setattr(backup.keychain, "read", lambda account, service: f"{service}:val")
     env = backup._restic_env(None, backup._Repo(label="primary", path="b2:bucket"))
@@ -150,6 +153,7 @@ def test_restic_env_injects_b2_creds(monkeypatch):
 
 def test_restic_env_injects_r2_s3_creds(monkeypatch):
     from sanctum_cli.commands import backup
+
     monkeypatch.setattr(backup, "_load_password", lambda cfg: "pw")
     monkeypatch.setattr(backup.keychain, "read", lambda account, service: f"{service}:val")
     for scheme in ("r2:bucket", "s3:bucket"):
@@ -162,6 +166,7 @@ def test_restic_env_injects_r2_s3_creds(monkeypatch):
 
 def test_restic_env_local_repo_password_only(monkeypatch):
     from sanctum_cli.commands import backup
+
     monkeypatch.setattr(backup, "_load_password", lambda cfg: "pw")
     monkeypatch.setattr(backup.keychain, "read", lambda account, service: "should-not-read")
     env = backup._restic_env(None, backup._Repo(label="primary", path="/local/restic"))

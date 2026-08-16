@@ -98,7 +98,9 @@ def devices_command() -> None:
 
     unassigned = data.get("unassigned", [])
     if unassigned:
-        table = Table(title="Unassigned (auto-discovered)", show_header=True, header_style="bold yellow")
+        table = Table(
+            title="Unassigned (auto-discovered)", show_header=True, header_style="bold yellow"
+        )
         table.add_column("MAC")
         table.add_column("Guess")
         table.add_column("First seen")

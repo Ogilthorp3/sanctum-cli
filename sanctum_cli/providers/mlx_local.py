@@ -57,7 +57,7 @@ class MlxLocalProvider(Provider):
                 for line in response.iter_lines():
                     if not line.startswith("data:"):
                         continue
-                    payload = line[len("data:"):].strip()
+                    payload = line[len("data:") :].strip()
                     if payload == "[DONE]":
                         break
                     try:
@@ -88,7 +88,9 @@ class MlxLocalProvider(Provider):
             r = self._client.get("/v1/models", timeout=HEALTH_TIMEOUT_S)
             r.raise_for_status()
             latency_ms = (time.perf_counter_ns() - t0) // 1_000_000
-            return HealthSnapshot(ok=True, latency_ms=int(latency_ms), quota_remaining=None, detail=None)
+            return HealthSnapshot(
+                ok=True, latency_ms=int(latency_ms), quota_remaining=None, detail=None
+            )
         except Exception as exc:
             return HealthSnapshot(
                 ok=False, latency_ms=None, quota_remaining=None, detail=str(exc)[:160]

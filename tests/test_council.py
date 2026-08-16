@@ -3,8 +3,9 @@
 Interactive REPL (seat-switching, shared transcript) + one-shot fan-out mode
 (``sanctum council "question"`` asks every seat in parallel and ends with a
 Yoda synthesis). Seats are proxyd :4040 council models (Anthropic dialect);
-each Jedi is a persona system-prompt on top of a seat — Yoda and Mundi share
-a brain but not a voice, which is the neurodiversity doctrine in one line.
+each Jedi is a persona system-prompt on top of a seat. Neurodiversity is
+paramount: distinct proxyd brains per role (Fable / Gemini / Devstral / Grok /
+Heretic / Opus), with Jocasta+Mothma sharing the Opus brain.
 
 Tests cover the pure parts (registry, REPL parsing, transcript, SSE delta
 parsing, fan-out aggregation with a stubbed transport). The network client
@@ -29,8 +30,16 @@ class TestSeats:
         assert set(cc.SEATS) == {"yoda", "windu", "quigon", "mundi", "cilghal", "jocasta", "mothma"}
         for jedi, seat in cc.SEATS.items():
             assert seat.label and seat.model and seat.persona, jedi
-        # Yoda + Mundi share a model but never a persona (neurodiversity).
-        assert cc.SEATS["yoda"].model == cc.SEATS["mundi"].model
+        # Aligned with OpenClaw: distinct brains; archives+ops share Opus medium.
+        assert cc.SEATS["yoda"].model == "council-max-thinking"
+        assert cc.SEATS["windu"].model == "council-spacial"
+        assert cc.SEATS["quigon"].model == "council-code"
+        assert cc.SEATS["mundi"].model == "council-finance"
+        assert cc.SEATS["cilghal"].model == "council-heretic"
+        assert cc.SEATS["jocasta"].model == "council-brain"
+        assert cc.SEATS["mothma"].model == "council-brain"
+        assert cc.SEATS["yoda"].model != cc.SEATS["mundi"].model
+        assert cc.SEATS["jocasta"].model == cc.SEATS["mothma"].model
         assert cc.SEATS["yoda"].persona != cc.SEATS["mundi"].persona
         assert cc.DEFAULT_SEAT == "yoda"
 

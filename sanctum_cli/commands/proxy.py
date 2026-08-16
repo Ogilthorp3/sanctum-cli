@@ -54,7 +54,9 @@ def _agent_status(label: str) -> str:
 def proxy_status(
     target: Annotated[
         str,
-        typer.Argument(help="Which proxy: all | claude-cli-proxy | sanctum-server | lmstudio-bridge."),
+        typer.Argument(
+            help="Which proxy: all | claude-cli-proxy | sanctum-server | lmstudio-bridge."
+        ),
     ] = "all",
     json_output: Annotated[bool, typer.Option("--json", help="Emit JSON.")] = False,
 ) -> None:

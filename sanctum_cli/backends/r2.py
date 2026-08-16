@@ -220,9 +220,7 @@ def _create_bucket(creds: _R2Creds, bucket: str) -> None:
     """Idempotent: BucketAlreadyOwnedByYou is treated as success."""
     headers = _sigv4_sign(creds, "PUT", f"/{bucket}")
     try:
-        r = httpx.put(
-            f"{creds.endpoint}/{bucket}", headers=headers, timeout=HTTP_TIMEOUT_S
-        )
+        r = httpx.put(f"{creds.endpoint}/{bucket}", headers=headers, timeout=HTTP_TIMEOUT_S)
     except httpx.HTTPError as exc:
         msg = f"R2 CreateBucket network failure: {exc}"
         raise UserError(msg) from exc
@@ -340,9 +338,7 @@ def _persist(
         "repo": repo,
         "keychain": {"service": keychain_service_restic, "account": keychain_account},
     }
-    cb_block.setdefault(
-        "retention", {"keep_daily": 7, "keep_weekly": 4, "keep_monthly": 12}
-    )
+    cb_block.setdefault("retention", {"keep_daily": 7, "keep_weekly": 4, "keep_monthly": 12})
     cli_block["cloud_backup"] = cb_block
     raw["cli"] = cli_block
 
@@ -437,9 +433,7 @@ def run_wizard(*, auto_open: bool = True, persist: bool = True) -> _SetupResult:
             KEYCHAIN_SERVICE_RESTIC, KEYCHAIN_ACCOUNT_RESTIC, passphrase, replace=False
         )
     else:
-        passphrase = keychain.read(
-            account=KEYCHAIN_ACCOUNT_RESTIC, service=KEYCHAIN_SERVICE_RESTIC
-        )
+        passphrase = keychain.read(account=KEYCHAIN_ACCOUNT_RESTIC, service=KEYCHAIN_SERVICE_RESTIC)
         console.print("  [dim]reusing existing sanctum-backup-key from Keychain[/]")
 
     # 6. restic init
@@ -482,7 +476,9 @@ def run_wizard(*, auto_open: bool = True, persist: bool = True) -> _SetupResult:
     summary.add_row("account", creds.account_id)
     summary.add_row("bucket", bucket)
     summary.add_row("repo", repo)
-    summary.add_row("keychain (R2 access key)", f"{KEYCHAIN_SERVICE_R2_ACCESS_KEY} / {KEYCHAIN_ACCOUNT}")
+    summary.add_row(
+        "keychain (R2 access key)", f"{KEYCHAIN_SERVICE_R2_ACCESS_KEY} / {KEYCHAIN_ACCOUNT}"
+    )
     summary.add_row("keychain (R2 secret)", f"{KEYCHAIN_SERVICE_R2_SECRET} / {KEYCHAIN_ACCOUNT}")
     summary.add_row("keychain (restic)", f"{KEYCHAIN_SERVICE_RESTIC} / {KEYCHAIN_ACCOUNT_RESTIC}")
     console.print()

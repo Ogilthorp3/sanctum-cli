@@ -109,9 +109,7 @@ def _preflight(cfg: config.Config) -> None:
 def _b2_authorize(key_id: str, app_key: str) -> _B2AuthResult:
     """Probe B2 with keyID:appKey. Returns the account-level apiUrl."""
     try:
-        r = httpx.get(
-            B2_AUTH_URL, auth=(key_id, app_key), timeout=B2_HTTP_TIMEOUT_S
-        )
+        r = httpx.get(B2_AUTH_URL, auth=(key_id, app_key), timeout=B2_HTTP_TIMEOUT_S)
     except httpx.HTTPError as exc:
         msg = f"B2 authorize-account network failure: {exc}"
         raise UserError(msg, fix="check network connectivity to api.backblazeb2.com") from exc
@@ -184,15 +182,15 @@ def _gen_passphrase() -> str:
     return secrets.token_hex(32)
 
 
-def _ensure_keychain_entry(
-    service: str, account: str, value: str, *, replace: bool
-) -> None:
+def _ensure_keychain_entry(service: str, account: str, value: str, *, replace: bool) -> None:
     """Use macOS `security` to add a generic-password entry."""
-    if not shutil.which("/usr/bin/security"):
+    from sanctum_cli.keychain import SECURITY_BIN
+
+    if not shutil.which(SECURITY_BIN):
         msg = "security CLI missing"
         raise LocalError(msg)
     args = [
-        "/usr/bin/security",
+        SECURITY_BIN,
         "add-generic-password",
         "-a",
         account,
@@ -312,9 +310,7 @@ def _persist_to_instance_yaml(
             "account": keychain_account,
         },
     }
-    cb_block.setdefault(
-        "retention", {"keep_daily": 7, "keep_weekly": 4, "keep_monthly": 12}
-    )
+    cb_block.setdefault("retention", {"keep_daily": 7, "keep_weekly": 4, "keep_monthly": 12})
     cli_block["cloud_backup"] = cb_block
     raw["cli"] = cli_block
 
@@ -394,23 +390,15 @@ def run_wizard(
     # 5. Stash credentials in Keychain (incl. fresh restic passphrase)
     console.print("\n[bold]Step 4.[/] Storing credentials + restic passphrase in Keychain …")
     passphrase = _gen_passphrase()
-    replace = Confirm.ask(
-        "  overwrite existing entries if present?", default=True
-    )
-    _ensure_keychain_entry(
-        KEYCHAIN_SERVICE_KEY_ID, KEYCHAIN_ACCOUNT, key_id, replace=replace
-    )
-    _ensure_keychain_entry(
-        KEYCHAIN_SERVICE_APP_KEY, KEYCHAIN_ACCOUNT, app_key, replace=replace
-    )
+    replace = Confirm.ask("  overwrite existing entries if present?", default=True)
+    _ensure_keychain_entry(KEYCHAIN_SERVICE_KEY_ID, KEYCHAIN_ACCOUNT, key_id, replace=replace)
+    _ensure_keychain_entry(KEYCHAIN_SERVICE_APP_KEY, KEYCHAIN_ACCOUNT, app_key, replace=replace)
     if not keychain.exists(KEYCHAIN_ACCOUNT_RESTIC, KEYCHAIN_SERVICE_RESTIC):
         _ensure_keychain_entry(
             KEYCHAIN_SERVICE_RESTIC, KEYCHAIN_ACCOUNT_RESTIC, passphrase, replace=False
         )
     else:
-        passphrase = keychain.read(
-            account=KEYCHAIN_ACCOUNT_RESTIC, service=KEYCHAIN_SERVICE_RESTIC
-        )
+        passphrase = keychain.read(account=KEYCHAIN_ACCOUNT_RESTIC, service=KEYCHAIN_SERVICE_RESTIC)
         console.print("  [dim]reusing existing sanctum-backup-key from Keychain[/]")
 
     # 6. restic init

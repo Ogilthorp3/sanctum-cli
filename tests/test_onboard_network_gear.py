@@ -172,12 +172,20 @@ def test_set_device_reference_merges_second_kind(tmp_path: Path) -> None:
     inst = tmp_path / "instance.yaml"
     inst.write_text("instance:\n  name: X\n  slug: x\n", encoding="utf-8")
     onboard.set_device_reference(
-        kind="hub", brand="sagemcom", host="192.168.2.1",
-        keychain_service="bell-hub-admin", keychain_account="admin", path=inst,
+        kind="hub",
+        brand="sagemcom",
+        host="192.168.2.1",
+        keychain_service="bell-hub-admin",
+        keychain_account="admin",
+        path=inst,
     )
     onboard.set_device_reference(
-        kind="orbi", brand="orbi", host="192.168.1.1",
-        keychain_service="orbi-admin", keychain_account="admin", path=inst,
+        kind="orbi",
+        brand="orbi",
+        host="192.168.1.1",
+        keychain_service="orbi-admin",
+        keychain_account="admin",
+        path=inst,
     )
     data = yaml.safe_load(inst.read_text(encoding="utf-8"))
     assert data["devices"]["hub"]["brand"] == "sagemcom"
@@ -222,7 +230,10 @@ def test_network_gear_yes_skips_without_probing(
 
 def _invoke_family_onboard_interactive(input_text: str) -> tuple[int, str]:
     """`onboard --recipe family` (no --yes), feeding stdin; other gates mocked out."""
+    import sys
+
     with (
+        patch("getpass.getpass", side_effect=lambda *a, **k: sys.stdin.readline().rstrip("\n")),
         patch("sanctum_cli.commands.onboard.backup_cmd.backup_estimate"),
         patch("sanctum_cli.commands.onboard.backup_cmd.backup_run"),
         patch("sanctum_cli.commands.onboard._dispatch_cloud_setup"),
@@ -242,6 +253,8 @@ def _invoke_family_onboard_interactive(input_text: str) -> tuple[int, str]:
         # Network-resilience runs last (own tests); mock it so a real posture probe /
         # DHCP flip / daemon install never runs here.
         patch("sanctum_cli.commands.onboard._run_network_resilience"),
+        patch("sanctum_cli.commands.onboard._run_wifi_identity"),
+        patch("sanctum_cli.commands.onboard._run_first_hello"),
         # The masked admin-password prompt (Prompt.ask(password=True)) routes to
         # getpass, which emits GetPassWarning when stdin is not a real TTY (every
         # CliRunner). The pyproject `filterwarnings=["error"]` would turn that
@@ -385,8 +398,9 @@ def test_network_gear_persists_class_brand_pin_resolvable_after_refine(
 
     # The load-bearing contract: the persisted pin must resolve on a LATER run.
     # Feed it through the REAL registry (the actual consumer), not a stub.
-    resolved = registry.resolve("orbi", NetContext(gateway_ip="192.168.1.1", runner=None),
-                                 brand_pin=persisted)
+    resolved = registry.resolve(
+        "orbi", NetContext(gateway_ip="192.168.1.1", runner=None), brand_pin=persisted
+    )
     assert isinstance(resolved, orbi_mod.OrbiProvider)
 
 
@@ -447,8 +461,7 @@ def test_network_gear_decline_pairing_skips_that_kind(
     )
 
     code, out = _invoke_family_onboard_interactive(
-        "\n\n"
-        "n\n"  # decline pairing the hub
+        "\n\nn\n"  # decline pairing the hub
     )
     assert code == 0, out
     assert hub.connected_with is None  # no auth-probe fired

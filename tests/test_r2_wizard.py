@@ -79,7 +79,9 @@ def test_list_buckets_403_translates_to_user_error() -> None:
     creds = r2._R2Creds(VALID_ACCOUNT_ID, VALID_ACCESS_KEY, VALID_SECRET_KEY)
     with patch(
         "sanctum_cli.backends.r2.httpx.get",
-        return_value=httpx.Response(403, text="forbidden", request=httpx.Request("GET", "https://x")),
+        return_value=httpx.Response(
+            403, text="forbidden", request=httpx.Request("GET", "https://x")
+        ),
     ):
         from sanctum_cli.errors import UserError
 
@@ -124,7 +126,9 @@ def test_create_bucket_other_failure_raises() -> None:
     creds = r2._R2Creds(VALID_ACCOUNT_ID, VALID_ACCESS_KEY, VALID_SECRET_KEY)
     with patch(
         "sanctum_cli.backends.r2.httpx.put",
-        return_value=httpx.Response(500, text="server error", request=httpx.Request("PUT", "https://x")),
+        return_value=httpx.Response(
+            500, text="server error", request=httpx.Request("PUT", "https://x")
+        ),
     ):
         from sanctum_cli.errors import UserError
 
@@ -158,9 +162,7 @@ def test_persist_to_instance_yaml_writes_repo_and_bak(tmp_path: Path) -> None:
     parsed = _yaml.safe_load(target.read_text())
     assert parsed["services"]["x"]["port"] == 1
     assert parsed["cli"]["cloud_backup"]["primary"]["repo"] == repo
-    assert (
-        parsed["cli"]["cloud_backup"]["primary"]["keychain"]["account"] == "sanctum-backup"
-    )
+    assert parsed["cli"]["cloud_backup"]["primary"]["keychain"]["account"] == "sanctum-backup"
     bak_files = list(tmp_path.glob("instance.yaml.bak.*"))
     assert len(bak_files) == 1
 
@@ -193,9 +195,7 @@ def test_persist_writes_secondary_slot(tmp_path: Path) -> None:
 # ─── Full wizard happy path ─────────────────────────────────────────
 
 
-def test_wizard_default_is_r2(
-    minimal_instance_yaml: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_wizard_default_is_r2(minimal_instance_yaml: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """`sanctum cloud setup` (no --backend) routes to R2."""
     monkeypatch.setenv("SANCTUM_INSTANCE_FILE", str(minimal_instance_yaml))
     with patch("sanctum_cli.commands.cloud.r2.run_wizard") as mocked:
@@ -209,8 +209,7 @@ def test_full_wizard_happy_path(
     monkeypatch.setenv("SANCTUM_INSTANCE_FILE", str(minimal_instance_yaml))
 
     list_body = (
-        '<?xml version="1.0"?>'
-        "<ListAllMyBucketsResult><Buckets></Buckets></ListAllMyBucketsResult>"
+        '<?xml version="1.0"?><ListAllMyBucketsResult><Buckets></Buckets></ListAllMyBucketsResult>'
     )
 
     def fake_get(*_args, **_kwargs):  # type: ignore[no-untyped-def]
@@ -242,9 +241,7 @@ def test_full_wizard_happy_path(
         patch("sanctum_cli.backends.r2.keychain.read", return_value="passphrase"),
         patch("sanctum_cli.backends.r2._ensure_keychain_entry", return_value=None),
     ):
-        result = runner.invoke(
-            app, ["cloud", "setup", "--no-open", "--no-persist"]
-        )
+        result = runner.invoke(app, ["cloud", "setup", "--no-open", "--no-persist"])
 
     assert result.exit_code == 0, result.stdout + (result.stderr or "")
     assert "done" in result.stdout.lower() or "cloud_backup" in result.stdout.lower()

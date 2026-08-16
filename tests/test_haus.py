@@ -43,9 +43,7 @@ def _isolate(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         monkeypatch.delenv(e, raising=False)
     # No CA, no devices, no LaunchAgents, no bridge Keychain entry.
     monkeypatch.setattr(haus, "_CA_CERT", tmp_path / "absent-ca.crt")
-    monkeypatch.setattr(
-        haus, "_DEVICES_CANDIDATES", (tmp_path / "a.yaml", tmp_path / "b.yaml")
-    )
+    monkeypatch.setattr(haus, "_DEVICES_CANDIDATES", (tmp_path / "a.yaml", tmp_path / "b.yaml"))
     monkeypatch.setattr(haus, "_launchagents_present", lambda: False)
     monkeypatch.setattr(haus.keychain, "exists", lambda *_a, **_k: False)
 

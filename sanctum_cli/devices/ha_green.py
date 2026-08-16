@@ -120,9 +120,7 @@ def _tailnet_suffix() -> str:
         import json as _json
         import subprocess as _sp
 
-        out = _sp.run(
-            ["tailscale", "status", "--json"], capture_output=True, text=True, timeout=4
-        )
+        out = _sp.run(["tailscale", "status", "--json"], capture_output=True, text=True, timeout=4)
         if out.returncode == 0:
             return (_json.loads(out.stdout).get("MagicDNSSuffix") or "").strip()
     except Exception:
@@ -134,6 +132,7 @@ def tailnet_fqdn(node: str = _TAILNET_NODE) -> str:
     """``node.suffix`` when the tailnet suffix is known, else just ``node`` — no leak, no crash."""
     suffix = _tailnet_suffix()
     return f"{node}.{suffix}" if suffix else node
+
 
 # HTTP timeout for REST calls (seconds).
 _HTTP_TIMEOUT_S = 15
@@ -267,7 +266,8 @@ def _get_api_json_strict(path: str) -> dict[str, Any] | None:
     except httpx.HTTPError as exc:  # transport down: unreachable / timeout / reset
         msg = f"HA Green unreachable for GET {path!r}: {exc}"
         raise DeviceError(
-            msg, fix="check the Green is powered + on the LAN (set HA_GREEN_URL, default homeassistant.local:8123)"
+            msg,
+            fix="check the Green is powered + on the LAN (set HA_GREEN_URL, default homeassistant.local:8123)",
         ) from exc
     if resp.status_code in (401, 403):  # HA rejected the bearer token
         msg = f"HA Green rejected the token for GET {path!r} (HTTP {resp.status_code})"

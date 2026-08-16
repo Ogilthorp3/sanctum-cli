@@ -18,6 +18,7 @@ What's real:
   are all read-only: keychain.exists probes the real Keychain, chitti /health
   probes a local port, docs HEAD resolves a URL, demo runs sanctum backup snapshots).
 """
+
 from __future__ import annotations
 
 import json
@@ -103,10 +104,10 @@ def test_evaluate_e2e_clean_soak(tmp_path: Path) -> None:
         return clean
 
     adapters = {
-        "keychain_has": lambda _a, _s: True,        # injected: no real keychain touch
+        "keychain_has": lambda _a, _s: True,  # injected: no real keychain touch
         "is_default": lambda _a, _s: False,
         "heal_action_ok": lambda _l: True,
-        "sink_live": lambda _n: True,               # injected: no real chitti probe
+        "sink_live": lambda _n: True,  # injected: no real chitti probe
         "probe_is_false_green": lambda _p: False,
         "soak_days": soak_days_adapter,
         "soak_clean": soak_clean_adapter,
@@ -132,9 +133,7 @@ def test_evaluate_e2e_clean_soak(tmp_path: Path) -> None:
         "soak",
         "docs+demo",
     }
-    assert expected_gates <= gate_names, (
-        f"missing gates: {expected_gates - gate_names}"
-    )
+    assert expected_gates <= gate_names, f"missing gates: {expected_gates - gate_names}"
 
 
 # ─── Test 2: CLI runner — doctor --ship backup --json emits parseable JSON ──
@@ -154,9 +153,7 @@ def test_doctor_ship_json_has_verdict(tmp_path: Path, monkeypatch: pytest.Monkey
     # Set up a minimal SANCTUM_INSTANCE_FILE so the config loader doesn't fail
     # if the real instance.yaml is absent in this environment.
     instance_file = tmp_path / "instance.yaml"
-    instance_file.write_text(
-        "instance:\n  name: Test\n  slug: test\n"
-    )
+    instance_file.write_text("instance:\n  name: Test\n  slug: test\n")
     monkeypatch.setenv("SANCTUM_INSTANCE_FILE", str(instance_file))
 
     result = runner.invoke(app, ["doctor", "--ship", "backup", "--json"])
@@ -168,6 +165,7 @@ def test_doctor_ship_json_has_verdict(tmp_path: Path, monkeypatch: pytest.Monkey
 
     # Strip ANSI / Rich escape sequences to get the raw JSON.
     import re
+
     clean_output = re.sub(r"\x1b\[[0-9;]*m", "", result.output).strip()
 
     # The output must be parseable JSON.
@@ -182,9 +180,7 @@ def test_doctor_ship_json_has_verdict(tmp_path: Path, monkeypatch: pytest.Monkey
         )
 
     # Must have a 'verdict' field.
-    assert "verdict" in payload, (
-        f"JSON missing 'verdict' key. keys: {list(payload.keys())}"
-    )
+    assert "verdict" in payload, f"JSON missing 'verdict' key. keys: {list(payload.keys())}"
     assert payload["verdict"] in {"green", "amber", "red"}, (
         f"unexpected verdict value: {payload['verdict']!r}"
     )

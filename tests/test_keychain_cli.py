@@ -114,9 +114,7 @@ def test_rotate_failure_returns_local_error() -> None:
             return_value=_completed(rc=99, stderr="boom"),
         ),
     ):
-        result = runner.invoke(
-            app, ["keychain", "rotate", "test-svc", "--value", "x", "-y"]
-        )
+        result = runner.invoke(app, ["keychain", "rotate", "test-svc", "--value", "x", "-y"])
     assert result.exit_code == 4
     combined = result.stdout + (result.stderr or "")
     assert "rotation failed" in combined.lower() or "boom" in combined.lower()

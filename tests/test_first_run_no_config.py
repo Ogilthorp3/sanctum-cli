@@ -77,9 +77,7 @@ def test_onboard_no_config_self_bootstraps(
     config.ensure() and completes the flow (exit 0). The decisive assertion is
     that the file the loader needs now exists where it didn't before.
     """
-    monkeypatch.setattr(
-        "sanctum_cli.commands.screen_time._fetch_bridge_json", lambda path: None
-    )
+    monkeypatch.setattr("sanctum_cli.commands.screen_time._fetch_bridge_json", lambda path: None)
     with (
         patch("sanctum_cli.commands.onboard.backup_cmd.backup_estimate"),
         patch("sanctum_cli.commands.onboard.backup_cmd.backup_run"),

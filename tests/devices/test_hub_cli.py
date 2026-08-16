@@ -90,9 +90,9 @@ def _point_registry_at(monkeypatch: pytest.MonkeyPatch, provider: FakeProvider) 
     # Build NetContext without shelling out to `route`, and creds without Keychain.
     monkeypatch.setattr(
         "sanctum_cli.commands.net._hub_netcontext",
-        lambda: __import__(
-            "sanctum_cli.devices.base", fromlist=["NetContext"]
-        ).NetContext(gateway_ip="192.168.2.1", runner=None),
+        lambda: __import__("sanctum_cli.devices.base", fromlist=["NetContext"]).NetContext(
+            gateway_ip="192.168.2.1", runner=None
+        ),
     )
     monkeypatch.setattr(
         "sanctum_cli.commands.net._hub_creds",
@@ -130,9 +130,7 @@ def test_net_hub_set_force_mutates(monkeypatch: pytest.MonkeyPatch) -> None:
     """`net hub set <path> <val> --force` flips the leaf through the rails."""
     p = FakeProvider()
     _point_registry_at(monkeypatch, p)
-    result = runner.invoke(
-        app, ["net", "hub", "set", BRIDGE_MODE_PATH, "on", "--force"]
-    )
+    result = runner.invoke(app, ["net", "hub", "set", BRIDGE_MODE_PATH, "on", "--force"])
     assert result.exit_code == 0, result.stdout
     assert (BRIDGE_MODE_PATH, "on") in p.set_calls
     assert p.get(BRIDGE_MODE_PATH) == "on"
@@ -167,9 +165,9 @@ def test_net_hub_brand_pin_threaded_from_instance_yaml(
     # but spy on resolve to capture the brand_pin kwarg.
     monkeypatch.setattr(
         "sanctum_cli.commands.net._hub_netcontext",
-        lambda: __import__(
-            "sanctum_cli.devices.base", fromlist=["NetContext"]
-        ).NetContext(gateway_ip="192.168.2.1", runner=None),
+        lambda: __import__("sanctum_cli.devices.base", fromlist=["NetContext"]).NetContext(
+            gateway_ip="192.168.2.1", runner=None
+        ),
     )
     monkeypatch.setattr(
         "sanctum_cli.commands.net._hub_creds",
@@ -251,9 +249,7 @@ def test_net_hub_single_nat_apply_threads_fw_bound_runner(
     monkeypatch.setattr("sanctum_cli.commands.net._build_runner", fake_build_runner)
 
     captured: dict[str, object] = {}
-    real_single_nat = __import__(
-        "sanctum_cli.devices.intents", fromlist=["single_nat"]
-    ).single_nat
+    real_single_nat = __import__("sanctum_cli.devices.intents", fromlist=["single_nat"]).single_nat
 
     def spy_single_nat(provider: object, **kwargs: object) -> object:
         captured["runner"] = kwargs.get("runner")
@@ -283,8 +279,6 @@ def test_net_hub_set_unsupported_is_legible(monkeypatch: pytest.MonkeyPatch) -> 
 
     p = RefusingProvider()
     _point_registry_at(monkeypatch, p)
-    result = runner.invoke(
-        app, ["net", "hub", "set", BRIDGE_MODE_PATH, "on", "--force"]
-    )
+    result = runner.invoke(app, ["net", "hub", "set", BRIDGE_MODE_PATH, "on", "--force"])
     # DeviceError is a LocalError → exit code 4, not an unhandled traceback.
     assert result.exit_code == 4

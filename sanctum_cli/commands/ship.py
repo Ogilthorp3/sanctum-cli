@@ -19,6 +19,7 @@ the conservative side for the two gates that need future work:
   (Phase 6, Task 6). If the file is absent or unparseable, returns
   (None, False) — treated as a RED soak gate.
 """
+
 from __future__ import annotations
 
 import shlex
@@ -140,9 +141,7 @@ def _sink_live(name: str) -> bool:
     if name != "chitti":
         return False
     try:
-        with urllib.request.urlopen(
-            "http://127.0.0.1:2188/health", timeout=2.0
-        ) as resp:
+        with urllib.request.urlopen("http://127.0.0.1:2188/health", timeout=2.0) as resp:
             return bool(cast("int", resp.status) < 400)
     except (urllib.error.URLError, urllib.error.HTTPError, OSError):
         return False
@@ -270,8 +269,7 @@ def render(report: ShipReport, json_out: bool = False, allow_amber: bool = False
             "module": report.module,
             "verdict": report.verdict.value,
             "gates": [
-                {"name": g.name, "status": g.status.value, "detail": g.detail}
-                for g in report.gates
+                {"name": g.name, "status": g.status.value, "detail": g.detail} for g in report.gates
             ],
         }
         console.print_json(_json.dumps(payload))

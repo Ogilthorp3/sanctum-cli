@@ -25,6 +25,7 @@ PID\tStatus\tLabel
 2087\t0\tcom.sanctum.proxy
 -\t0\tcom.sanctum.bridge
 123\t0\tcom.sanctum.health-center
+-\t0\tcom.sanctum.force-flow
 -\t0\tcom.apple.something-else
 """
 
@@ -50,27 +51,34 @@ class _Fake(Provider):
 
     def health(self) -> HealthSnapshot:
         return HealthSnapshot(
-            ok=self._ok, latency_ms=42 if self._ok else None,
-            quota_remaining=None, detail=self._detail,
+            ok=self._ok,
+            latency_ms=42 if self._ok else None,
+            quota_remaining=None,
+            detail=self._detail,
         )
 
     def cost(self, _u):  # type: ignore[no-untyped-def]
         from decimal import Decimal
+
         return Decimal(0)
 
 
-def _completed(stdout: str = "", returncode: int = 0, stderr: str = "") -> subprocess.CompletedProcess[str]:
+def _completed(
+    stdout: str = "", returncode: int = 0, stderr: str = ""
+) -> subprocess.CompletedProcess[str]:
     return subprocess.CompletedProcess(args=[], returncode=returncode, stdout=stdout, stderr=stderr)
 
 
 def _patch_subprocess(launchctl_out: str = LAUNCHCTL_ALL_GREEN):  # type: ignore[no-untyped-def]
     """Helper: patches subprocess.run to handle launchctl + restic."""
+
     def _run(cmd, **_kwargs):  # type: ignore[no-untyped-def]
         if cmd[0].endswith("launchctl"):
             return _completed(stdout=launchctl_out)
         if cmd[0].endswith("restic"):
             return _completed(stdout='[{"id":"abc","time":"2026-04-26T20:00:00+00:00"}]')
         return _completed(returncode=1, stderr="unknown")
+
     return _run
 
 

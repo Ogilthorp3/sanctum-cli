@@ -140,13 +140,7 @@ def test_firewalla_wan_via_ssh_never_raises_on_decode_error() -> None:
 # The combined remote command frames its two answers with sentinel lines so one
 # SSH round-trip returns BOTH the port rows and the WAN kind. The '===PORTS==='
 # block carries 'name<TAB>mbps' rows; '===WAN===' carries the wan-kind token.
-_FW_COMBINED_STDOUT = (
-    "===PORTS===\n"
-    "eth0\t1000\n"
-    "eth3\t2500\n"
-    "===WAN===\n"
-    "pppoe\n"
-)
+_FW_COMBINED_STDOUT = "===PORTS===\neth0\t1000\neth3\t2500\n===WAN===\npppoe\n"
 
 
 def test_firewalla_ports_and_wan_via_ssh_parses_both() -> None:

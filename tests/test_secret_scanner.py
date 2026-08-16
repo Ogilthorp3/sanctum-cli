@@ -57,11 +57,7 @@ def test_aws_access_key_caught(tmp_path: Path) -> None:
 
 
 def test_ssh_private_key_caught(tmp_path: Path) -> None:
-    body = (
-        "-----BEGIN OPENSSH PRIVATE KEY-----\n"
-        "junk\n"
-        "-----END OPENSSH PRIVATE KEY-----\n"
-    )
+    body = "-----BEGIN OPENSSH PRIVATE KEY-----\njunk\n-----END OPENSSH PRIVATE KEY-----\n"
     f = _write(tmp_path / "id_test", body)
     findings = secret_scanner.scan_path(f)
     # Filename pattern (id_*) AND content pattern should both fire here.

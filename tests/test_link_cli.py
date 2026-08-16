@@ -43,6 +43,7 @@ def _stable_probe() -> link.WifiProbe:
         ssid="ClosetNet",
     )
 
+
 # A LOAD-bound sentinel window (latency tracks load, zero loss).
 LOAD_LOG = """\
 2026-06-29T21:07:03 ssid=x rtt=2.479/34.863/106.761/36.142 loss=0.0% load=[3.19 3.28 3.17] DEGRADED
@@ -266,9 +267,7 @@ def test_optimize_apply_writes_valid_mobileconfig(
     monkeypatch.setattr("sanctum_cli.net.link.probe_identity", _rotating_id_probe)
     monkeypatch.setattr("sanctum_cli.commands.link._node_signals", _server_signals)
     out = tmp_path / "sub" / "wifi-mac-stability.mobileconfig"
-    result = runner.invoke(
-        app, ["link", "optimize", "--apply", "--profile-out", str(out)]
-    )
+    result = runner.invoke(app, ["link", "optimize", "--apply", "--profile-out", str(out)])
     assert result.exit_code == 0, result.stdout
     assert out.exists()
     assert oct(out.stat().st_mode & 0o777) == "0o644"
@@ -340,15 +339,19 @@ def _mk_probe(**kw: object) -> link.IdentityProbe:
 def test_optimize_apply_enrolls_server(tmp_path: Path) -> None:
     """A SERVER on a rotating MAC → --apply enrolls, carrying the DETECTED encryption."""
     out = tmp_path / "p.mobileconfig"
-    with patch.object(linkmod, "probe_identity", return_value=_mk_probe()), patch.object(
-        linkmod,
-        "probe_wifi",
-        return_value=linkmod.WifiProbe(
-            "en1", "32:a6:f4:de:54:cf", "d0:11:e5:1c:88:59", "Nepveu-6G"
+    with (
+        patch.object(linkmod, "probe_identity", return_value=_mk_probe()),
+        patch.object(
+            linkmod,
+            "probe_wifi",
+            return_value=linkmod.WifiProbe(
+                "en1", "32:a6:f4:de:54:cf", "d0:11:e5:1c:88:59", "Nepveu-6G"
+            ),
         ),
-    ), patch(
-        "sanctum_cli.commands.link._node_signals",
-        return_value=linkmod.NodeSignals(30.0, "Manual", True, 1, False),
+        patch(
+            "sanctum_cli.commands.link._node_signals",
+            return_value=linkmod.NodeSignals(30.0, "Manual", True, 1, False),
+        ),
     ):
         r = runner.invoke(link_app, ["optimize", "--apply", "--profile-out", str(out)])
     assert r.exit_code == 0, r.stdout
@@ -359,9 +362,12 @@ def test_optimize_apply_enrolls_server(tmp_path: Path) -> None:
 def test_optimize_apply_roamer_nudges_no_write(tmp_path: Path) -> None:
     """A ROAMER → --apply nudges to opt in and writes NOTHING (privacy-first)."""
     out = tmp_path / "p.mobileconfig"
-    with patch.object(linkmod, "probe_identity", return_value=_mk_probe()), patch(
-        "sanctum_cli.commands.link._node_signals",
-        return_value=linkmod.NodeSignals(30.0, "DHCP", False, 9, True),
+    with (
+        patch.object(linkmod, "probe_identity", return_value=_mk_probe()),
+        patch(
+            "sanctum_cli.commands.link._node_signals",
+            return_value=linkmod.NodeSignals(30.0, "DHCP", False, 9, True),
+        ),
     ):
         r = runner.invoke(link_app, ["optimize", "--apply", "--profile-out", str(out)])
     assert r.exit_code == 0, r.stdout

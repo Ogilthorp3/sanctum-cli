@@ -27,7 +27,9 @@ _VALID = frozenset({"claude", "gemini", "mlx_local"})
 
 
 def chat_command(
-    prompt: Annotated[str | None, typer.Argument(help="Prompt text. Omit to read from stdin.")] = None,
+    prompt: Annotated[
+        str | None, typer.Argument(help="Prompt text. Omit to read from stdin.")
+    ] = None,
     provider: Annotated[
         str | None,
         typer.Option(

@@ -50,8 +50,11 @@ def _no_live_identity(monkeypatch: pytest.MonkeyPatch) -> None:
         onboard,
         "_node_signals",
         lambda probe: link.NodeSignals(
-            uptime_days=0.0, ip_config_method="DHCP", ip_is_reserved_or_static=False,
-            distinct_ssids_seen=1, is_portable=True,
+            uptime_days=0.0,
+            ip_config_method="DHCP",
+            ip_is_reserved_or_static=False,
+            distinct_ssids_seen=1,
+            is_portable=True,
         ),
     )
     monkeypatch.setattr(onboard, "_write_identity_profile", lambda *a, **k: None)
@@ -70,8 +73,14 @@ def _probe(
     """
     if verdict_shape == "UNVERIFIED":
         return link.IdentityProbe(
-            iface="", ssid=None, current_mac="", hardware_mac="", security=None,
-            associated=False, router_arp_verified=None, gateway_reachable=None,
+            iface="",
+            ssid=None,
+            current_mac="",
+            hardware_mac="",
+            security=None,
+            associated=False,
+            router_arp_verified=None,
+            gateway_reachable=None,
         )
     # Rotating MAC (locally-administered) ≠ hardware; LAN dead ⇒ QUARANTINED.
     rotating_mac = "7a:11:22:33:44:55"  # locally-administered bit set
@@ -83,8 +92,12 @@ def _probe(
         current = rotating_mac
         lan_dead = verdict_shape == "QUARANTINED"
     return link.IdentityProbe(
-        iface="en0", ssid="haus-5G", current_mac=current, hardware_mac=hardware,
-        security="WPA3 Personal", associated=True,
+        iface="en0",
+        ssid="haus-5G",
+        current_mac=current,
+        hardware_mac=hardware,
+        security="WPA3 Personal",
+        associated=True,
         router_arp_verified=(not lan_dead),
         gateway_reachable=(not lan_dead),
     )
@@ -139,10 +152,17 @@ def test_gate_skipped_under_yes_no_probe(monkeypatch: pytest.MonkeyPatch) -> Non
 def test_unverified_probe_configures_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
     """A probe we cannot read (UNVERIFIED) → fail-closed, nothing written, returns False."""
     monkeypatch.setattr(link, "probe_identity", lambda *a, **k: _probe(verdict_shape="UNVERIFIED"))
-    monkeypatch.setattr(onboard, "_node_signals", lambda probe: link.NodeSignals(
-        uptime_days=99.0, ip_config_method="Manual", ip_is_reserved_or_static=True,
-        distinct_ssids_seen=1, is_portable=False,
-    ))
+    monkeypatch.setattr(
+        onboard,
+        "_node_signals",
+        lambda probe: link.NodeSignals(
+            uptime_days=99.0,
+            ip_config_method="Manual",
+            ip_is_reserved_or_static=True,
+            distinct_ssids_seen=1,
+            is_portable=False,
+        ),
+    )
     written: list[Any] = []
     monkeypatch.setattr(onboard, "_write_identity_profile", lambda *a, **k: written.append(a))
     assert onboard._run_wifi_identity(yes=False) is False
@@ -152,10 +172,17 @@ def test_unverified_probe_configures_nothing(monkeypatch: pytest.MonkeyPatch) ->
 def test_stable_server_no_action_no_profile(monkeypatch: pytest.MonkeyPatch) -> None:
     """A SERVER already on its hardware MAC (STABLE) → no profile; honest 'already stable'."""
     monkeypatch.setattr(link, "probe_identity", lambda *a, **k: _probe(verdict_shape="STABLE"))
-    monkeypatch.setattr(onboard, "_node_signals", lambda probe: link.NodeSignals(
-        uptime_days=99.0, ip_config_method="Manual", ip_is_reserved_or_static=True,
-        distinct_ssids_seen=1, is_portable=False,
-    ))
+    monkeypatch.setattr(
+        onboard,
+        "_node_signals",
+        lambda probe: link.NodeSignals(
+            uptime_days=99.0,
+            ip_config_method="Manual",
+            ip_is_reserved_or_static=True,
+            distinct_ssids_seen=1,
+            is_portable=False,
+        ),
+    )
     written: list[Any] = []
     monkeypatch.setattr(onboard, "_write_identity_profile", lambda *a, **k: written.append(a))
     # STABLE is a real, verified good state → configured True, but NO profile written.
@@ -169,13 +196,21 @@ def test_stable_server_no_action_no_profile(monkeypatch: pytest.MonkeyPatch) -> 
 def test_server_quarantined_generates_profile(monkeypatch: pytest.MonkeyPatch) -> None:
     """SERVER + QUARANTINED → generate the stability profile + narrate one-click approve."""
     monkeypatch.setattr(link, "probe_identity", lambda *a, **k: _probe(verdict_shape="QUARANTINED"))
-    monkeypatch.setattr(onboard, "_node_signals", lambda probe: link.NodeSignals(
-        uptime_days=99.0, ip_config_method="Manual", ip_is_reserved_or_static=True,
-        distinct_ssids_seen=1, is_portable=False,
-    ))
+    monkeypatch.setattr(
+        onboard,
+        "_node_signals",
+        lambda probe: link.NodeSignals(
+            uptime_days=99.0,
+            ip_config_method="Manual",
+            ip_is_reserved_or_static=True,
+            distinct_ssids_seen=1,
+            is_portable=False,
+        ),
+    )
     captured: dict[str, Any] = {}
     monkeypatch.setattr(
-        onboard, "_write_identity_profile",
+        onboard,
+        "_write_identity_profile",
         lambda probe, out: captured.update(ssid=probe.ssid, mac=probe.hardware_mac),
     )
     assert onboard._run_wifi_identity(yes=False) is True
@@ -186,10 +221,17 @@ def test_server_quarantined_generates_profile(monkeypatch: pytest.MonkeyPatch) -
 def test_server_rotating_generates_profile(monkeypatch: pytest.MonkeyPatch) -> None:
     """SERVER + ROTATING (at-risk private MAC, reachable now) → also generate the profile."""
     monkeypatch.setattr(link, "probe_identity", lambda *a, **k: _probe(verdict_shape="ROTATING"))
-    monkeypatch.setattr(onboard, "_node_signals", lambda probe: link.NodeSignals(
-        uptime_days=99.0, ip_config_method="Manual", ip_is_reserved_or_static=True,
-        distinct_ssids_seen=1, is_portable=False,
-    ))
+    monkeypatch.setattr(
+        onboard,
+        "_node_signals",
+        lambda probe: link.NodeSignals(
+            uptime_days=99.0,
+            ip_config_method="Manual",
+            ip_is_reserved_or_static=True,
+            distinct_ssids_seen=1,
+            is_portable=False,
+        ),
+    )
     written: list[Any] = []
     monkeypatch.setattr(onboard, "_write_identity_profile", lambda *a, **k: written.append(a))
     assert onboard._run_wifi_identity(yes=False) is True
@@ -199,10 +241,17 @@ def test_server_rotating_generates_profile(monkeypatch: pytest.MonkeyPatch) -> N
 def test_roamer_never_auto_enrolled(monkeypatch: pytest.MonkeyPatch) -> None:
     """A ROAMER (portable laptop) even when QUARANTINED → nudge only, NEVER a profile."""
     monkeypatch.setattr(link, "probe_identity", lambda *a, **k: _probe(verdict_shape="QUARANTINED"))
-    monkeypatch.setattr(onboard, "_node_signals", lambda probe: link.NodeSignals(
-        uptime_days=0.1, ip_config_method="DHCP", ip_is_reserved_or_static=False,
-        distinct_ssids_seen=12, is_portable=True,
-    ))
+    monkeypatch.setattr(
+        onboard,
+        "_node_signals",
+        lambda probe: link.NodeSignals(
+            uptime_days=0.1,
+            ip_config_method="DHCP",
+            ip_is_reserved_or_static=False,
+            distinct_ssids_seen=12,
+            is_portable=True,
+        ),
+    )
     written: list[Any] = []
     monkeypatch.setattr(onboard, "_write_identity_profile", lambda *a, **k: written.append(a))
     assert onboard._run_wifi_identity(yes=False) is False
@@ -212,10 +261,17 @@ def test_roamer_never_auto_enrolled(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_unknown_never_auto_enrolled(monkeypatch: pytest.MonkeyPatch) -> None:
     """An UNKNOWN node (insufficient signal → treated as roamer) → nudge only, no profile."""
     monkeypatch.setattr(link, "probe_identity", lambda *a, **k: _probe(verdict_shape="QUARANTINED"))
-    monkeypatch.setattr(onboard, "_node_signals", lambda probe: link.NodeSignals(
-        uptime_days=0.1, ip_config_method="DHCP", ip_is_reserved_or_static=False,
-        distinct_ssids_seen=1, is_portable=False,
-    ))
+    monkeypatch.setattr(
+        onboard,
+        "_node_signals",
+        lambda probe: link.NodeSignals(
+            uptime_days=0.1,
+            ip_config_method="DHCP",
+            ip_is_reserved_or_static=False,
+            distinct_ssids_seen=1,
+            is_portable=False,
+        ),
+    )
     written: list[Any] = []
     monkeypatch.setattr(onboard, "_write_identity_profile", lambda *a, **k: written.append(a))
     assert onboard._run_wifi_identity(yes=False) is False

@@ -119,10 +119,7 @@ def test_total_loss_window_classifies_radio_not_dropped() -> None:
     # round-trip line, so the sampler emits `rtt=NA loss=100.0%`. The parser MUST
     # keep that loss signal (not silently drop the line) -> RADIO, never NO_DATA.
     # Fixture is the sampler's literal printf output, not a hand-built Sample.
-    line = (
-        "2026-06-29T22:30:00 ssid=Net rtt=NA loss=100.0% "
-        "load=[5.00 5.00 5.00] DEGRADED"
-    )
+    line = "2026-06-29T22:30:00 ssid=Net rtt=NA loss=100.0% load=[5.00 5.00 5.00] DEGRADED"
     got = parse_log(line)
     assert len(got) == 1
     assert got[0].loss == 100.0
@@ -298,18 +295,21 @@ def _fake_runner(mapping):
             if pat in key:
                 return out
         return ""
+
     return run
 
 
 def test_probe_identity_reads_quarantine_signature():
-    run = _fake_runner({
-        "listallhardwareports": "Hardware Port: Wi-Fi\nDevice: en1\nEthernet Address: d0:11:e5:1c:88:59",
-        "ifconfig en1": "\tether 32:a6:f4:de:54:cf",
-        "getmacaddress en1": "Ethernet Address: d0:11:e5:1c:88:59",
-        "getsummary en1": _MINI_GETSUMMARY,
-        "route -n get default": "gateway: 10.0.0.1\ninterface: en1",
-        "ping": "0 packets received, 100.0% packet loss",
-    })
+    run = _fake_runner(
+        {
+            "listallhardwareports": "Hardware Port: Wi-Fi\nDevice: en1\nEthernet Address: d0:11:e5:1c:88:59",
+            "ifconfig en1": "\tether 32:a6:f4:de:54:cf",
+            "getmacaddress en1": "Ethernet Address: d0:11:e5:1c:88:59",
+            "getsummary en1": _MINI_GETSUMMARY,
+            "route -n get default": "gateway: 10.0.0.1\ninterface: en1",
+            "ping": "0 packets received, 100.0% packet loss",
+        }
+    )
     p = probe_identity(run=run)
     assert p.iface == "en1"
     assert p.current_mac == "32:a6:f4:de:54:cf"
@@ -339,16 +339,24 @@ def test_enc_from_security_maps_wpa3_and_defaults_wpa2():
 
 
 def _probe(**kw):
-    base = dict(iface="en1", ssid="Nepveu-6G", current_mac="d0:11:e5:1c:88:59",
-                hardware_mac="d0:11:e5:1c:88:59", security="WPA2_PSK",
-                associated=True, router_arp_verified=True, gateway_reachable=True)
+    base = dict(
+        iface="en1",
+        ssid="Nepveu-6G",
+        current_mac="d0:11:e5:1c:88:59",
+        hardware_mac="d0:11:e5:1c:88:59",
+        security="WPA2_PSK",
+        associated=True,
+        router_arp_verified=True,
+        gateway_reachable=True,
+    )
     base.update(kw)
     return IdentityProbe(**base)
 
 
 def test_diagnose_quarantined_is_the_mini_signature():
-    d = diagnose_identity(_probe(current_mac="32:a6:f4:de:54:cf",
-                                 router_arp_verified=False, gateway_reachable=False))
+    d = diagnose_identity(
+        _probe(current_mac="32:a6:f4:de:54:cf", router_arp_verified=False, gateway_reachable=False)
+    )
     assert d.verdict == "IDENTITY_QUARANTINED"
 
 
@@ -363,15 +371,23 @@ def test_diagnose_stable_on_hardware_mac():
 
 def test_diagnose_unverified_when_not_associated_or_unread():
     assert diagnose_identity(_probe(associated=False)).verdict == "IDENTITY_UNVERIFIED"
-    assert diagnose_identity(_probe(iface="", current_mac="", hardware_mac="")).verdict == "IDENTITY_UNVERIFIED"
+    assert (
+        diagnose_identity(_probe(iface="", current_mac="", hardware_mac="")).verdict
+        == "IDENTITY_UNVERIFIED"
+    )
 
 
 # ─── Link Identity Guard — Task 3: classify_node (server vs roamer) ───────────
 
 
 def _sig(**kw):
-    base = dict(uptime_days=10.0, ip_config_method="Manual", ip_is_reserved_or_static=True,
-                distinct_ssids_seen=1, is_portable=False)
+    base = dict(
+        uptime_days=10.0,
+        ip_config_method="Manual",
+        ip_is_reserved_or_static=True,
+        distinct_ssids_seen=1,
+        is_portable=False,
+    )
     base.update(kw)
     return NodeSignals(**base)
 
@@ -390,8 +406,17 @@ def test_classify_roamer_when_many_ssids():
 
 def test_classify_unknown_is_conservative():
     # not portable, short uptime, DHCP/no reservation, a couple SSIDs → UNKNOWN
-    assert classify_node(_sig(uptime_days=0.2, ip_config_method="DHCP",
-                              ip_is_reserved_or_static=False, distinct_ssids_seen=3)).klass == "UNKNOWN"
+    assert (
+        classify_node(
+            _sig(
+                uptime_days=0.2,
+                ip_config_method="DHCP",
+                ip_is_reserved_or_static=False,
+                distinct_ssids_seen=3,
+            )
+        ).klass
+        == "UNKNOWN"
+    )
 
 
 # ─── Link Identity Guard — Task 4: firewalla_quarantine_check (enrichment) ────
@@ -419,17 +444,33 @@ def test_parse_identity_reads_id_token():
     line = "2026-07-01T10:00:00 ssid=X rtt=2/3/4/1 loss=0.0% load=[1] id=cur=32:a6:f4:de:54:cf,hw=d0:11:e5:1c:88:59,arp=FALSE DEGRADED"
     ids = parse_identity(line)
     assert ids is not None
-    assert ids["cur"] == "32:a6:f4:de:54:cf" and ids["hw"] == "d0:11:e5:1c:88:59" and ids["arp"] == "FALSE"
+    assert (
+        ids["cur"] == "32:a6:f4:de:54:cf"
+        and ids["hw"] == "d0:11:e5:1c:88:59"
+        and ids["arp"] == "FALSE"
+    )
 
 
 def test_identity_drift_true_on_random_mac_and_arp_false():
-    assert identity_is_drift(parse_identity(
-        "x rtt=NA loss=100.0% load=[1] id=cur=32:a6:f4:de:54:cf,hw=d0:11:e5:1c:88:59,arp=FALSE DEGRADED")) is True
+    assert (
+        identity_is_drift(
+            parse_identity(
+                "x rtt=NA loss=100.0% load=[1] id=cur=32:a6:f4:de:54:cf,hw=d0:11:e5:1c:88:59,arp=FALSE DEGRADED"
+            )
+        )
+        is True
+    )
 
 
 def test_identity_drift_false_on_hardware_mac():
-    assert identity_is_drift(parse_identity(
-        "x rtt=2/3/4/1 loss=0.0% load=[1] id=cur=d0:11:e5:1c:88:59,hw=d0:11:e5:1c:88:59,arp=TRUE ok")) is False
+    assert (
+        identity_is_drift(
+            parse_identity(
+                "x rtt=2/3/4/1 loss=0.0% load=[1] id=cur=d0:11:e5:1c:88:59,hw=d0:11:e5:1c:88:59,arp=TRUE ok"
+            )
+        )
+        is False
+    )
 
 
 def test_existing_parse_log_still_reads_degraded_with_id_token():
@@ -469,7 +510,7 @@ def _run_sentinel_emit(*, curmac: str, hwmac: str, arp: str, rtt: str, loss: str
 
     bash = shutil.which("bash") or "/bin/bash"
     script = (
-        f'CURMAC={curmac!r}; HWMAC={hwmac!r}; ARP={arp!r}\n'
+        f"CURMAC={curmac!r}; HWMAC={hwmac!r}; ARP={arp!r}\n"
         f'RTT={rtt!r}; LOSS={loss!r}; LOAD="1.5 1.4 1.3"; SSID="Nepveu-6G"; FLAG={flag!r}\n'
         f"{producer}\n"
     )

@@ -68,7 +68,9 @@ def vision_command(
     p = make_provider("gemini", cfg.cli.providers)
     if Capability.VISION not in p.capabilities:
         msg = "selected provider lacks VISION capability"
-        raise UserError(msg, fix="ensure cli.routing.fallback or -p targets a vision-capable provider")
+        raise UserError(
+            msg, fix="ensure cli.routing.fallback or -p targets a vision-capable provider"
+        )
 
     opts = ChatOpts(stream=not no_stream, max_tokens=max_tokens, temperature=temperature)
     messages = [Message(role="user", content=text, attachments=(attachment,))]

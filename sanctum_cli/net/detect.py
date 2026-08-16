@@ -5,6 +5,7 @@ import re
 from collections.abc import Callable
 
 from sanctum_cli.net import playbooks
+from sanctum_cli.net.system import parse_default_iface
 from sanctum_cli.net.types import Nat, TopologyReport
 
 Runner = Callable[[tuple[str, ...]], str]
@@ -71,13 +72,13 @@ def classify_nat(*, hop2: str | None, wan_ip: str | None) -> Nat:
     """Single vs double vs CGNAT, mirroring net-audit.sh's logic."""
     if _is_cgnat(wan_ip) or _is_cgnat(hop2):
         return Nat.CGNAT
-    if hop2 and not _is_private(hop2):
+    if wan_ip:
+        if _is_private(wan_ip):
+            return Nat.DOUBLE
         return Nat.SINGLE
-    if hop2 and _is_private(hop2):
-        return Nat.DOUBLE
-    if wan_ip and _is_private(wan_ip):
-        return Nat.DOUBLE
-    if wan_ip and not _is_private(wan_ip):
+    if hop2:
+        if _is_private(hop2):
+            return Nat.DOUBLE
         return Nat.SINGLE
     return Nat.UNKNOWN
 
@@ -91,7 +92,15 @@ def parse_default_gateway(route_output: str) -> str | None:
     return None
 
 
-def parse_mtu(ifconfig_output: str) -> int | None:
+def parse_mtu(ifconfig_output: str, iface: str | None = None) -> int | None:
+    if iface:
+        # Locate the block for this interface specifically
+        pattern = rf"(?:^|\n){re.escape(iface)}:?\s+(.*?)(?:\n\S|\Z)"
+        match = re.search(pattern, ifconfig_output, re.DOTALL)
+        if match:
+            ifconfig_output = match.group(1)
+        else:
+            return None
     m = re.search(r"\bmtu (\d+)\b", ifconfig_output)
     return int(m.group(1)) if m else None
 
@@ -100,7 +109,9 @@ def detect(*, runner: Runner, http: HttpProbe, firewalla_present: bool) -> Topol
     hop2 = parse_hop2(runner(("traceroute",)))
     wan_ip = runner(("fw_wan_ip",)).strip() or None
     wan_mac = runner(("fw_wan_mac",)).strip() or None
-    mtu = parse_mtu(runner(("ifconfig",)))
+    route_out = runner(("route",))
+    iface = parse_default_iface(route_out)
+    mtu = parse_mtu(runner(("ifconfig",)), iface)
     public_ip = runner(("public_ip",)).strip() or None
     nat = classify_nat(hop2=hop2, wan_ip=wan_ip)
     gateway_ip = hop2 if (hop2 and _is_private(hop2)) else None

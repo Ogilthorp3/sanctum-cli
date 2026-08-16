@@ -99,9 +99,9 @@ def _point_registry_at(monkeypatch: pytest.MonkeyPatch, provider: FakeFirewalla)
     # Build NetContext without shelling out to `route`, and creds without the bridge.
     monkeypatch.setattr(
         "sanctum_cli.commands.net._firewalla_netcontext",
-        lambda: __import__(
-            "sanctum_cli.devices.base", fromlist=["NetContext"]
-        ).NetContext(gateway_ip="10.0.0.1", runner=None),
+        lambda: __import__("sanctum_cli.devices.base", fromlist=["NetContext"]).NetContext(
+            gateway_ip="10.0.0.1", runner=None
+        ),
     )
     monkeypatch.setattr(
         "sanctum_cli.commands.net._firewalla_creds",
@@ -237,9 +237,7 @@ def test_net_firewalla_pause_apply_is_descoped_and_fires_nothing(
     """
     p = FakeFirewalla()
     _point_registry_at(monkeypatch, p)
-    result = runner.invoke(
-        app, ["net", "firewalla", "pause", "7", "--apply", "--force"]
-    )
+    result = runner.invoke(app, ["net", "firewalla", "pause", "7", "--apply", "--force"])
     assert result.exit_code == 4, result.stdout  # descoped → LOCAL_ERROR, not a fire
     # No mutation reached the provider — not even a connect for a write.
     assert p.set_calls == []
@@ -272,9 +270,9 @@ def test_net_firewalla_brand_pin_threaded_from_instance_yaml(
     p = FakeFirewalla()
     monkeypatch.setattr(
         "sanctum_cli.commands.net._firewalla_netcontext",
-        lambda: __import__(
-            "sanctum_cli.devices.base", fromlist=["NetContext"]
-        ).NetContext(gateway_ip="10.0.0.1", runner=None),
+        lambda: __import__("sanctum_cli.devices.base", fromlist=["NetContext"]).NetContext(
+            gateway_ip="10.0.0.1", runner=None
+        ),
     )
     monkeypatch.setattr(
         "sanctum_cli.commands.net._firewalla_creds",

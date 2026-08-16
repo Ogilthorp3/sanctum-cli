@@ -119,7 +119,9 @@ class Span:
     def set(self, **fields: Any) -> None:
         self._fields.update(fields)
 
-    def __exit__(self, exc_type: type[BaseException] | None, exc: BaseException | None, _tb: object) -> None:
+    def __exit__(
+        self, exc_type: type[BaseException] | None, exc: BaseException | None, _tb: object
+    ) -> None:
         duration_ms = (time.perf_counter_ns() - self._start_ns) // 1_000_000
         status: EventStatus = "ok" if exc_type is None else "error"
         if exc is not None and "error" not in self._fields:

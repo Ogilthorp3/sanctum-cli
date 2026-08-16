@@ -162,9 +162,7 @@ def _write_devices(tmp_path: Path, cfg: dict) -> Path:
     return p
 
 
-def test_coverage_command_lists_devices(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_coverage_command_lists_devices(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     dev = _write_devices(tmp_path, _config())
     monkeypatch.setenv("SANCTUM_DEVICES_FILE", str(dev))
     result = runner.invoke(app, ["screen-time", "coverage"])
@@ -173,9 +171,7 @@ def test_coverage_command_lists_devices(
     assert "presence-only" in result.stdout
 
 
-def test_phone_mode_preview_does_not_write(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_phone_mode_preview_does_not_write(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     dev = _write_devices(tmp_path, _config())
     monkeypatch.setenv("SANCTUM_DEVICES_FILE", str(dev))
     before = dev.read_text(encoding="utf-8")
@@ -197,9 +193,7 @@ def test_phone_mode_apply_writes_and_backs_up(
     assert (tmp_path / "devices.yaml.bak").exists()  # backup made
 
 
-def test_phone_mode_unknown_kid_errors(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_phone_mode_unknown_kid_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     dev = _write_devices(tmp_path, _config())
     monkeypatch.setenv("SANCTUM_DEVICES_FILE", str(dev))
     result = runner.invoke(app, ["screen-time", "phone-mode", "ghost", "macpause", "--apply"])
@@ -217,9 +211,7 @@ def test_coverage_renders_user_strings_literally(
         "family": {
             "kidA": {
                 "role": "child",
-                "personal_devices": [
-                    {"name": "[red]Pwn[/] phone", "mac": "7A:87:AC:CD:8E:A2"}
-                ],
+                "personal_devices": [{"name": "[red]Pwn[/] phone", "mac": "7A:87:AC:CD:8E:A2"}],
             }
         }
     }

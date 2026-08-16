@@ -24,9 +24,7 @@ def verify(*, runner: Runner) -> tuple[Verdict, str]:
     return Verdict.INCONCLUSIVE, "Could not confirm — check the Firewalla app's WAN IP."
 
 
-def classify_mtu(
-    *, wan_mtu: int | None, big_df_ok: bool, small_df_ok: bool
-) -> tuple[Verdict, str]:
+def classify_mtu(*, wan_mtu: int | None, big_df_ok: bool, small_df_ok: bool) -> tuple[Verdict, str]:
     """Classify a path-MTU black hole from two DF-ping results.
 
     The caller probes with the don't-fragment bit set at two sizes: a ~1500-byte

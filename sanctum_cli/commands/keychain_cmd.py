@@ -23,7 +23,7 @@ from sanctum_cli.errors import LocalError
 
 console = Console()
 
-SECURITY_BIN = "/usr/bin/security"
+from sanctum_cli.keychain import SECURITY_BIN
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,17 +36,33 @@ class _Entry:
 def _registry(cfg: config.Config) -> list[_Entry]:
     """Return the Keychain entries sanctum manages, derived from instance.yaml."""
     entries: list[_Entry] = [
-        _Entry("Anthropic API key", cfg.cli.providers.claude.keychain.service, cfg.cli.providers.claude.keychain.account),
-        _Entry("Google AI API key", cfg.cli.providers.gemini.keychain.service, cfg.cli.providers.gemini.keychain.account),
+        _Entry(
+            "Anthropic API key",
+            cfg.cli.providers.claude.keychain.service,
+            cfg.cli.providers.claude.keychain.account,
+        ),
+        _Entry(
+            "Google AI API key",
+            cfg.cli.providers.gemini.keychain.service,
+            cfg.cli.providers.gemini.keychain.account,
+        ),
     ]
     cb = cfg.cli.cloud_backup
     if cb is not None and cb.primary is not None:
         entries.append(
-            _Entry("restic passphrase (primary)", cb.primary.keychain.service, cb.primary.keychain.account)
+            _Entry(
+                "restic passphrase (primary)",
+                cb.primary.keychain.service,
+                cb.primary.keychain.account,
+            )
         )
     if cb is not None and cb.secondary is not None:
         entries.append(
-            _Entry("restic passphrase (secondary)", cb.secondary.keychain.service, cb.secondary.keychain.account)
+            _Entry(
+                "restic passphrase (secondary)",
+                cb.secondary.keychain.service,
+                cb.secondary.keychain.account,
+            )
         )
     return entries
 
@@ -115,9 +131,7 @@ def keychain_rotate(
             help="Provide the new value. Omit to auto-generate a 64-char hex secret.",
         ),
     ] = None,
-    yes: Annotated[
-        bool, typer.Option("--yes", "-y", help="Skip confirmation prompt.")
-    ] = False,
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip confirmation prompt.")] = False,
 ) -> None:
     """Replace a Keychain entry with a new value. Auto-generates 64 hex chars by default."""
     if not shutil.which(SECURITY_BIN):

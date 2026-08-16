@@ -5,6 +5,7 @@ probes, its alert routing, its uninstall steps, docs, demo, and soak target.
 The manifest is the boundary between a module and the spine; consumers
 (doctor --ship, module commands, self-test) never reach past it.
 """
+
 from __future__ import annotations
 
 from enum import StrEnum
@@ -27,8 +28,8 @@ class ServiceKind(StrEnum):
 
 
 class SecretGenerate(StrEnum):
-    hex64 = "hex64"   # mint 64 hex chars on install if absent
-    none = "none"     # operator must supply (e.g. cloud keys); never copied from Bert
+    hex64 = "hex64"  # mint 64 hex chars on install if absent
+    none = "none"  # operator must supply (e.g. cloud keys); never copied from Bert
 
 
 class ServiceSpec(BaseModel):
@@ -36,7 +37,7 @@ class ServiceSpec(BaseModel):
     label: str
     kind: ServiceKind = ServiceKind.launchagent
     keepalive: bool = False
-    health_probe: str | None = None   # dotted path into the probe registry
+    health_probe: str | None = None  # dotted path into the probe registry
 
 
 class SecretSpec(BaseModel):
@@ -62,8 +63,8 @@ class AlertSpec(BaseModel):
 class UninstallSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
     bootout_labels: list[str] = []
-    revoke_secrets: list[str] = []     # service names (must be declared in secrets)
-    remove_paths: list[str] = []       # only removed under --purge
+    revoke_secrets: list[str] = []  # service names (must be declared in secrets)
+    remove_paths: list[str] = []  # only removed under --purge
     rename_suffix: str = ".uninstalled-{date}"
 
 
@@ -129,7 +130,7 @@ class ModuleManifest(BaseModel):
                     msg = err.get("msg", str(exc))
                     # Strip pydantic's "Value error, " prefix if present
                     if msg.startswith("Value error, "):
-                        msg = msg[len("Value error, "):]
+                        msg = msg[len("Value error, ") :]
                     raise ManifestError(msg) from exc
             raise
 

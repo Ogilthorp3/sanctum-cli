@@ -28,7 +28,9 @@ def test_read_success(run_mock, which_mock):  # type: ignore[no-untyped-def]
 @patch("sanctum_cli.keychain.shutil.which", return_value="/usr/bin/security")
 @patch("sanctum_cli.keychain.subprocess.run")
 def test_missing_entry_maps_to_specific_error(run_mock, _which_mock):  # type: ignore[no-untyped-def]
-    run_mock.return_value = _completed(44, stderr="The specified item could not be found in the keychain.")
+    run_mock.return_value = _completed(
+        44, stderr="The specified item could not be found in the keychain."
+    )
     with pytest.raises(KeychainEntryMissingError) as ei:
         keychain.read("acct", "svc")
     assert "Keychain entry missing" in ei.value.message

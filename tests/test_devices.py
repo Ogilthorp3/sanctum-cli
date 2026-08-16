@@ -40,9 +40,7 @@ def _real_schema_config() -> dict:
     }
 
 
-def test_devices_renders_real_schema(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_devices_renders_real_schema(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     dev = tmp_path / "devices.yaml"
     dev.write_text(yaml.safe_dump(_real_schema_config()), encoding="utf-8")
     monkeypatch.setenv("SANCTUM_DEVICES_FILE", str(dev))

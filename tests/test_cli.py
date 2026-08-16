@@ -39,9 +39,7 @@ def test_config_validate_minimal(
     assert "valid" in result.stdout.lower()
 
 
-def test_config_validate_json(
-    minimal_instance_yaml: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_config_validate_json(minimal_instance_yaml: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SANCTUM_INSTANCE_FILE", str(minimal_instance_yaml))
     result = runner.invoke(app, ["config", "validate", "--json"])
     assert result.exit_code == 0
@@ -62,17 +60,13 @@ def test_config_validate_bad_yaml_returns_5(
     assert "schema violation" in combined.lower() or "name" in combined
 
 
-def test_config_validate_missing_returns_5(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_config_validate_missing_returns_5(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SANCTUM_INSTANCE_FILE", str(tmp_path / "nope.yaml"))
     result = runner.invoke(app, ["config", "validate"])
     assert result.exit_code == 5
 
 
-def test_status_oneline(
-    minimal_instance_yaml: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_status_oneline(minimal_instance_yaml: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SANCTUM_INSTANCE_FILE", str(minimal_instance_yaml))
     result = runner.invoke(app, ["status", "--oneline"])
     assert result.exit_code == 0, result.stdout
@@ -80,9 +74,7 @@ def test_status_oneline(
     assert "router" in result.stdout.lower()
 
 
-def test_status_json(
-    minimal_instance_yaml: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_status_json(minimal_instance_yaml: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SANCTUM_INSTANCE_FILE", str(minimal_instance_yaml))
     result = runner.invoke(app, ["status", "--json"])
     assert result.exit_code == 0

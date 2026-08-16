@@ -117,9 +117,9 @@ def _point_registry_at(monkeypatch: pytest.MonkeyPatch, provider: FakeOrbi) -> N
     # Build NetContext without shelling out to `route`, and creds without a SOAP login.
     monkeypatch.setattr(
         "sanctum_cli.commands.net._orbi_netcontext",
-        lambda: __import__(
-            "sanctum_cli.devices.base", fromlist=["NetContext"]
-        ).NetContext(gateway_ip="192.168.1.1", runner=None),
+        lambda: __import__("sanctum_cli.devices.base", fromlist=["NetContext"]).NetContext(
+            gateway_ip="192.168.1.1", runner=None
+        ),
     )
     monkeypatch.setattr(
         "sanctum_cli.commands.net._orbi_creds",
@@ -236,9 +236,7 @@ def test_net_orbi_guest_wifi_apply_routes_through_rails(
     """`guest-wifi on --apply --force` fires the set through guarded_apply and commits."""
     p = FakeOrbi()
     _point_registry_at(monkeypatch, p)
-    result = runner.invoke(
-        app, ["net", "orbi", "guest-wifi", "on", "--apply", "--force"]
-    )
+    result = runner.invoke(app, ["net", "orbi", "guest-wifi", "on", "--apply", "--force"])
     assert result.exit_code == 0, result.stdout
     # The mutation routed through the provider's GUEST_WIFI capability_op (5g leaf).
     assert (GUEST_5G, "on") in p.set_calls
@@ -269,13 +267,13 @@ def test_net_orbi_guest_wifi_apply_set_returns_not_ok_rolls_back(
             self.set_calls.append((path, value))
             before = self._values.get(path)
             self._values[path] = value
-            return OpResult(ok=False, detail="orbi: write refused upstream", before=before, after=None)
+            return OpResult(
+                ok=False, detail="orbi: write refused upstream", before=before, after=None
+            )
 
     p = RefusingOrbi()
     _point_registry_at(monkeypatch, p)
-    result = runner.invoke(
-        app, ["net", "orbi", "guest-wifi", "on", "--apply", "--force"]
-    )
+    result = runner.invoke(app, ["net", "orbi", "guest-wifi", "on", "--apply", "--force"])
     assert result.exit_code == 1, result.stdout  # refused write → nonzero, NOT 0
     assert p.rollback_calls == 1  # the refused write was rolled back
 
@@ -287,9 +285,7 @@ def test_net_orbi_guest_wifi_off_uses_disengaged_value(
     p = FakeOrbi()
     p._values[GUEST_5G] = "on"
     _point_registry_at(monkeypatch, p)
-    result = runner.invoke(
-        app, ["net", "orbi", "guest-wifi", "off", "--apply", "--force"]
-    )
+    result = runner.invoke(app, ["net", "orbi", "guest-wifi", "off", "--apply", "--force"])
     assert result.exit_code == 0, result.stdout
     assert (GUEST_5G, "off") in p.set_calls
 
@@ -323,9 +319,7 @@ def test_net_orbi_guest_wifi_apply_verify_fail_rolls_back(
 
     p = NoApplyOrbi()
     _point_registry_at(monkeypatch, p)
-    result = runner.invoke(
-        app, ["net", "orbi", "guest-wifi", "on", "--apply", "--force"]
-    )
+    result = runner.invoke(app, ["net", "orbi", "guest-wifi", "on", "--apply", "--force"])
     assert result.exit_code == 1, result.stdout  # verify failed → nonzero
     assert p.rollback_calls == 1  # the rails tripped rollback
 
@@ -365,9 +359,7 @@ def test_net_orbi_guest_wifi_apply_verify_readback_raises_rolls_back(
 
     p = FlakyReadBackOrbi()
     _point_registry_at(monkeypatch, p)
-    result = runner.invoke(
-        app, ["net", "orbi", "guest-wifi", "on", "--apply", "--force"]
-    )
+    result = runner.invoke(app, ["net", "orbi", "guest-wifi", "on", "--apply", "--force"])
     # The set fired (change applied) but the read-back raised → rails rolled back.
     assert (GUEST_5G, "on") in p.set_calls
     assert p.rollback_calls == 1  # NOT escaped: rollback restored the device
@@ -413,9 +405,9 @@ def test_net_orbi_brand_pin_threaded_from_instance_yaml(
     p = FakeOrbi()
     monkeypatch.setattr(
         "sanctum_cli.commands.net._orbi_netcontext",
-        lambda: __import__(
-            "sanctum_cli.devices.base", fromlist=["NetContext"]
-        ).NetContext(gateway_ip="192.168.1.1", runner=None),
+        lambda: __import__("sanctum_cli.devices.base", fromlist=["NetContext"]).NetContext(
+            gateway_ip="192.168.1.1", runner=None
+        ),
     )
     monkeypatch.setattr(
         "sanctum_cli.commands.net._orbi_creds",

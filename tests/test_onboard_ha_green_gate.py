@@ -276,7 +276,10 @@ def test_full_onboard_ha_green_gate_records_verified_pairing(
         ha_green, "tailscale_node_present", lambda name=ha_green._TAILNET_NODE: True
     )
 
+    import sys
+
     with (
+        patch("getpass.getpass", side_effect=lambda *a, **k: sys.stdin.readline().rstrip("\n")),
         patch("sanctum_cli.commands.onboard.backup_cmd.backup_estimate"),
         patch("sanctum_cli.commands.onboard.backup_cmd.backup_run"),
         patch("sanctum_cli.commands.onboard._dispatch_cloud_setup"),

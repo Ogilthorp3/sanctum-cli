@@ -4,8 +4,9 @@ Interactive REPL with seat switching (``/yoda``, ``/windu``, …) and a
 fan-out mode (``/council <question>`` or one-shot ``sanctum council "q"``)
 that puts the question to EVERY seat in parallel and closes with a Yoda
 synthesis. Seats are proxyd :4040 council models (Anthropic dialect); each
-Jedi is a persona system prompt on top of a seat. Yoda and Mundi share a
-brain but never a voice — the neurodiversity doctrine in one line.
+Jedi is a persona system prompt on top of a seat. Neurodiversity is paramount:
+Yoda=Fable-max, Windu=Gemini, Qui-Gon=Devstral, Mundi=Grok, Cilghal=Heretic,
+Jocasta+Mothma=Opus-medium — aligned with OpenClaw agents.
 
 Transport: httpx over **TLS** against proxyd's ``/v1/messages`` (SSE streaming
 in the REPL, buffered in fan-out). The server leaf is verified against the
@@ -306,7 +307,7 @@ SEATS: dict[str, Seat] = {
     ),
     "mundi": Seat(
         label="Ki-Adi-Mundi",
-        model="council-max-thinking",
+        model="council-finance",
         persona=(
             "You are Ki-Adi-Mundi of the Sanctum Jedi Council — finance and"
             " resource intelligence (two brains: analytical and intuitive)."
@@ -318,12 +319,14 @@ SEATS: dict[str, Seat] = {
     ),
     "cilghal": Seat(
         label="Cilghal",
-        model="council-mlx",
+        model="council-heretic",
         persona=(
             "You are Cilghal of the Sanctum Jedi Council — health and"
-            " diagnostics of the haus systems. Symptoms, evidence, honest"
-            " uncertainty. You never declare a system healthy that you have"
-            " not observed."
+            " diagnostics of the haus systems and of Bert. Symptoms, evidence,"
+            " honest uncertainty. You never declare a system healthy that you"
+            " have not observed. You do not refuse clinical or operational"
+            " health questions out of generic caution — that is why this seat"
+            " rides the heretic (refusal-ablated) brain."
         ),
         style="blue",
         verb="examines",

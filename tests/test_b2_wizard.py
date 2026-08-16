@@ -96,7 +96,9 @@ def test_create_bucket_idempotent_on_duplicate() -> None:
     auth = b2._B2AuthResult(account_id="acc", api_url="https://api.x")
 
     def fake_get(*_args, **_kwargs):  # type: ignore[no-untyped-def]
-        return httpx.Response(200, json=_make_b2_auth_response(), request=httpx.Request("GET", "https://x"))
+        return httpx.Response(
+            200, json=_make_b2_auth_response(), request=httpx.Request("GET", "https://x")
+        )
 
     def fake_post(*_args, **_kwargs):  # type: ignore[no-untyped-def]
         return httpx.Response(
@@ -116,12 +118,7 @@ def test_create_bucket_idempotent_on_duplicate() -> None:
 def test_persist_to_instance_yaml_merges_and_keeps_bak(tmp_path: Path) -> None:
     target = tmp_path / "instance.yaml"
     target.write_text(
-        "instance:\n"
-        "  name: Test\n"
-        "  slug: test\n"
-        "services:\n"
-        "  whatever:\n"
-        "    port: 1\n",
+        "instance:\n  name: Test\n  slug: test\nservices:\n  whatever:\n    port: 1\n",
         encoding="utf-8",
     )
     b2._persist_to_instance_yaml(
@@ -136,9 +133,7 @@ def test_persist_to_instance_yaml_merges_and_keeps_bak(tmp_path: Path) -> None:
     assert parsed["instance"]["name"] == "Test"
     assert parsed["services"]["whatever"]["port"] == 1
     assert parsed["cli"]["cloud_backup"]["primary"]["repo"] == "b2:sanctum-restic-test-1234"
-    assert (
-        parsed["cli"]["cloud_backup"]["primary"]["keychain"]["service"] == "sanctum-backup-key"
-    )
+    assert parsed["cli"]["cloud_backup"]["primary"]["keychain"]["service"] == "sanctum-backup-key"
     bak_files = list(tmp_path.glob("instance.yaml.bak.*"))
     assert len(bak_files) == 1
 

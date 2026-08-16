@@ -39,9 +39,9 @@ def _write_gh_stub(bindir: Path, capture: Path) -> None:
         "if '-X' in args and 'PUT' in args:\n"
         "    content = next((a.split('=', 1)[1] for a in args if a.startswith('content=')), '')\n"
         f"    open({str(capture)!r}, 'w').write(content)\n"
-        "    print('{\"commit\": {\"sha\": \"new\"}}')\n"
+        '    print(\'{"commit": {"sha": "new"}}\')\n'
         "else:\n"
-        "    print('{\"sha\": \"abc\", \"content\": \"' + base64.b64encode(b'{}').decode() + '\"}')\n"
+        '    print(\'{"sha": "abc", "content": "\' + base64.b64encode(b\'{}\').decode() + \'"}\')\n'
     )
     stub.chmod(0o755)
 

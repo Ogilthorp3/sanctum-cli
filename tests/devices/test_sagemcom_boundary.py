@@ -78,9 +78,7 @@ class _RealEncodingClient:
         from sagemcom_api.client import SagemcomClient
         from sagemcom_api.enums import EncryptionMethod
 
-        client = SagemcomClient(
-            "192.168.2.1", "admin", "pw", EncryptionMethod.SHA512, ssl=False
-        )
+        client = SagemcomClient("192.168.2.1", "admin", "pw", EncryptionMethod.SHA512, ssl=False)
         # A valid (int-able) session id so the payload builder does not choke.
         client._session_id = 0  # test seam into the real client
 
@@ -124,9 +122,7 @@ class _RealEncodingClient:
         assert self._client is not None
         return await self._client.get_value_by_xpath(xpath, options)  # type: ignore[attr-defined]
 
-    async def set_value_by_xpath(
-        self, xpath: str, value: str, options: dict | None = None
-    ) -> dict:
+    async def set_value_by_xpath(self, xpath: str, value: str, options: dict | None = None) -> dict:
         assert self._client is not None
         return await self._client.set_value_by_xpath(xpath, value, options)  # type: ignore[attr-defined]
 
