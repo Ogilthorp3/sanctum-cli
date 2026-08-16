@@ -35,7 +35,6 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import httpx
-from aiohttp import web
 
 from sanctum_cli.errors import LocalError
 from sanctum_cli.mesh import artifact
@@ -44,6 +43,8 @@ from sanctum_cli.mesh.types import ArtifactRef, ChampionManifest, MeshIdentity
 
 if TYPE_CHECKING:
     from types import TracebackType
+
+    from aiohttp import web
 
     # Import-for-typing only: a runtime import would be circular (commands.mesh
     # imports the mesh package). Structural typing makes HttpTrackerTransport a
@@ -499,6 +500,25 @@ if TYPE_CHECKING:
 # ─── the server (thin async glue over the pure registry) ─────────────────
 
 
+def _aiohttp_web():
+    """Import aiohttp only when serving — the HTTP *client* must not need it.
+
+    ``sanctum endocrine tick`` (and every other CLI command) imports
+    ``commands.mesh`` → this module. A missing aiohttp in the uv-tool env
+    used to brick the gland tick and page Force Flow GLAND_DOWN forever
+    (2026-08-16). TrackerRegistry + HttpTrackerTransport stay importable
+    without the server extra.
+    """
+    try:
+        from aiohttp import web
+    except ImportError as exc:  # pragma: no cover - env gap, not a logic path
+        raise LocalError(
+            "aiohttp is required to serve the mesh tracker (declared in "
+            "pyproject; reinstall the sanctum-cli uv tool)"
+        ) from exc
+    return web
+
+
 class TrackerHandlers:
     """aiohttp request handlers that delegate to a :class:`TrackerRegistry`.
 
@@ -512,6 +532,7 @@ class TrackerHandlers:
 
     async def register(self, request: web.Request) -> web.Response:
         """``POST /register`` → ``{"ok": bool}`` (the registry's ack)."""
+        web = _aiohttp_web()
         body = await request.json()
         ok = self.registry.register(
             str(body["pubkey"]),
@@ -523,16 +544,19 @@ class TrackerHandlers:
 
     async def peers(self, _request: web.Request) -> web.Response:
         """``GET /peers`` → ``{"peers": [...]}``."""
+        web = _aiohttp_web()
         return web.json_response({"peers": self.registry.list_peers()})
 
     async def catalog(self, _request: web.Request) -> web.Response:
         """``GET /catalog`` → ``{"champions": [manifest_dict, ...]}``."""
+        web = _aiohttp_web()
         return web.json_response(
             {"champions": [m.to_dict() for m in self.registry.list_catalog()]}
         )
 
     async def announce(self, request: web.Request) -> web.Response:
         """``POST /announce`` → store the manifest + seeder; ``{"ok": true}``."""
+        web = _aiohttp_web()
         body = await request.json()
         manifest = ChampionManifest.from_dict(body["manifest"])
         self.registry.announce(manifest, str(body["addr"]))
@@ -540,6 +564,7 @@ class TrackerHandlers:
 
     async def find(self, request: web.Request) -> web.Response:
         """``GET /find?hash=…`` → the hit body, or ``404`` on a genuine miss."""
+        web = _aiohttp_web()
         content_hash = request.query.get("hash", "")
         ref = self.registry.find(content_hash)
         if ref is None:
@@ -564,6 +589,7 @@ class TrackerHandlers:
         ``403 {"reason": …}``; ``not_configured`` →
         ``404 {"reason": "not_configured"}``.
         """
+        web = _aiohttp_web()
         body = await request.json()
         outcome = self.registry.community(
             str(body.get("pubkey", "")),
@@ -585,6 +611,7 @@ def build_tracker_app(registry: TrackerRegistry | None = None) -> web.Applicatio
     ``GET /catalog``, ``POST /announce``, ``GET /find``, and ``POST /community``
     (community is a POST so the signed credential travels in the body, not a URL).
     """
+    web = _aiohttp_web()
     handlers = TrackerHandlers(registry if registry is not None else TrackerRegistry())
     app = web.Application()
     app.router.add_post("/register", handlers.register)
@@ -602,4 +629,5 @@ def serve(
     registry: TrackerRegistry | None = None,
 ) -> None:  # pragma: no cover - blocking live server, exercised by the e2e drill
     """Run the tracker app (blocking) on ``host:port`` — the real loopback server."""
+    web = _aiohttp_web()
     web.run_app(build_tracker_app(registry), host=host, port=port)
