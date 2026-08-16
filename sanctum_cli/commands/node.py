@@ -1,21 +1,19 @@
-"""``sanctum node`` — productized satellite onboarding (new Mac in the closet).
+"""``sanctum node`` — hive roster, capability routing, and satellite onboarding.
 
-The haus grows one Mac at a time: a new machine lands in a closet, the operator
-sits at the console laptop, and three commands take it from "sealed box on the
-shelf" to "adopted satellite the console can drive over SSH":
+Hive plane (multi-site nervous system)
+--------------------------------------
+* ``list`` / ``get`` / ``whoami`` / ``resolve`` / ``validate`` — roster truth
+* ``offers`` / ``can`` / ``route`` — capability matrix and work placement
+* ``vault-host`` — primary hub hop for Memory Vault (name-only)
+* ``ensure-hub`` / ``declare-peer`` — primary + multi-hub join
+* ``export-council`` — overlay council-router hosts from live resolve
 
-* ``scan``             — read-only discovery: which Macs are visible (tailnet +
-  LAN), which already answer SSH ("adoptable now") and which still need a human
-  at their keyboard ("needs bootstrap").
-* ``bootstrap-script`` — generate the ONE script to run at the new Mac's own
-  keyboard. It turns on Remote Login, authorizes the console's automation key,
-  and hardens the machine for headless duty. The script content is the
-  field-validated procedure from the chalet M1 Mini bring-up — its semantics
-  are the contract, do not "improve" them casually.
-* ``adopt``            — the console side of the hand-off: poll SSH until the
-  bootstrap lands, then drive the honest-verify scorecard (L1 reach → L6
-  register) and record the node under ``nodes.<name>`` in instance.yaml. Every
-  ✓ comes from a real probe over the wire — never from "we asked for it".
+Satellite onboarding (closet Mac)
+---------------------------------
+* ``scan`` / ``bootstrap-script`` / ``adopt`` — L1–L6 honest-verify adopt
+
+Body plane (per-site LAN design map) lives in firewalla-toolkit identity-rebind.
+Docs: sanctum-docs architecture/hive-topology.
 
 Every subprocess / socket touchpoint is a module-level seam
 (:func:`_run_local`, :func:`_probe_tcp`, :func:`_run_ssh`,
@@ -30,6 +28,7 @@ import enum
 import getpass
 import hashlib
 import ipaddress
+import json
 import re
 import socket
 import subprocess
@@ -38,7 +37,7 @@ import time
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any, Mapping
 
 import typer
 import yaml
@@ -48,6 +47,16 @@ from rich.table import Table
 
 from sanctum_cli import config
 from sanctum_cli.errors import LocalError, NetworkError, SanctumError
+from sanctum_cli.hive.capabilities import NodeCapability, capabilities_of, normalize_capability
+from sanctum_cli.hive.export_council import overlay_hosts
+from sanctum_cli.hive.naming import (
+    aliases_of,
+    is_valid_hive_name,
+    preferred_name,
+    suggest_infra_name,
+)
+from sanctum_cli.hive.route import pick_node
+from sanctum_cli.hive.sot import peers_of, primary_node_name, validate_roster
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -55,7 +64,9 @@ if TYPE_CHECKING:
 console = Console()
 err_console = Console(stderr=True)
 
-node_app = typer.Typer(help="Satellite-Mac onboarding — scan, bootstrap hand-off, adopt.")
+node_app = typer.Typer(
+    help="Hive nodes — roster, resolve, and satellite onboarding (scan / bootstrap / adopt)."
+)
 
 
 def _report(exc: SanctumError) -> None:
@@ -967,6 +978,243 @@ def _probe_headless(host: str, user: str) -> LayerResult:
     return LayerResult("L5", "headless", LayerStatus.PASS, "sleep/disksleep/powernap 0 · womp 1" + rpf_note)
 
 
+# ─── hive roster (name-only cross-site) ───────────────────────────────────────
+#
+# Design contract (see sanctum-docs architecture/hive-topology):
+#   * Local body: isomorphic design map (.1 FW · .2 Orbi · .3 HA · .10 Mini)
+#     via firewalla-toolkit identity-pins — never merged L3 across sites.
+#   * Hive plane: address peers by node name (MagicDNS / Tailscale), never bare
+#     10.0.0.x across sites.
+#   * nodes.* is the roster SoT; adopt writes satellites; hubs are declared.
+
+
+def _node_id_path() -> Path:
+    """Where this machine records its hive name (``~/.sanctum/.node_id``)."""
+    return Path.home() / ".sanctum" / ".node_id"
+
+
+def ssh_user_of(node: Mapping[str, Any] | dict[str, Any]) -> str:
+    """Prefer ``ssh_user``; accept legacy adopt field ``user``."""
+    return str(node.get("ssh_user") or node.get("user") or "").strip()
+
+
+def looks_like_tailscale_name(host: str) -> bool:
+    """True for simple MagicDNS stems (``manoir``, ``chalet``, ``mbp``), not IPs or FQDNs.
+
+    Prefers the hive naming contract (:func:`is_valid_hive_name`) but still
+    accepts legacy stems so resolve can map them via ``aliases`` / LEGACY_ALIASES.
+    """
+    h = (host or "").strip()
+    if not h:
+        return False
+    if re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", h):
+        return False
+    if "." in h:
+        return False
+    if is_valid_hive_name(h):
+        return True
+    return bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", h))
+
+
+def load_nodes_map(path: Path | None = None) -> dict[str, dict[str, Any]]:
+    """Return ``nodes`` from instance.yaml as ``{name: block}`` (empty if missing)."""
+    target = Path(path) if path else config.instance_path()
+    if not target.exists():
+        return {}
+    loaded = yaml.safe_load(target.read_text(encoding="utf-8"))
+    if not isinstance(loaded, dict):
+        return {}
+    nodes = loaded.get("nodes")
+    if not isinstance(nodes, dict):
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for k, v in nodes.items():
+        if isinstance(k, str) and isinstance(v, dict):
+            out[k] = v
+    return out
+
+
+def read_node_id(path: Path | None = None) -> str | None:
+    """Read this machine's hive name from ``.node_id`` (first non-empty line)."""
+    p = path if path is not None else _node_id_path()
+    if not p.exists():
+        return None
+    for line in p.read_text(encoding="utf-8").splitlines():
+        s = line.strip()
+        if s and not s.startswith("#"):
+            return s
+    return None
+
+
+def parse_tailscale_peer_ips(status_json: str) -> dict[str, dict[str, Any]]:
+    """Map MagicDNS stem / HostName → {online, ips} from ``tailscale status --json``.
+
+    Pure parser (tests inject JSON). Keys are lowercased stems (``manoir``,
+    ``chalet``) plus HostName lowercased when present.
+    """
+    out: dict[str, dict[str, Any]] = {}
+    try:
+        data = __import__("json").loads(status_json or "{}")
+    except Exception:
+        return out
+
+    def _ingest(host_name: str | None, dns: str | None, online: bool, ips: list[str]) -> None:
+        stems: list[str] = []
+        if host_name:
+            stems.append(host_name.strip().lower())
+        if dns:
+            # manoir.tail7c6d11.ts.net → manoir
+            stem = dns.strip().lower().split(".")[0]
+            if stem:
+                stems.append(stem)
+        for s in stems:
+            if not s:
+                continue
+            prev = out.get(s)
+            if prev and prev.get("online") and not online:
+                continue
+            out[s] = {"online": bool(online), "ips": list(ips or [])}
+
+    self = data.get("Self") or {}
+    self_ips = [str(i) for i in (self.get("TailscaleIPs") or []) if i]
+    _ingest(self.get("HostName"), self.get("DNSName"), True, self_ips)
+    for peer in (data.get("Peer") or {}).values():
+        if not isinstance(peer, dict):
+            continue
+        ips = [str(i) for i in (peer.get("TailscaleIPs") or []) if i]
+        _ingest(peer.get("HostName"), peer.get("DNSName"), bool(peer.get("Online")), ips)
+    return out
+
+
+def resolve_node_address(
+    name: str,
+    nodes: Mapping[str, Mapping[str, Any]],
+    peer_ips: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Resolve a hive node name to a reachable address preference.
+
+    Accepts preferred names (``mbp``) or legacy aliases (``berts-mbp``).
+    Order: online Tailscale peer for preferred + aliases → literal non-TS host
+    → host string when tailscale status is empty.
+    Fail-closed when the only known address is an offline tailnet peer.
+    """
+    raw = name.strip()
+    key = preferred_name(raw, nodes)
+    node = nodes.get(key) or nodes.get(key.lower())
+    # Also match if raw is an alias listed on a row
+    if node is None:
+        for n, block in nodes.items():
+            stems = {n.lower(), *[a.lower() for a in aliases_of(block)]}
+            if raw.lower() in stems or key.lower() in stems:
+                key, node = n, block
+                break
+    base = {
+        "name": key,
+        "ssh_user": ssh_user_of(node) if node else "",
+        "address": None,
+        "source": None,
+        "online": None,
+        "error": None,
+        "ok": False,
+    }
+    if node is None:
+        base["error"] = f"unknown node {raw!r} — not in instance.yaml nodes (hive naming)"
+        return base
+
+    ts_name = str(node.get("tailscale_name") or "").strip()
+    host = str(node.get("host") or "").strip()
+    stems: list[tuple[str, str]] = []
+    # Preferred first, then aliases (legacy TS machine names), then host
+    if ts_name:
+        stems.append((ts_name, "tailscale_name"))
+    for a in aliases_of(node):
+        if a and a != ts_name.lower():
+            stems.append((a, "alias"))
+    if host and host.lower() not in {s[0].lower() for s in stems}:
+        stems.append((host, "host"))
+
+    offline_peer: dict[str, Any] | None = None
+    for cand, source in stems:
+        stem = cand.lower().split(".")[0]
+        peer = peer_ips.get(stem) or peer_ips.get(cand.lower())
+        if peer and peer.get("online") and peer.get("ips"):
+            return {
+                **base,
+                "ok": True,
+                "address": str(peer["ips"][0]),
+                "source": f"tailscale:{source}",
+                "online": True,
+                "tailscale_name": ts_name or None,
+            }
+        if peer and not peer.get("online"):
+            offline_peer = {
+                **base,
+                "ok": False,
+                "error": f"node {key!r} peer {cand!r} is offline on the tailnet",
+                "source": f"tailscale:{source}",
+                "online": False,
+            }
+
+    # Literal host: LAN IP or DNS name (not a simple TS stem)
+    if host and not looks_like_tailscale_name(host):
+        return {
+            **base,
+            "ok": True,
+            "address": host,
+            "source": "host",
+            "online": None,
+        }
+
+    # Status JSON already said this tailnet peer is offline — do not
+    # fail-open via a second live `tailscale ip` lookup.
+    if offline_peer is not None:
+        return offline_peer
+
+    # Direct CLI lookup when status JSON did not yield an online peer
+    for cand in (ts_name, host, key):
+        if not cand or not looks_like_tailscale_name(cand.split(".")[0]):
+            continue
+        tip = _tailscale_ip_for_name(cand.split(".")[0])
+        if tip:
+            return {
+                **base,
+                "ok": True,
+                "address": tip,
+                "source": "tailscale:ip",
+                "online": True,
+                "tailscale_name": ts_name or cand,
+            }
+
+    # No peer map (tailscale missing) — fall back to configured host/name
+    if host and not peer_ips:
+        return {
+            **base,
+            "ok": True,
+            "address": host,
+            "source": "host",
+            "online": None,
+        }
+    if ts_name and not peer_ips:
+        return {
+            **base,
+            "ok": True,
+            "address": ts_name,
+            "source": "tailscale_name",
+            "online": None,
+        }
+
+    if host:
+        return {
+            **base,
+            "ok": True,
+            "address": host,
+            "source": "host",
+            "online": None,
+        }
+    base["error"] = f"node {key!r} has no resolvable address"
+    return base
+
+
 def register_node(name: str, *, host: str, user: str, path: Path | None = None) -> None:
     """Record an adopted satellite under ``nodes.<name>`` in instance.yaml.
 
@@ -975,6 +1223,15 @@ def register_node(name: str, *, host: str, user: str, path: Path | None = None) 
     dir is created for a fresh file. ``nodes:`` is deliberately NOT modeled in
     :class:`config.Config` — it is read back via ``config.instance_value``, the
     per-setup-block convention.
+
+    Hive roster shape (satellite adopt default)::
+
+        type: satellite
+        tier: edge
+        ssh_user: <user>
+        host: <host>
+        tailscale_name: <host>   # only when host is a simple MagicDNS stem
+        adopted: YYYY-MM-DD
     """
     target = Path(path) if path else config.instance_path()
     data: dict[str, Any] = {}
@@ -985,12 +1242,607 @@ def register_node(name: str, *, host: str, user: str, path: Path | None = None) 
     nodes = data.get("nodes")
     if not isinstance(nodes, dict):
         nodes = data["nodes"] = {}
-    nodes[name] = {"host": host, "user": user, "adopted": date.today().isoformat()}
+    entry: dict[str, Any] = {
+        "type": "satellite",
+        "tier": "edge",
+        "ssh_user": user,
+        "host": host,
+        "adopted": date.today().isoformat(),
+    }
+    if looks_like_tailscale_name(host):
+        entry["tailscale_name"] = host
+    nodes[name] = entry
     if target.exists():
         backup = target.parent / (target.name + ".bak")
         backup.write_text(target.read_text(encoding="utf-8"), encoding="utf-8")
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True), encoding="utf-8")
+
+
+def _tailscale_status_json() -> str:
+    """Live ``tailscale status --json`` or empty string (seam for resolve)."""
+    bin_ = _tailscale_bin()
+    if not bin_:
+        return ""
+    code, out = _run_local([bin_, "status", "--json"], timeout=10)
+    return out if code == 0 else ""
+
+
+def _tailscale_ip_for_name(name: str) -> str | None:
+    """Best-effort ``tailscale ip -4 <name>`` when status JSON is sparse."""
+    bin_ = _tailscale_bin()
+    if not bin_ or not name:
+        return None
+    code, out = _run_local([bin_, "ip", "-4", name], timeout=8)
+    if code != 0:
+        return None
+    ip = (out or "").strip().splitlines()[0] if out else ""
+    if re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", ip):
+        return ip
+    return None
+
+@node_app.command("list", help="List hive roster from instance.yaml nodes.")
+def node_list() -> None:
+    """Print every registered haus node (type, tier, site, address fields)."""
+    nodes = load_nodes_map()
+    if not nodes:
+        console.print("[dim]no nodes in instance.yaml — adopt a satellite or declare the hub[/]")
+        raise typer.Exit(code=0)
+    table = Table(title="Hive roster", title_justify="left")
+    table.add_column("name", style="bold")
+    table.add_column("type")
+    table.add_column("tier")
+    table.add_column("site")
+    table.add_column("tailscale")
+    table.add_column("host")
+    table.add_column("ssh_user")
+    for name in sorted(nodes):
+        n = nodes[name]
+        table.add_row(
+            name,
+            str(n.get("type") or "—"),
+            str(n.get("tier") or "—"),
+            str(n.get("site") or "—"),
+            str(n.get("tailscale_name") or "—"),
+            str(n.get("host") or "—"),
+            ssh_user_of(n) or "—",
+        )
+    console.print(table)
+
+
+@node_app.command("get", help="Show one node block from the hive roster.")
+def node_get(
+    name: Annotated[str, typer.Argument(help="Node name (key under nodes. in instance.yaml).")],
+) -> None:
+    nodes = load_nodes_map()
+    n = nodes.get(name) or nodes.get(name.lower())
+    if n is None:
+        exc = LocalError(
+            f"unknown node {name!r}",
+            fix="run `sanctum node list` — keys must match instance.yaml nodes.*",
+        )
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code))
+    console.print(yaml.safe_dump({name: n}, sort_keys=False, allow_unicode=True), end="")
+
+
+@node_app.command("whoami", help="Print this machine's hive node identity.")
+def node_whoami() -> None:
+    """Resolve ``.node_id`` against the roster (type / tier / site)."""
+    nid = read_node_id()
+    if not nid:
+        exc = LocalError(
+            "no ~/.sanctum/.node_id — this machine has no hive name",
+            fix="write the node key (e.g. manoir or chalet) to ~/.sanctum/.node_id",
+        )
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code))
+    nodes = load_nodes_map()
+    n = nodes.get(nid) or nodes.get(nid.lower())
+    console.print(f"[bold]{escape(nid)}[/]")
+    if n is None:
+        console.print(
+            f"[yellow]not in instance.yaml nodes[/] — id file says {escape(nid)!r} "
+            "but the roster has no matching key"
+        )
+        raise typer.Exit(code=0)
+    console.print(
+        f"  type={n.get('type') or '—'}  tier={n.get('tier') or '—'}  "
+        f"site={n.get('site') or '—'}  ssh_user={ssh_user_of(n) or '—'}"
+    )
+    if n.get("tailscale_name"):
+        console.print(f"  tailscale_name={n.get('tailscale_name')}")
+    if n.get("host"):
+        console.print(f"  host={n.get('host')}")
+    caps = n.get("capabilities")
+    if isinstance(caps, list) and caps:
+        console.print(f"  capabilities={', '.join(str(c) for c in caps)}")
+
+
+@node_app.command("resolve", help="Resolve a hive node name to an address (Tailscale preferred).")
+def node_resolve(
+    name: Annotated[str, typer.Argument(help="Node name to resolve.")],
+) -> None:
+    """Name → address for cross-site ops. Prefers live Tailscale; never invents routes."""
+    nodes = load_nodes_map()
+    peers = parse_tailscale_peer_ips(_tailscale_status_json())
+    result = resolve_node_address(name, nodes, peers)
+    if not result.get("ok"):
+        exc = NetworkError(
+            str(result.get("error") or f"could not resolve {name!r}"),
+            fix="check `sanctum node list` and `tailscale status`; use node names, not 10.0.0.x",
+        )
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code))
+    console.print(
+        f"{escape(str(result['name']))} → [bold]{escape(str(result['address']))}[/]  "
+        f"[dim]({escape(str(result.get('source')))}"
+        f"{', online' if result.get('online') is True else ''}"
+        f"{', online unknown' if result.get('online') is None else ''})[/]"
+    )
+    if result.get("ssh_user"):
+        console.print(f"  ssh {escape(str(result['ssh_user']))}@{escape(str(result['address']))}")
+
+
+@node_app.command("offers", help="List which hive nodes offer which capabilities.")
+def node_offers() -> None:
+    """Capability matrix for the roster (explicit + type/tier defaults)."""
+    nodes = load_nodes_map()
+    if not nodes:
+        console.print("[dim]no nodes in roster[/]")
+        raise typer.Exit(code=0)
+    table = Table(title="Hive capabilities", title_justify="left")
+    table.add_column("node", style="bold")
+    table.add_column("type")
+    table.add_column("tier")
+    table.add_column("capabilities", overflow="fold")
+    for name in sorted(nodes):
+        caps = sorted(c.value for c in capabilities_of(nodes[name]))
+        n = nodes[name]
+        table.add_row(
+            name,
+            str(n.get("type") or "—"),
+            str(n.get("tier") or "—"),
+            ", ".join(caps) if caps else "—",
+        )
+    console.print(table)
+    problems = validate_roster(nodes)
+    if problems:
+        console.print("[yellow]roster notes:[/]")
+        for p in problems:
+            console.print(f"  • {escape(p)}")
+
+
+@node_app.command("can", help="Which nodes offer a capability?")
+def node_can(
+    capability: Annotated[str, typer.Argument(help="e.g. vault_authority, inference, ha_site")],
+) -> None:
+    cap = normalize_capability(capability)
+    if cap is None:
+        exc = LocalError(
+            f"unknown capability {capability!r}",
+            fix=f"known: {', '.join(c.value for c in NodeCapability)}",
+        )
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code))
+    nodes = load_nodes_map()
+    names = sorted(n for n, block in nodes.items() if cap in capabilities_of(block))
+    if not names:
+        console.print(f"[yellow]no node offers[/] {cap.value}")
+        raise typer.Exit(code=1)
+    console.print(f"{cap.value}: {', '.join(names)}")
+
+
+@node_app.command("route", help="Pick a node for a capability (hive routing).")
+def node_route(
+    capability: Annotated[str, typer.Argument(help="Capability to route")],
+    prefer: Annotated[
+        str,
+        typer.Option(
+            "--prefer",
+            help="local | fastest | primary | hub:<name>",
+        ),
+    ] = "fastest",
+) -> None:
+    """Route work: prefer local metal, fastest online, primary, or forced hub."""
+    nodes = load_nodes_map()
+    local = read_node_id()
+    peers = parse_tailscale_peer_ips(_tailscale_status_json())
+    result = pick_node(
+        capability,
+        nodes,
+        prefer=prefer,
+        local_name=local,
+        peer_ips=peers,
+    )
+    if not result.get("ok"):
+        exc = NetworkError(
+            str(result.get("reason") or "route failed"),
+            fix="sanctum node offers · sanctum node can <cap> · check tailscale online",
+        )
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code))
+    node = str(result["node"])
+    resolved = resolve_node_address(node, nodes, peers)
+    addr = resolved.get("address") if resolved.get("ok") else None
+    console.print(
+        f"[bold]{escape(str(result['capability']))}[/] → [bold green]{escape(node)}[/]  "
+        f"[dim]({escape(str(result['reason']))})[/]"
+    )
+    if addr:
+        console.print(f"  address {escape(str(addr))}  ssh_user={escape(str(resolved.get('ssh_user') or '—'))}")
+    else:
+        console.print(f"  [yellow]unresolved address[/] — try `sanctum node resolve {escape(node)}`")
+
+
+@node_app.command("vault-host", help="Resolve the primary hub for vault / memory authority.")
+def node_vault_host() -> None:
+    """Vault is hub-authoritative: print primary node + live address (name-only hop)."""
+    nodes = load_nodes_map()
+    primary = primary_node_name(nodes)
+    if not primary:
+        # fall back to capability
+        result = pick_node(
+            NodeCapability.VAULT_AUTHORITY,
+            nodes,
+            prefer="primary",
+            local_name=read_node_id(),
+            peer_ips=parse_tailscale_peer_ips(_tailscale_status_json()),
+        )
+        primary = result.get("node")
+    if not primary:
+        exc = LocalError(
+            "no primary hub / vault_authority node in roster",
+            fix="declare nodes.<name> type: hub, tier: primary, capabilities include vault_authority",
+        )
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code))
+    peers = parse_tailscale_peer_ips(_tailscale_status_json())
+    resolved = resolve_node_address(str(primary), nodes, peers)
+    console.print(f"vault_authority → [bold]{escape(str(primary))}[/]")
+    if resolved.get("ok") and resolved.get("address"):
+        user = resolved.get("ssh_user") or "bert"
+        console.print(f"  hop {escape(str(user))}@{escape(str(resolved['address']))}")
+        console.print("  [dim]always use node name in scripts; resolve at call time[/]")
+    else:
+        console.print(f"  [yellow]{escape(str(resolved.get('error') or 'unresolved'))}[/]")
+        raise typer.Exit(code=1)
+
+
+@node_app.command(
+    "declare-peer",
+    help="Declare a peer hub on the hive roster (multi-hub join, Phase 3).",
+)
+def node_declare_peer(
+    name: Annotated[str, typer.Argument(help="Hive node name (e.g. montreal)")],
+    tailscale_name: Annotated[
+        str | None,
+        typer.Option("--tailscale-name", help="MagicDNS stem (default: same as name)"),
+    ] = None,
+    ssh_user: Annotated[str, typer.Option("--ssh-user")] = "bert",
+    site: Annotated[
+        str | None,
+        typer.Option("--site", help="Design-map site id (default: same as name)"),
+    ] = None,
+    display_name: Annotated[str | None, typer.Option("--display-name")] = None,
+) -> None:
+    """Add ``type: hub, tier: peer`` — same body map, hive by name. No L3 merge."""
+    ts = (tailscale_name or name).strip()
+    site_id = (site or name).strip()
+    if not is_valid_hive_name(name):
+        exc = LocalError(
+            f"invalid hive name {name!r}",
+            fix="use short place name (montreal) — see `sanctum node names`",
+        )
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code))
+    if ts != name and not is_valid_hive_name(ts):
+        exc = LocalError(
+            f"invalid tailscale_name {ts!r}",
+            fix="prefer same as name; put legacy stems in aliases after declare",
+        )
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code))
+    target = config.instance_path()
+    data: dict[str, Any] = {}
+    if target.exists():
+        loaded = yaml.safe_load(target.read_text(encoding="utf-8"))
+        if isinstance(loaded, dict):
+            data = loaded
+    nodes = data.get("nodes")
+    if not isinstance(nodes, dict):
+        nodes = data["nodes"] = {}
+    if name in nodes and str(nodes[name].get("tier") or "") == "primary":
+        exc = LocalError(
+            f"{name!r} is already the primary hub — refuse to demote",
+            fix="choose a different peer name",
+        )
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code))
+    nodes[name] = {
+        "type": "hub",
+        "tier": "peer",
+        "site": site_id,
+        "display_name": display_name or name.title(),
+        "tailscale_name": ts,
+        "ssh_user": ssh_user,
+        "capabilities": [
+            "inference",
+            "inference_heavy",
+            "ha_site",
+            "train",
+            "mesh_seed",
+            "council",
+        ],
+        "sync": {"hub": primary_node_name(nodes) or "manoir"},
+    }
+    if not data.get("topology"):
+        data["topology"] = {
+            "design": "isomorphic-enclave",
+            "hive": "name-only",
+            "identity_pins": "openclaw-skills/firewalla-toolkit/config/identity-pins.json",
+        }
+    if target.exists():
+        bak = target.parent / (target.name + ".bak")
+        bak.write_text(target.read_text(encoding="utf-8"), encoding="utf-8")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True), encoding="utf-8")
+    problems = validate_roster(nodes)
+    console.print(f"[green]declared peer hub[/] {escape(name)} (tailscale={escape(ts)} site={escape(site_id)})")
+    console.print("  next: identity-rebind on that site's Firewalla · set ~/.sanctum/.node_id · join tailnet")
+    if problems:
+        for p in problems:
+            console.print(f"  [yellow]note:[/] {escape(p)}")
+    peers = peers_of(nodes)
+    console.print(f"  peer hubs now: {', '.join(peers) if peers else '—'}")
+
+
+@node_app.command(
+    "ensure-hub",
+    help="Ensure the primary hub row exists in the roster (idempotent).",
+)
+def node_ensure_hub(
+    name: Annotated[str, typer.Option("--name")] = "manoir",
+    tailscale_name: Annotated[str | None, typer.Option("--tailscale-name")] = None,
+    ssh_user: Annotated[str, typer.Option("--ssh-user")] = "bert",
+) -> None:
+    """Idempotent primary hub declaration (does not clobber richer existing rows)."""
+    target = config.instance_path()
+    data: dict[str, Any] = {}
+    if target.exists():
+        loaded = yaml.safe_load(target.read_text(encoding="utf-8"))
+        if isinstance(loaded, dict):
+            data = loaded
+    nodes = data.get("nodes")
+    if not isinstance(nodes, dict):
+        nodes = data["nodes"] = {}
+    existing = dict(nodes.get(name) or {})
+    existing.setdefault("type", "hub")
+    existing.setdefault("tier", "primary")
+    existing.setdefault("site", name)
+    existing.setdefault("display_name", name.title())
+    existing.setdefault("tailscale_name", tailscale_name or name)
+    existing.setdefault("ssh_user", ssh_user)
+    existing.setdefault(
+        "capabilities",
+        [
+            "vault_authority",
+            "inference",
+            "inference_heavy",
+            "ha_site",
+            "train",
+            "mesh_seed",
+            "council",
+            "screen_time",
+        ],
+    )
+    # Force primary semantics
+    existing["type"] = "hub"
+    existing["tier"] = "primary"
+    nodes[name] = existing
+    data.setdefault(
+        "topology",
+        {
+            "design": "isomorphic-enclave",
+            "hive": "name-only",
+            "identity_pins": "openclaw-skills/firewalla-toolkit/config/identity-pins.json",
+        },
+    )
+    if target.exists():
+        bak = target.parent / (target.name + ".bak")
+        bak.write_text(target.read_text(encoding="utf-8"), encoding="utf-8")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True), encoding="utf-8")
+    console.print(f"[green]primary hub[/] nodes.{escape(name)} ensured")
+
+
+@node_app.command(
+    "export-council",
+    help="Overlay council-router nodes.json hosts from live hive resolve (stdout).",
+)
+def node_export_council(
+    council_file: Annotated[
+        Path | None,
+        typer.Option(
+            "--from",
+            help="Path to council-router config/nodes.json",
+        ),
+    ] = None,
+) -> None:
+    """Replace drift-prone 100.x hosts with live Tailscale IPs from hive names."""
+    default = (
+        Path.home()
+        / "Projects"
+        / "openclaw-skills"
+        / "council-router"
+        / "config"
+        / "nodes.json"
+    )
+    src = council_file or default
+    if not src.exists():
+        exc = LocalError(f"council nodes file not found: {src}", fix="pass --from PATH")
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code))
+    council = json.loads(src.read_text(encoding="utf-8"))
+    hive = load_nodes_map()
+    peers = parse_tailscale_peer_ips(_tailscale_status_json())
+    resolved: dict[str, str] = {}
+    for name in hive:
+        r = resolve_node_address(name, hive, peers)
+        if r.get("ok") and r.get("address"):
+            resolved[name] = str(r["address"])
+    overlaid = overlay_hosts(council, hive, resolved)
+    console.print(json.dumps(overlaid, indent=2))
+
+
+@node_app.command("validate", help="Validate hive roster SoT rules + naming contract.")
+def node_validate() -> None:
+    nodes = load_nodes_map()
+    problems = validate_roster(nodes)
+    primary = primary_node_name(nodes)
+    console.print(f"primary: {escape(str(primary or '—'))}")
+    console.print(f"peers: {', '.join(peers_of(nodes)) or '—'}")
+    if problems:
+        for p in problems:
+            console.print(f"[red]✗[/] {escape(p)}")
+        raise typer.Exit(code=1)
+    console.print("[green]roster ok[/] (SoT + hive naming)")
+
+
+@node_app.command(
+    "ha-check",
+    help="Check manoir-ha (HA Green) reachability over Tailscale + LAN.",
+)
+def node_ha_check() -> None:
+    script = Path.home() / ".sanctum" / "tailnet" / "tools" / "ha-check.sh"
+    if not script.is_file():
+        script = (
+            Path.home()
+            / "Projects"
+            / "openclaw-skills"
+            / "tailnet-toolkit"
+            / "tools"
+            / "ha-check.sh"
+        )
+    if not script.is_file():
+        exc = LocalError("ha-check.sh not found", fix="sync openclaw-skills/tailnet-toolkit")
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code))
+    code, out = _run_local([str(script)], timeout=60)
+    if out:
+        console.print(out.rstrip())
+    if code != 0:
+        raise typer.Exit(code=code if code else 1)
+
+
+@node_app.command(
+    "apply-names-local",
+    help="Device-side hostname renames via SSH (no OAuth API).",
+)
+def node_apply_names_local(
+    action: Annotated[str, typer.Argument(help="plan | apply")] = "plan",
+) -> None:
+    script = Path.home() / ".sanctum" / "tailnet" / "tools" / "apply-hive-names-local.sh"
+    if not script.is_file():
+        script = (
+            Path.home()
+            / "Projects"
+            / "openclaw-skills"
+            / "tailnet-toolkit"
+            / "tools"
+            / "apply-hive-names-local.sh"
+        )
+    if not script.is_file():
+        exc = LocalError("apply-hive-names-local.sh not found", fix="sync tailnet-toolkit")
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code))
+    act = (action or "plan").strip().lower()
+    if act not in {"plan", "apply"}:
+        raise typer.Exit(code=2)
+    code, out = _run_local([str(script), act], timeout=180)
+    if out:
+        console.print(out.rstrip())
+    if code != 0:
+        raise typer.Exit(code=code if code else 1)
+
+
+@node_app.command(
+    "apply-names",
+    help="Converge Tailscale MagicDNS names via tailnet-toolkit (plan|apply|status).",
+)
+def node_apply_names(
+    action: Annotated[
+        str,
+        typer.Argument(help="plan (default) | apply | status"),
+    ] = "plan",
+    sync_roster: Annotated[
+        bool,
+        typer.Option("--sync-roster", help="After apply, drop resolved aliases from instance.yaml"),
+    ] = False,
+) -> None:
+    """Thin wrapper around ``~/.sanctum/tailnet/tools/apply-hive-names.sh``."""
+    script = Path.home() / ".sanctum" / "tailnet" / "tools" / "apply-hive-names.sh"
+    if not script.is_file():
+        script = (
+            Path.home()
+            / "Projects"
+            / "openclaw-skills"
+            / "tailnet-toolkit"
+            / "tools"
+            / "apply-hive-names.sh"
+        )
+    if not script.is_file():
+        exc = LocalError(
+            "tailnet-toolkit apply-hive-names.sh not found",
+            fix="ensure ~/.sanctum/tailnet → openclaw-skills/tailnet-toolkit",
+        )
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code))
+    act = (action or "plan").strip().lower()
+    if act not in {"plan", "apply", "status"}:
+        exc = LocalError(f"unknown action {action!r}", fix="use plan | apply | status")
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code))
+    argv = [str(script), act]
+    if sync_roster:
+        argv.append("--sync-roster")
+    code, out = _run_local(argv, timeout=120)
+    if out:
+        console.print(out.rstrip())
+    if code != 0:
+        raise typer.Exit(code=code if code else 1)
+
+
+@node_app.command("names", help="Print the hive naming contract (Apple-simple cheat sheet).")
+def node_names() -> None:
+    """One name per machine — what you call it when you talk to it."""
+    console.print("[bold]Hive naming[/] — one string, everywhere\n")
+    console.print("  [bold]Jobs test:[/] What do you call it when you talk to it? That is the only name.\n")
+    table = Table(title="Patterns", title_justify="left")
+    table.add_column("Kind")
+    table.add_column("Pattern")
+    table.add_column("Examples")
+    table.add_row("Site brain", "{place}", "manoir, chalet, montreal")
+    table.add_row("Mobile", "{device}", "mbp  (not berts-mbp)")
+    table.add_row("Site infra", "{place}-{role}", "manoir-fw, manoir-ha, chalet-fw")
+    table.add_row("Agent", "{jedi}", "yoda, ahsoka  (never a TS host)")
+    console.print(table)
+    console.print("\n[bold]Same three places:[/] roster key · ~/.sanctum/.node_id · MagicDNS stem")
+    console.print("[bold]Forbidden:[/] owner prefixes, MM64/MBP128 codes, dual names without aliases:")
+    console.print("  mbp:\n    tailscale_name: mbp\n    aliases: [berts-mbp]   # until Tailscale machine renamed\n")
+    console.print(f"  infra example: {suggest_infra_name('manoir', 'fw')}")
+    nodes = load_nodes_map()
+    if nodes:
+        console.print("\n[bold]Live roster stems[/]")
+        for name in sorted(nodes):
+            preferred = str(nodes[name].get("tailscale_name") or name)
+            legacy = [
+                a
+                for a in aliases_of(nodes[name])
+                if a.lower() not in {name.lower(), preferred.lower()}
+            ]
+            extra = f"  aliases={legacy}" if legacy else ""
+            console.print(f"  {name} → {preferred}{extra}")
 
 
 _LAYER_STYLE = {
