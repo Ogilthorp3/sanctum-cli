@@ -932,7 +932,7 @@ _INFO_PLIST = """<?xml version="1.0" encoding="UTF-8"?>
     <key>CFBundleName</key><string>Sanctum Setup</string>
     <key>CFBundleDisplayName</key><string>Sanctum Setup</string>
     <key>CFBundleExecutable</key><string>sanctum-setup</string>
-    <key>CFBundleIdentifier</key><string>ai.sanctum.setup</string>
+    <key>CFBundleIdentifier</key><string>haus.sanctum.setup</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleVersion</key><string>1</string>
     <key>CFBundleShortVersionString</key><string>1.0</string>
