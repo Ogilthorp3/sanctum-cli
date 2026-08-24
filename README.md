@@ -6,7 +6,7 @@ One terminal binary, `sanctum`, that is the unified front door to a Sanctum host
 
 ## Status
 
-**v0.10.0 — public beta.** Installable from the public Homebrew tap. A person
+**v0.15.4 — public beta.** Installable from the public Homebrew tap. A person
 who isn't the author can go from a fresh Mac to encrypted, verified cloud backups
 in minutes with a single command.
 
