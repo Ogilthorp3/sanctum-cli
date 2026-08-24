@@ -10,7 +10,7 @@ Hive plane (multi-site nervous system)
 
 Satellite onboarding (closet Mac)
 ---------------------------------
-* ``scan`` / ``bootstrap-script`` / ``adopt`` — L1–L6 honest-verify adopt
+* ``scan`` / ``bootstrap-script`` / ``adopt`` — L1-L6 honest-verify adopt
 
 Body plane (per-site LAN design map) lives in firewalla-toolkit identity-rebind.
 Docs: sanctum-docs architecture/hive-topology.
@@ -37,7 +37,7 @@ import time
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any, Mapping
+from typing import TYPE_CHECKING, Annotated, Any
 
 import typer
 import yaml
@@ -59,7 +59,7 @@ from sanctum_cli.hive.route import pick_node
 from sanctum_cli.hive.sot import peers_of, primary_node_name, validate_roster
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
 console = Console()
 err_console = Console(stderr=True)
@@ -1104,8 +1104,11 @@ def resolve_node_address(
     # Also match if raw is an alias listed on a row
     if node is None:
         for n, block in nodes.items():
-            stems = {n.lower(), *[a.lower() for a in aliases_of(block)]}
-            if raw.lower() in stems or key.lower() in stems:
+            # Named distinctly from the `stems` list built below: mypy binds a
+            # name to its FIRST definition, so reusing it made every later
+            # .append() and the tuple unpack look like type errors.
+            alias_stems = {n.lower(), *[a.lower() for a in aliases_of(block)]}
+            if raw.lower() in alias_stems or key.lower() in alias_stems:
                 key, node = n, block
                 break
     base = {

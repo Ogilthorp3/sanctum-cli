@@ -32,7 +32,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import httpx
 
@@ -42,7 +42,7 @@ from sanctum_cli.mesh.adapters import Ed25519Signer
 from sanctum_cli.mesh.types import ArtifactRef, ChampionManifest, MeshIdentity
 
 if TYPE_CHECKING:
-    from types import TracebackType
+    from types import ModuleType, TracebackType
 
     from aiohttp import web
 
@@ -500,7 +500,7 @@ if TYPE_CHECKING:
 # ─── the server (thin async glue over the pure registry) ─────────────────
 
 
-def _aiohttp_web():
+def _aiohttp_web() -> ModuleType:
     """Import aiohttp only when serving — the HTTP *client* must not need it.
 
     ``sanctum endocrine tick`` (and every other CLI command) imports
@@ -519,6 +519,19 @@ def _aiohttp_web():
     return web
 
 
+def _json_response(payload: dict[str, Any], *, status: int = 200) -> web.Response:
+    """Typed wrapper over the lazily-imported ``web.json_response``.
+
+    `_aiohttp_web` can only be annotated as ``ModuleType``, whose attributes
+    are ``Any``, so every handler that called ``web.json_response`` directly
+    returned ``Any`` from a function declared to return ``web.Response`` —
+    nineteen mypy errors under this package's ``strict = true``, all from one
+    unannotated helper. Centralising the cast here keeps the handlers honestly
+    typed and puts the single unavoidable narrowing in one reviewable place.
+    """
+    return cast("web.Response", _aiohttp_web().json_response(payload, status=status))
+
+
 class TrackerHandlers:
     """aiohttp request handlers that delegate to a :class:`TrackerRegistry`.
 
@@ -532,7 +545,6 @@ class TrackerHandlers:
 
     async def register(self, request: web.Request) -> web.Response:
         """``POST /register`` → ``{"ok": bool}`` (the registry's ack)."""
-        web = _aiohttp_web()
         body = await request.json()
         ok = self.registry.register(
             str(body["pubkey"]),
@@ -540,38 +552,34 @@ class TrackerHandlers:
             str(body["created"]),
             str(body["addr"]),
         )
-        return web.json_response({"ok": ok})
+        return _json_response({"ok": ok})
 
     async def peers(self, _request: web.Request) -> web.Response:
         """``GET /peers`` → ``{"peers": [...]}``."""
-        web = _aiohttp_web()
-        return web.json_response({"peers": self.registry.list_peers()})
+        return _json_response({"peers": self.registry.list_peers()})
 
     async def catalog(self, _request: web.Request) -> web.Response:
         """``GET /catalog`` → ``{"champions": [manifest_dict, ...]}``."""
-        web = _aiohttp_web()
-        return web.json_response(
+        return _json_response(
             {"champions": [m.to_dict() for m in self.registry.list_catalog()]}
         )
 
     async def announce(self, request: web.Request) -> web.Response:
         """``POST /announce`` → store the manifest + seeder; ``{"ok": true}``."""
-        web = _aiohttp_web()
         body = await request.json()
         manifest = ChampionManifest.from_dict(body["manifest"])
         self.registry.announce(manifest, str(body["addr"]))
-        return web.json_response({"ok": True})
+        return _json_response({"ok": True})
 
     async def find(self, request: web.Request) -> web.Response:
         """``GET /find?hash=…`` → the hit body, or ``404`` on a genuine miss."""
-        web = _aiohttp_web()
         content_hash = request.query.get("hash", "")
         ref = self.registry.find(content_hash)
         if ref is None:
-            return web.json_response(
+            return _json_response(
                 {"error": "not found", "hash": content_hash}, status=404
             )
-        return web.json_response(
+        return _json_response(
             {
                 "content_hash": ref.content_hash,
                 "seeders": ref.seeders,
@@ -589,7 +597,6 @@ class TrackerHandlers:
         ``403 {"reason": …}``; ``not_configured`` →
         ``404 {"reason": "not_configured"}``.
         """
-        web = _aiohttp_web()
         body = await request.json()
         outcome = self.registry.community(
             str(body.get("pubkey", "")),
@@ -597,10 +604,10 @@ class TrackerHandlers:
             str(body.get("signature", "")),
         )
         if outcome.reason == "ok":
-            return web.json_response({"invite": outcome.invite})
+            return _json_response({"invite": outcome.invite})
         if outcome.reason == "not_configured":
-            return web.json_response({"reason": "not_configured"}, status=404)
-        return web.json_response({"reason": outcome.reason}, status=403)
+            return _json_response({"reason": "not_configured"}, status=404)
+        return _json_response({"reason": outcome.reason}, status=403)
 
 
 def build_tracker_app(registry: TrackerRegistry | None = None) -> web.Application:
@@ -611,9 +618,9 @@ def build_tracker_app(registry: TrackerRegistry | None = None) -> web.Applicatio
     ``GET /catalog``, ``POST /announce``, ``GET /find``, and ``POST /community``
     (community is a POST so the signed credential travels in the body, not a URL).
     """
-    web = _aiohttp_web()
+    web_mod = _aiohttp_web()
     handlers = TrackerHandlers(registry if registry is not None else TrackerRegistry())
-    app = web.Application()
+    app = cast("web.Application", web_mod.Application())
     app.router.add_post("/register", handlers.register)
     app.router.add_get("/peers", handlers.peers)
     app.router.add_get("/catalog", handlers.catalog)
@@ -629,5 +636,5 @@ def serve(
     registry: TrackerRegistry | None = None,
 ) -> None:  # pragma: no cover - blocking live server, exercised by the e2e drill
     """Run the tracker app (blocking) on ``host:port`` — the real loopback server."""
-    web = _aiohttp_web()
-    web.run_app(build_tracker_app(registry), host=host, port=port)
+    web_mod = _aiohttp_web()
+    web_mod.run_app(build_tracker_app(registry), host=host, port=port)

@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Any, Mapping
+from typing import TYPE_CHECKING, Any
 
 from sanctum_cli.hive.naming import validate_roster_naming
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 
 def primary_node_name(nodes: Mapping[str, Mapping[str, Any]]) -> str | None:

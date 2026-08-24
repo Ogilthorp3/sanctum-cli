@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Any, Mapping
+from typing import TYPE_CHECKING, Any
 
 from sanctum_cli.hive.capabilities import NodeCapability, capabilities_of, normalize_capability
 from sanctum_cli.hive.sot import primary_node_name
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 
 class RoutePrefer(StrEnum):

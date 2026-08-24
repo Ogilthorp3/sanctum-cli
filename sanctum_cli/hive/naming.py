@@ -29,7 +29,10 @@ Forbidden as addresses
 from __future__ import annotations
 
 import re
-from typing import Any, Mapping
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 # Preferred roster keys for known gear roles (not exhaustive — convention).
 INFRA_SUFFIXES = frozenset({"fw", "ha", "orbi"})
@@ -123,15 +126,17 @@ def validate_node_naming(name: str, node: Mapping[str, Any]) -> list[str]:
         )
         return problems
     ts = str(node.get("tailscale_name") or "").strip()
-    if ts and not is_valid_hive_name(ts) and ts.lower() not in {
-        a.lower() for a in (node.get("aliases") or [])
-    }:
-        # preferred tailscale_name should be perfect; legacy goes in aliases
-        if _OWNER_PREFIX.match(ts) or _MEMORY_CODE.match(ts):
-            problems.append(
-                f"{key}: tailscale_name={ts!r} is legacy form — set tailscale_name={key!r} "
-                f"and put {ts!r} in aliases: until Tailscale is renamed"
-            )
+    # preferred tailscale_name should be perfect; legacy goes in aliases
+    if (
+        ts
+        and not is_valid_hive_name(ts)
+        and ts.lower() not in {a.lower() for a in (node.get("aliases") or [])}
+        and (_OWNER_PREFIX.match(ts) or _MEMORY_CODE.match(ts))
+    ):
+        problems.append(
+            f"{key}: tailscale_name={ts!r} is legacy form — set tailscale_name={key!r} "
+            f"and put {ts!r} in aliases: until Tailscale is renamed"
+        )
     if ts and ts.lower() != key.lower() and classify_name(key) != "site_infra":
         # brain/mobile: prefer key == tailscale_name
         aliases = {str(a).lower() for a in (node.get("aliases") or [])}

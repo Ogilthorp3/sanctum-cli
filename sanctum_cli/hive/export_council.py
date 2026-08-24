@@ -7,7 +7,10 @@ resolve for named hive nodes, killing drift-prone hard-coded 100.x literals.
 from __future__ import annotations
 
 import json
-from typing import Any, Mapping
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 
 def overlay_hosts(

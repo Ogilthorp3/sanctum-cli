@@ -332,6 +332,13 @@ def _invoke_family_onboard_interactive(input_text: str) -> tuple[int, str]:
         # join never runs here and neither consumes this helper's stdin.
         patch("sanctum_cli.commands.onboard._run_network_resilience"),
         patch("sanctum_cli.commands.onboard._run_mesh_join"),
+        # Network-gear is the LAST interactive gate and was the only one missing
+        # from this list. It runs a real scan and prompts "pair the mesh wifi
+        # (Orbi) now?" whenever it finds gear — so on a haus LAN with an Orbi
+        # these four interview tests ran out of scripted stdin and exited 1,
+        # while on a network without one they passed. A test whose verdict
+        # depends on the wifi it is standing next to is not a test.
+        patch("sanctum_cli.commands.onboard._run_network_gear"),
     ):
         result = runner.invoke(app, ["onboard", "--recipe", "family"], input=input_text)
     return result.exit_code, " ".join(result.stdout.split())
