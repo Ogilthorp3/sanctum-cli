@@ -453,7 +453,7 @@ def heal_action_argv(action: HealAction, iface: str) -> list[str]:
 # (MAX_HEAL_ATTEMPTS, persisted here across runs), and a DISABLED kill-switch the
 # wrapper honors before doing anything.
 
-HEAL_DAEMON_LABEL = "com.sanctum.net-heal"
+HEAL_DAEMON_LABEL = "haus.sanctum.net-heal"
 HEAL_INTERVAL_S = 120
 
 # State the wrapper persists so the no-loop cap survives across daemon runs.

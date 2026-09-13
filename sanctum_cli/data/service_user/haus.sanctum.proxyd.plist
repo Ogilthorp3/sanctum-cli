@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Wave-1: proxyd as UserName=sanctum. @OPERATOR_HOME@ expanded at install. -->
 <plist version="1.0">
 <dict>
   <key>EnvironmentVariables</key>
@@ -7,41 +8,37 @@
     <key>HOME</key>
     <string>@OPERATOR_HOME@</string>
     <key>PATH</key>
-    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>RUST_LOG</key>
+    <string>sanctum_proxy=info</string>
     <key>USER</key>
     <string>sanctum</string>
-    <key>MEMORY_VAULT_DIR</key>
-    <string>@OPERATOR_HOME@/.sanctum/memory</string>
-    <key>MEMORY_VAULT_HOST</key>
-    <string>0.0.0.0</string>
-    <key>MEMORY_VAULT_PORT</key>
-    <string>42069</string>
-    <key>MEMORY_VAULT_TRANSPORT</key>
-    <string>sse</string>
+    <key>SANCTUM_CONFIG</key>
+    <string>@OPERATOR_HOME@/.sanctum/sanctum-proxy/config.yaml</string>
   </dict>
   <key>GroupName</key>
   <string>sanctum</string>
   <key>KeepAlive</key>
   <true/>
   <key>Label</key>
-  <string>com.sanctum.memory-vault</string>
+  <string>haus.sanctum.proxyd</string>
+  <key>ProcessType</key>
+  <string>Background</string>
   <key>ProgramArguments</key>
   <array>
-    <string>@OPERATOR_HOME@/.sanctum/bin/sanctum-memory-vault</string>
-    <string>-m</string>
-    <string>memory_vault</string>
+    <string>@OPERATOR_HOME@/.sanctum/bin/proxyd-launch</string>
   </array>
   <key>RunAtLoad</key>
   <true/>
   <key>StandardErrorPath</key>
-  <string>/Users/sanctum/logs/memory-vault.stderr.log</string>
+  <string>/Users/sanctum/logs/proxyd.stderr.log</string>
   <key>StandardOutPath</key>
-  <string>/Users/sanctum/logs/memory-vault.stdout.log</string>
+  <string>/Users/sanctum/logs/proxyd.stdout.log</string>
   <key>ThrottleInterval</key>
-  <integer>15</integer>
+  <integer>30</integer>
   <key>UserName</key>
   <string>sanctum</string>
   <key>WorkingDirectory</key>
-  <string>@OPERATOR_HOME@/.sanctum/memory-vault</string>
+  <string>@OPERATOR_HOME@/.sanctum/sanctum-proxy</string>
 </dict>
 </plist>

@@ -489,7 +489,7 @@ def test_net_heal_install_writes_wrapper_and_plist_as_root(
     """`--install` (as root) writes the wrapper 0755 + a plist naming it, then
     best-effort bootstraps it into the system domain."""
     wrapper = tmp_path / "sanctum" / "net-heal.sh"
-    plist = tmp_path / "LaunchDaemons" / "com.sanctum.net-heal.plist"
+    plist = tmp_path / "LaunchDaemons" / "haus.sanctum.net-heal.plist"
     err_log = tmp_path / "logs" / "net-heal.err"
     monkeypatch.setattr("sanctum_cli.net.heal.heal_wrapper_path", lambda: wrapper)
     monkeypatch.setattr("sanctum_cli.net.heal.heal_plist_path", lambda: plist)
@@ -515,7 +515,7 @@ def test_net_heal_install_writes_wrapper_and_plist_as_root(
 
     plist_text = plist.read_text(encoding="utf-8")
     assert str(wrapper) in plist_text
-    assert "com.sanctum.net-heal" in plist_text
+    assert "haus.sanctum.net-heal" in plist_text
     assert str(err_log) in plist_text
 
     # A bootstrap into the SYSTEM domain was attempted (the one sudo step).
@@ -529,7 +529,7 @@ def test_net_heal_install_non_root_prints_sudo_hint_no_write(
     """`--install` from a non-root shell refuses to write the system daemon and
     prints the exact sudo command (never a silent partial install)."""
     wrapper = tmp_path / "sanctum" / "net-heal.sh"
-    plist = tmp_path / "LaunchDaemons" / "com.sanctum.net-heal.plist"
+    plist = tmp_path / "LaunchDaemons" / "haus.sanctum.net-heal.plist"
     monkeypatch.setattr("sanctum_cli.net.heal.heal_wrapper_path", lambda: wrapper)
     monkeypatch.setattr("sanctum_cli.net.heal.heal_plist_path", lambda: plist)
     monkeypatch.setattr("sanctum_cli.net.heal.heal_err_path", lambda: tmp_path / "x.err")

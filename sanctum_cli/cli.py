@@ -750,7 +750,7 @@ def vision_top(
 
 # ─── agent subcommands ─────────────────────────────────────────────
 
-agent_app = typer.Typer(help="LaunchAgent management for com.sanctum.* labels.")
+agent_app = typer.Typer(help="LaunchAgent management for haus.sanctum.* labels.")
 app.add_typer(agent_app, name="agent")
 
 
@@ -759,7 +759,7 @@ def _agent_gate() -> None:
     haus_required("launchagents")
 
 
-@agent_app.command("list", help="List loaded com.sanctum.* LaunchAgents.")
+@agent_app.command("list", help="List loaded haus.sanctum.* LaunchAgents.")
 def agent_list_top(
     json_output: Annotated[bool, typer.Option("--json", help="Emit JSON.")] = False,
 ) -> None:
@@ -772,7 +772,7 @@ def agent_list_top(
 
 @agent_app.command("status", help="Status for one LaunchAgent.")
 def agent_status_top(
-    label: Annotated[str, typer.Argument(help="Label, e.g. com.sanctum.proxy.")],
+    label: Annotated[str, typer.Argument(help="Label, e.g. haus.sanctum.proxy.")],
 ) -> None:
     try:
         agent_cmd.agent_status(label)

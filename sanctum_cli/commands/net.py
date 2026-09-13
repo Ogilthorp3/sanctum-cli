@@ -637,7 +637,7 @@ def net_heal(
     from the SAME real re-probe as the ✓; the daemon wrapper keys its no-loop
     attempts counter on that token, not the human prose (the ``=healed`` token is
     the only thing that resets the cap, so a reverted heal accrues it).
-    ``--install`` writes the ``com.sanctum.net-heal`` LaunchDaemon (the one sudo
+    ``--install`` writes the ``haus.sanctum.net-heal`` LaunchDaemon (the one sudo
     step) so the node self-heals on a ~120s cadence behind the same doctrine
     (kill-switch, no-loop attempts cap, spine check).
     """
@@ -812,7 +812,7 @@ def _daemon_last_result() -> str | None:
 
 
 def _status_probe_daemon() -> net_status.DaemonInfo:
-    """Is the com.sanctum.net-heal LaunchDaemon loaded? + its last-known result.
+    """Is the haus.sanctum.net-heal LaunchDaemon loaded? + its last-known result.
 
     Read-only: `launchctl print system/<label>` returns 0 when the daemon is
     loaded, non-zero otherwise. The last-known result comes from the daemon's own

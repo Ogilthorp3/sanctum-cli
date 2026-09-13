@@ -7,7 +7,7 @@ Keychain credentials, brew tap reference. User data NEVER dies
 without explicit ``--purge``.
 
 What it touches:
-  - LaunchAgents: bootout every ``com.sanctum.*`` plist AND delete
+  - LaunchAgents: bootout every ``haus.sanctum.*`` plist AND delete
     the plist file (orphan plists are worse than missing services)
   - Keychain: revoke every ``sanctum/...`` entry via ``security
     delete-generic-password``
@@ -78,7 +78,7 @@ def bootout_label(label: str, domain: str | None = None) -> None:
     """Bootout one LaunchAgent/Daemon label from the given launchd domain.
 
     Args:
-        label:  The launchd label (e.g. ``com.sanctum.backup``).
+        label:  The launchd label (e.g. ``haus.sanctum.backup``).
         domain: The launchd domain prefix.  Defaults to ``gui/<uid>`` (the
                 current user's GUI domain) when None — preserving the original
                 global-uninstall behavior for existing call sites that omit it.
@@ -126,7 +126,7 @@ def rename_with_suffix(path: Path, suffix: str) -> bool:
 
 
 def _bootout_and_delete_launchagents() -> list[str]:
-    """Bootout every com.sanctum.*.plist in ~/Library/LaunchAgents/ and
+    """Bootout every haus.sanctum.*.plist in ~/Library/LaunchAgents/ and
     rename them with a .uninstalled-YYYY-MM-DD suffix. Returns list of
     labels touched."""
     la_dir = Path.home() / "Library/LaunchAgents"
@@ -134,7 +134,7 @@ def _bootout_and_delete_launchagents() -> list[str]:
         return []
     touched = []
     ts = datetime.now(UTC).strftime("%Y-%m-%d")
-    for plist in sorted(la_dir.glob("com.sanctum.*.plist")):
+    for plist in sorted(la_dir.glob("haus.sanctum.*.plist")):
         if ".retired" in plist.name or ".disabled" in plist.name:
             continue
         label = plist.stem
@@ -206,7 +206,7 @@ def uninstall_command(
         f"[bold]{title}[/]",
         "",
         "[dim]Will[/]:",
-        "  · bootout every com.sanctum.* LaunchAgent + rename plists .uninstalled-YYYY-MM-DD",
+        "  · bootout every haus.sanctum.* LaunchAgent + rename plists .uninstalled-YYYY-MM-DD",
         "  · revoke sanctum Keychain entries (OpenRouter, Anthropic, Gemini, R2, etc.)",
         "  · untap ogilthorp3/sanctum from Homebrew",
         "  · rename SanctumBridge.app + SanctumLauncher.app with .uninstalled suffix",

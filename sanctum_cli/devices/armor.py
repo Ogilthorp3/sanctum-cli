@@ -77,8 +77,8 @@ _MINI_BIN = "~/.sanctum/bin/"
 _MINI_LAUNCH_AGENTS = "~/Library/LaunchAgents/"
 
 # The two launch agents the kit arms on the Mini (the README's step 2 bootstrap).
-_WATCHDOG_PLIST = "com.sanctum.singlenat-watchdog.plist"
-_SENTINEL_PLIST = "com.sanctum.singlenat-ota-sentinel.plist"
+_WATCHDOG_PLIST = "haus.sanctum.singlenat-watchdog.plist"
+_SENTINEL_PLIST = "haus.sanctum.singlenat-ota-sentinel.plist"
 
 # Where the boot-armor lands on the Firewalla + the user hook it is wired into.
 _FW_ARMOR_DEST = "/home/pi/.firewalla/config/sanctum-singlenat-armor.sh"

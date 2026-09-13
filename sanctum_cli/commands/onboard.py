@@ -1798,7 +1798,7 @@ def _flip_to_dhcp() -> None:
 
 
 def _install_net_heal_daemon() -> None:
-    """Install the ``com.sanctum.net-heal`` self-healing LaunchDaemon — a seam.
+    """Install the ``haus.sanctum.net-heal`` self-healing LaunchDaemon — a seam.
 
     Delegates to the CLI's installer (``net._install_heal_daemon``) so the daemon
     assets + launchctl wiring live in one place; a non-root onboarding run prints

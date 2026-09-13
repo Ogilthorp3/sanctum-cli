@@ -21,10 +21,10 @@ runner = CliRunner()
 
 LAUNCHCTL_OUT = """\
 PID\tStatus\tLabel
-2741\t0\tcom.sanctum.admit
--\t0\tcom.sanctum.bridge
-123\t0\tcom.sanctum.health-center
--\t-9\tcom.sanctum.lmstudio-bridge
+2741\t0\thaus.sanctum.admit
+-\t0\thaus.sanctum.bridge
+123\t0\thaus.sanctum.health-center
+-\t-9\thaus.sanctum.lmstudio-bridge
 -\t0\tcom.apple.something-else
 """
 
@@ -52,20 +52,20 @@ def test_list_filters_to_sanctum() -> None:
     assert result.exit_code == 0
     payload = json.loads(result.stdout)
     labels = [r["label"] for r in payload]
-    assert "com.sanctum.admit" in labels
-    assert "com.sanctum.lmstudio-bridge" in labels
-    assert all(label.startswith("com.sanctum.") for label in labels)
+    assert "haus.sanctum.admit" in labels
+    assert "haus.sanctum.lmstudio-bridge" in labels
+    assert all(label.startswith("haus.sanctum.") for label in labels)
     assert any(r["status"] == "FAILED" for r in payload)
 
 
 def test_status_for_loaded_agent_renders_path(
     tmp_path: Path,
 ) -> None:
-    plist = tmp_path / "com.sanctum.demo.plist"
+    plist = tmp_path / "haus.sanctum.demo.plist"
     plist.write_bytes(
         b"""<?xml version="1.0" encoding="UTF-8"?>
 <plist version="1.0"><dict>
-<key>Label</key><string>com.sanctum.demo</string>
+<key>Label</key><string>haus.sanctum.demo</string>
 <key>StandardOutPath</key><string>/tmp/demo.log</string>
 </dict></plist>"""
     )
@@ -77,16 +77,16 @@ def test_status_for_loaded_agent_renders_path(
         return "/bin/launchctl"
 
     def _run(cmd, **_kwargs):  # type: ignore[no-untyped-def]
-        return _completed(stdout="PID\tStatus\tLabel\n42\t0\tcom.sanctum.demo\n")
+        return _completed(stdout="PID\tStatus\tLabel\n42\t0\thaus.sanctum.demo\n")
 
     with (
         patch("sanctum_cli.commands.agent.shutil.which", side_effect=_which),
         patch("sanctum_cli.commands.agent.subprocess.run", side_effect=_run),
         patch("sanctum_cli.commands.agent.PLIST_LOCATIONS", [tmp_path]),
     ):
-        result = runner.invoke(app, ["agent", "status", "com.sanctum.demo"])
+        result = runner.invoke(app, ["agent", "status", "haus.sanctum.demo"])
     assert result.exit_code == 0, result.stdout + (result.stderr or "")
-    assert "com.sanctum.demo" in result.stdout
+    assert "haus.sanctum.demo" in result.stdout
     assert "/tmp/demo.log" in result.stdout
     assert "RUNNING" in result.stdout
 
@@ -99,17 +99,17 @@ def test_status_missing_agent_user_error() -> None:
             return_value=_completed(stdout="PID\tStatus\tLabel\n"),
         ),
     ):
-        result = runner.invoke(app, ["agent", "status", "com.sanctum.ghost"])
+        result = runner.invoke(app, ["agent", "status", "haus.sanctum.ghost"])
     assert result.exit_code == 1
     combined = result.stdout + (result.stderr or "")
     assert "not loaded" in combined.lower() or "not in launchctl" in combined.lower()
 
 
 def test_start_invokes_bootstrap(tmp_path: Path) -> None:
-    plist = tmp_path / "com.sanctum.demo.plist"
+    plist = tmp_path / "haus.sanctum.demo.plist"
     plist.write_bytes(
         b"""<?xml version="1.0" encoding="UTF-8"?>
-<plist version="1.0"><dict><key>Label</key><string>com.sanctum.demo</string></dict></plist>"""
+<plist version="1.0"><dict><key>Label</key><string>haus.sanctum.demo</string></dict></plist>"""
     )
     calls: list[list[str]] = []
 
@@ -121,16 +121,16 @@ def test_start_invokes_bootstrap(tmp_path: Path) -> None:
         patch("sanctum_cli.commands.agent.subprocess.run", side_effect=_run),
         patch("sanctum_cli.commands.agent.PLIST_LOCATIONS", [tmp_path]),
     ):
-        result = runner.invoke(app, ["agent", "start", "com.sanctum.demo"])
+        result = runner.invoke(app, ["agent", "start", "haus.sanctum.demo"])
     assert result.exit_code == 0
     assert any("bootstrap" in cmd for cmd in calls)
 
 
 def test_start_failure_returns_local_error(tmp_path: Path) -> None:
-    plist = tmp_path / "com.sanctum.demo.plist"
+    plist = tmp_path / "haus.sanctum.demo.plist"
     plist.write_bytes(
         b"""<?xml version="1.0" encoding="UTF-8"?>
-<plist version="1.0"><dict><key>Label</key><string>com.sanctum.demo</string></dict></plist>"""
+<plist version="1.0"><dict><key>Label</key><string>haus.sanctum.demo</string></dict></plist>"""
     )
     with (
         patch(
@@ -139,23 +139,23 @@ def test_start_failure_returns_local_error(tmp_path: Path) -> None:
         ),
         patch("sanctum_cli.commands.agent.PLIST_LOCATIONS", [tmp_path]),
     ):
-        result = runner.invoke(app, ["agent", "start", "com.sanctum.demo"])
+        result = runner.invoke(app, ["agent", "start", "haus.sanctum.demo"])
     assert result.exit_code == 4  # LOCAL_ERROR
 
 
 def test_logs_tails_existing_file(tmp_path: Path) -> None:
     log = tmp_path / "demo.log"
     log.write_text("line1\nline2\nline3\nline4\n", encoding="utf-8")
-    plist = tmp_path / "com.sanctum.demo.plist"
+    plist = tmp_path / "haus.sanctum.demo.plist"
     plist.write_bytes(
         f"""<?xml version="1.0" encoding="UTF-8"?>
 <plist version="1.0"><dict>
-<key>Label</key><string>com.sanctum.demo</string>
+<key>Label</key><string>haus.sanctum.demo</string>
 <key>StandardOutPath</key><string>{log}</string>
 </dict></plist>""".encode()
     )
     with patch("sanctum_cli.commands.agent.PLIST_LOCATIONS", [tmp_path]):
-        result = runner.invoke(app, ["agent", "logs", "com.sanctum.demo", "--lines", "2"])
+        result = runner.invoke(app, ["agent", "logs", "haus.sanctum.demo", "--lines", "2"])
     assert result.exit_code == 0
     assert "line3" in result.stdout
     assert "line4" in result.stdout

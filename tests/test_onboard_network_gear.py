@@ -17,6 +17,7 @@ device is ever touched, and ``--yes`` must never hang on stdin.
 from __future__ import annotations
 
 import getpass
+import sys
 import warnings
 from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
@@ -235,16 +236,22 @@ def _invoke_family_onboard_interactive(input_text: str) -> tuple[int, str]:
         patch("sanctum_cli.commands.onboard._run_identity_setup"),
         patch("sanctum_cli.commands.onboard._run_family_setup"),
         patch("sanctum_cli.commands.onboard._run_firewalla_pairing"),
+        patch("sanctum_cli.commands.onboard._run_firewalla_compat", return_value=False),
         patch("sanctum_cli.commands.onboard._run_ai_providers"),
         # Haus-scan runs before network-gear and prompts for scan-consent; mock it so
         # it neither prompts nor scans, and network-gear gets this gate's stdin.
         patch("sanctum_cli.commands.onboard._run_haus_scan"),
+        patch("sanctum_cli.commands.onboard._run_wifi_identity", return_value=False),
         # HA Green runs AFTER network-gear (own tests); mock it so a real TCP probe
         # to 10.0.0.3 never runs and it never consumes this gate's stdin.
         patch("sanctum_cli.commands.onboard._run_ha_green"),
         # Network-resilience runs last (own tests); mock it so a real posture probe /
         # DHCP flip / daemon install never runs here.
         patch("sanctum_cli.commands.onboard._run_network_resilience"),
+        patch("sanctum_cli.commands.onboard._run_mesh_join", return_value=False),
+        # getpass routes to /dev/tty by default which breaks under non-TTY / background runners;
+        # redirect it to sys.stdin so CliRunner's simulated input stream is read.
+        patch("getpass.getpass", lambda prompt="", stream=None: sys.stdin.readline().rstrip("\n")),
         # The masked admin-password prompt (Prompt.ask(password=True)) routes to
         # getpass, which emits GetPassWarning when stdin is not a real TTY (every
         # CliRunner). The pyproject `filterwarnings=["error"]` would turn that

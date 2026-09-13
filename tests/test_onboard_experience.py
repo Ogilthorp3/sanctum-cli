@@ -19,6 +19,7 @@ per-chapter verify line, forgiving skip notes, the final recap).
 from __future__ import annotations
 
 import getpass
+import sys
 import warnings
 from typing import TYPE_CHECKING
 from unittest.mock import patch
@@ -316,9 +317,14 @@ def _invoke_onboard_interactive(input_text: str) -> tuple[int, str]:
         patch("sanctum_cli.commands.onboard._run_firewalla_compat", return_value=False),
         patch("sanctum_cli.commands.onboard._run_haus_scan", return_value=False),
         patch("sanctum_cli.commands.onboard._run_network_gear", return_value=False),
+        patch("sanctum_cli.commands.onboard._run_wifi_identity", return_value=False),
         patch("sanctum_cli.commands.onboard._run_ha_green", return_value=False),
         patch("sanctum_cli.commands.onboard._run_network_resilience", return_value=False),
+        patch("sanctum_cli.commands.onboard._run_mesh_join", return_value=False),
         patch("sanctum_cli.commands.screen_time._fetch_bridge_json", lambda path: None),
+        # getpass routes to /dev/tty by default which breaks under non-TTY / background runners;
+        # redirect it to sys.stdin so CliRunner's simulated input stream is read.
+        patch("getpass.getpass", lambda prompt="", stream=None: sys.stdin.readline().rstrip("\n")),
         # The masked key prompt routes to getpass, which warns under CliRunner's
         # non-TTY stdin; pyproject turns warnings into errors, so suppress that one.
         warnings.catch_warnings(),

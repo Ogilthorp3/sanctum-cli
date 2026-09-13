@@ -464,7 +464,7 @@ def compat_command(*, strict: bool = False) -> None:
     if info is None:
         raise LocalError(
             "Firewalla bridge unreachable — compatibility cannot be verified",
-            fix="is com.sanctum.firewalla running? (`launchctl print system/com.sanctum.firewalla`)",
+            fix="is haus.sanctum.firewalla running? (`launchctl print system/haus.sanctum.firewalla`)",
         )
 
     policies = _fetch_bridge_json("/policies")

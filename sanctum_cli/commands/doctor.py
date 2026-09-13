@@ -42,15 +42,15 @@ HTTP_PROBE_TIMEOUT_S = 2
 # these fire non-zero by design and were drowning real failures in false red.
 REPORTING_LABELS: frozenset[str] = frozenset(
     {
-        "com.sanctum.council-drift",
-        "com.sanctum.council-guardian",
-        "com.sanctum.council-integrity",
-        "com.sanctum.git-drift-sentinel",
-        "com.sanctum.secrets-sync-drift-check",
-        "com.sanctum.model-latest-check",
-        "com.sanctum.resilience-test",
-        "com.sanctum.post-boot",
-        "com.sanctum.nightly-compactor",
+        "haus.sanctum.council-drift",
+        "haus.sanctum.council-guardian",
+        "haus.sanctum.council-integrity",
+        "haus.sanctum.git-drift-sentinel",
+        "haus.sanctum.secrets-sync-drift-check",
+        "haus.sanctum.model-latest-check",
+        "haus.sanctum.resilience-test",
+        "haus.sanctum.post-boot",
+        "haus.sanctum.nightly-compactor",
     }
 )
 
@@ -63,8 +63,8 @@ def _daemon_probes() -> dict[str, str]:
 
     ff = os.environ.get("FORCE_FLOW_URL", "http://127.0.0.1:4077").rstrip("/")
     return {
-        "com.sanctum.force-flow": f"{ff}/health",
-        "com.sanctum.thalamus": "http://127.0.0.1:1988/status",
+        "haus.sanctum.force-flow": f"{ff}/health",
+        "haus.sanctum.thalamus": "http://127.0.0.1:1988/status",
     }
 
 
@@ -124,7 +124,7 @@ class Report:
 
 
 def _agents() -> list[AgentRow]:
-    expected_labels = ["com.sanctum.force-flow"]
+    expected_labels = ["haus.sanctum.force-flow"]
     if not shutil.which("launchctl"):
         return []
     try:
@@ -144,7 +144,7 @@ def _agents() -> list[AgentRow]:
         if len(parts) < 3:
             continue
         pid, last_exit, label = parts[0], parts[1], parts[2]
-        if not label.startswith("com.sanctum."):
+        if not label.startswith("haus.sanctum."):
             continue
         rows.append(
             AgentRow(
@@ -359,7 +359,7 @@ def render_brief(report: Report) -> str:
 
 def render_full(report: Report) -> None:
     if report.agents:
-        t = Table(title="LaunchAgents (com.sanctum.*)", show_header=True, header_style="bold")
+        t = Table(title="LaunchAgents (haus.sanctum.*)", show_header=True, header_style="bold")
         t.add_column("label")
         t.add_column("pid", justify="right")
         t.add_column("last exit", justify="right")

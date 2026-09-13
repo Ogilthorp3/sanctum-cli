@@ -81,7 +81,7 @@ def _haus_tier_installed() -> bool:
         Path.home() / ".sanctum/manifests",  # cathedral model manifests
         Path.home() / ".sanctum/sanctum-proxy",  # proxyd config dir
         Path.home() / ".sanctum/r2d2",  # R2D2 classifier source
-        Path("/Library/LaunchDaemons/com.sanctum.proxyd.plist"),
+        Path("/Library/LaunchDaemons/haus.sanctum.proxyd.plist"),
     ]
     return any(p.exists() for p in haus_markers)
 

@@ -18,7 +18,7 @@
   <key>KeepAlive</key>
   <true/>
   <key>Label</key>
-  <string>com.sanctum.force-flow</string>
+  <string>haus.sanctum.force-flow</string>
   <key>ProgramArguments</key>
   <array>
     <string>@OPERATOR_HOME@/.sanctum/bin/force-flow-launch.sh</string>

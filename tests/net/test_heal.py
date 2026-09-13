@@ -193,7 +193,7 @@ def test_render_heal_plist_round_trips_via_plistlib() -> None:
     assert str(wrapper) in xml
     assert str(err_log) in xml
     # A LaunchDaemon so it can setdhcp/renew (runs as root).
-    assert HEAL_DAEMON_LABEL == "com.sanctum.net-heal"
+    assert HEAL_DAEMON_LABEL == "haus.sanctum.net-heal"
 
 
 def test_render_heal_plist_names_the_wrapper_program() -> None:

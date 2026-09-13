@@ -22,17 +22,17 @@ runner = CliRunner()
 
 LAUNCHCTL_ALL_GREEN = """\
 PID\tStatus\tLabel
-2087\t0\tcom.sanctum.proxy
--\t0\tcom.sanctum.bridge
-123\t0\tcom.sanctum.health-center
+2087\t0\thaus.sanctum.proxy
+-\t0\thaus.sanctum.bridge
+123\t0\thaus.sanctum.health-center
 -\t0\tcom.apple.something-else
 """
 
 LAUNCHCTL_WITH_DEGRADED = """\
 PID\tStatus\tLabel
-2087\t0\tcom.sanctum.proxy
--\t-9\tcom.sanctum.lmstudio-bridge
-123\t0\tcom.sanctum.bridge
+2087\t0\thaus.sanctum.proxy
+-\t-9\thaus.sanctum.lmstudio-bridge
+123\t0\thaus.sanctum.bridge
 -\t0\tcom.apple.something-else
 """
 
@@ -89,7 +89,7 @@ def test_doctor_brief_when_all_green(
     # Brevity rule: one-line summary, no full tables
     assert "sanctum doctor:" in result.stdout
     assert "operational" in result.stdout.lower()
-    assert "LaunchAgents (com.sanctum.*)" not in result.stdout
+    assert "LaunchAgents (haus.sanctum.*)" not in result.stdout
 
 
 def test_doctor_expands_when_degraded(
@@ -108,7 +108,7 @@ def test_doctor_expands_when_degraded(
         result = runner.invoke(app, ["doctor"])
     assert result.exit_code == 0
     # Real findings → expand to full tables
-    assert "com.sanctum.lmstudio-bridge" in result.stdout
+    assert "haus.sanctum.lmstudio-bridge" in result.stdout
     combined = result.stdout + (result.stderr or "")
     assert "degraded" in combined.lower()
 
@@ -125,7 +125,7 @@ def test_doctor_full_renders_table(
     ):
         result = runner.invoke(app, ["doctor", "--full"])
     assert result.exit_code == 0
-    assert "com.sanctum.proxy" in result.stdout
+    assert "haus.sanctum.proxy" in result.stdout
     # Filtered out the apple.* row
     assert "com.apple.something-else" not in result.stdout
 
@@ -147,7 +147,7 @@ def test_doctor_json_emits_machine_readable(
     assert isinstance(payload["agents"], list)
     assert isinstance(payload["providers"], list)
     labels = [a["label"] for a in payload["agents"]]
-    assert "com.sanctum.proxy" in labels
+    assert "haus.sanctum.proxy" in labels
     assert "com.apple.something-else" not in labels
 
 
@@ -181,4 +181,4 @@ def test_doctor_filters_only_sanctum_prefixed_agents(
     assert result.exit_code == 0
     payload = json.loads(result.stdout)
     labels = {a["label"] for a in payload["agents"]}
-    assert all(label.startswith("com.sanctum.") for label in labels)
+    assert all(label.startswith("haus.sanctum.") for label in labels)

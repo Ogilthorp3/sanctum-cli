@@ -246,7 +246,7 @@ def classify(samples: list[Sample]) -> Diagnosis:
 
 # ─── sentinel assets (shipped by `sanctum link install`) ─────────────
 
-SENTINEL_LABEL = "com.sanctum.wifi-stability"
+SENTINEL_LABEL = "haus.sanctum.wifi-stability"
 SENTINEL_INTERVAL_S = 180
 
 # The bash sampler. Read-only: it samples first-LAN-hop ping jitter (no Wi-Fi

@@ -151,8 +151,8 @@ def test_install_runs_deploy_sequence_and_reports_ok() -> None:
     assert "post_main.sh" in joined
     # The Mini gets the lib/bin/plists + the watchdog AND sentinel arms.
     assert "launchctl" in joined
-    assert "com.sanctum.singlenat-watchdog" in joined
-    assert "com.sanctum.singlenat-ota-sentinel" in joined
+    assert "haus.sanctum.singlenat-watchdog" in joined
+    assert "haus.sanctum.singlenat-ota-sentinel" in joined
 
 
 def test_deploy_makes_the_armor_script_executable() -> None:

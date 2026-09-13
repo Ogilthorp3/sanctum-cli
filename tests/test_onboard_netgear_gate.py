@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import getpass
 import json
+import sys
 import warnings
 from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
@@ -369,7 +370,9 @@ def test_paired_gate_writes_hostile_password_verbatim_to_keychain_seam(
         patch("sanctum_cli.commands.onboard._run_identity_setup"),
         patch("sanctum_cli.commands.onboard._run_family_setup"),
         patch("sanctum_cli.commands.onboard._run_firewalla_pairing"),
+        patch("sanctum_cli.commands.onboard._run_firewalla_compat", return_value=False),
         patch("sanctum_cli.commands.onboard._run_ai_providers"),
+        patch("sanctum_cli.commands.onboard._run_wifi_identity", return_value=False),
         # Haus-scan runs before network-gear and prompts for scan-consent; mock it so
         # it neither prompts nor scans, and network-gear gets this gate's 'y' + password.
         patch("sanctum_cli.commands.onboard._run_haus_scan"),
@@ -379,10 +382,10 @@ def test_paired_gate_writes_hostile_password_verbatim_to_keychain_seam(
         # Network-resilience runs last (own tests); mock it so a real posture probe /
         # DHCP flip / daemon install never runs here.
         patch("sanctum_cli.commands.onboard._run_network_resilience"),
-        # Prompt.ask(password=True) routes to getpass, which warns on a non-TTY
-        # CliRunner; pyproject filterwarnings=error would crash the prompt. The
-        # warning is a test-environment artifact (a real TTY never fires it), and
-        # masking the password IS the security-correct default.
+        patch("sanctum_cli.commands.onboard._run_mesh_join", return_value=False),
+        # getpass routes to /dev/tty by default which breaks under non-TTY / background runners;
+        # redirect it to sys.stdin so CliRunner's simulated input stream is read.
+        patch("getpass.getpass", lambda prompt="", stream=None: sys.stdin.readline().rstrip("\n")),
         warnings.catch_warnings(),
     ):
         warnings.simplefilter("ignore", getpass.GetPassWarning)

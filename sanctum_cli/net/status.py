@@ -60,7 +60,7 @@ class SpineInfo:
 
 @dataclass(frozen=True)
 class DaemonInfo:
-    """The ``com.sanctum.net-heal`` LaunchDaemon health. ``loaded`` is whether
+    """The ``haus.sanctum.net-heal`` LaunchDaemon health. ``loaded`` is whether
     launchctl reports it present; ``last_result`` is the last-known heartbeat
     outcome token (``healed`` / ``reverted`` / ``noop`` / a status word), or ``None``
     when no heartbeat is readable.
@@ -163,7 +163,7 @@ def _daemon_row(daemon: DaemonInfo | None) -> StatusRow:
         return StatusRow(
             "Heal daemon",
             RowStatus.DOWN,
-            f"com.sanctum.net-heal NOT loaded · {last} · run: sanctum net heal --install",
+            f"haus.sanctum.net-heal NOT loaded · {last} · run: sanctum net heal --install",
         )
     hb = (daemon.last_result or "").lstrip()
     # 2. STOP token — the no-loop cap was hit and auto-heal is PAUSED. The daemon is
@@ -173,7 +173,7 @@ def _daemon_row(daemon: DaemonInfo | None) -> StatusRow:
         return StatusRow(
             "Heal daemon",
             RowStatus.DOWN,
-            f"com.sanctum.net-heal loaded but auto-heal PAUSED · {last}",
+            f"haus.sanctum.net-heal loaded but auto-heal PAUSED · {last}",
         )
     # 3. DISABLED kill-switch — an INTENTIONAL off (fail-safe), not a wedge: at-risk
     #    (no protection while off) but deliberate → ATTENTION, surfaced (not benign).
@@ -181,7 +181,7 @@ def _daemon_row(daemon: DaemonInfo | None) -> StatusRow:
         return StatusRow(
             "Heal daemon",
             RowStatus.ATTENTION,
-            f"com.sanctum.net-heal loaded but kill-switch ON · {last}",
+            f"haus.sanctum.net-heal loaded but kill-switch ON · {last}",
         )
     # 4. Loaded + heart-beating, but the last heartbeat is STALE (older than the
     #    freshness window) → the daemon is WEDGED / not firing on its interval. This
@@ -191,13 +191,13 @@ def _daemon_row(daemon: DaemonInfo | None) -> StatusRow:
         return StatusRow(
             "Heal daemon",
             RowStatus.DOWN,
-            f"com.sanctum.net-heal loaded but heartbeat stale ({age}) · {last}",
+            f"haus.sanctum.net-heal loaded but heartbeat stale ({age}) · {last}",
         )
     # 5. Loaded and fresh (or freshness unknown — fail-open, an unread age is not
     #    proof of a wedge). It is running / guarding → OK, even if the last cycle
     #    reverted/noop'd (those are normal per-cycle outcomes, not an outage).
     return StatusRow(
-        "Heal daemon", RowStatus.OK, f"com.sanctum.net-heal loaded · {last}"
+        "Heal daemon", RowStatus.OK, f"haus.sanctum.net-heal loaded · {last}"
     )
 
 

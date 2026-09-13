@@ -191,7 +191,7 @@ REGISTRY: tuple[ToolSpec, ...] = (
         ("smarter",),
         "yoda voice stack venv (drift canary; apply also bumps mlx/mlx-audio/parakeet)",
         venv="~/Projects/yoda-voice-agent/.tts-venv",
-        restart_hint="kickstart com.sanctum.yoda-tts-worker + yoda-stt-worker (voice rides this venv)",
+        restart_hint="kickstart haus.sanctum.yoda-tts-worker + yoda-stt-worker (voice rides this venv)",
     ),
 )
 

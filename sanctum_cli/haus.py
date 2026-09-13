@@ -73,7 +73,7 @@ def _env_set(name: str) -> bool:
 
 
 def _launchagents_present() -> bool:
-    """True iff any ``com.sanctum.*`` LaunchAgent plist is installed.
+    """True iff any ``haus.sanctum.*`` LaunchAgent plist is installed.
 
     Pure directory glob — no ``launchctl`` shell-out, so it cannot hang.
     """
@@ -82,7 +82,7 @@ def _launchagents_present() -> bool:
         Path("/Library/LaunchAgents"),
     ):
         try:
-            if any(base.glob("com.sanctum.*.plist")):
+            if any(base.glob("haus.sanctum.*.plist")):
                 return True
         except OSError:
             continue

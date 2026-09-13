@@ -26,16 +26,16 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 
 WAVE1_LABELS: tuple[str, ...] = (
-    "com.sanctum.proxyd",
-    "com.sanctum.force-flow",
-    "com.sanctum.memory-vault",
+    "haus.sanctum.proxyd",
+    "haus.sanctum.force-flow",
+    "haus.sanctum.memory-vault",
 )
 
 # Process argv patterns (egrep-style) for each wave-1 unit.
 _PROCESS_PATTERNS: dict[str, str] = {
-    "com.sanctum.proxyd": r"bin/proxyd$|/proxyd$",
-    "com.sanctum.force-flow": r"force_flow\.py",
-    "com.sanctum.memory-vault": r"sanctum-memory-vault",
+    "haus.sanctum.proxyd": r"bin/proxyd$|/proxyd$",
+    "haus.sanctum.force-flow": r"force_flow\.py",
+    "haus.sanctum.memory-vault": r"sanctum-memory-vault",
 }
 
 INSTALL_SCRIPT = Path.home() / ".sanctum/scripts/service-user/install-on-new-hub.sh"
@@ -78,7 +78,7 @@ def haus_tier_present() -> bool:
     markers = [
         Path.home() / ".sanctum/sanctum-proxy",
         Path.home() / ".sanctum/manifests",
-        DAEMON_DIR / "com.sanctum.proxyd.plist",
+        DAEMON_DIR / "haus.sanctum.proxyd.plist",
     ]
     return any(p.exists() for p in markers)
 
@@ -215,7 +215,7 @@ def check_wave1(*, require_user: bool = True) -> Wave1Report:
 
     for label, pat in _PROCESS_PATTERNS.items():
         owner = _process_owner(pat)
-        short = label.removeprefix("com.sanctum.")
+        short = label.removeprefix("haus.sanctum.")
         if owner is None:
             items.append(CheckItem(f"process {short}", False, "not running"))
         elif owner == SERVICE_USERNAME:
@@ -305,9 +305,9 @@ def materialize_assets(op_home: Path | None = None) -> Path:
         encoding="utf-8",
     )
     for name in (
-        "com.sanctum.proxyd.plist",
-        "com.sanctum.force-flow.plist",
-        "com.sanctum.memory-vault.plist",
+        "haus.sanctum.proxyd.plist",
+        "haus.sanctum.force-flow.plist",
+        "haus.sanctum.memory-vault.plist",
     ):
         text = _package_asset(name).replace("@OPERATOR_HOME@", str(home))
         (dest / name).write_text(text, encoding="utf-8")
@@ -496,9 +496,9 @@ def _install_plists(op_home: Path) -> None:
             op_uid = None
 
     for name in (
-        "com.sanctum.proxyd.plist",
-        "com.sanctum.force-flow.plist",
-        "com.sanctum.memory-vault.plist",
+        "haus.sanctum.proxyd.plist",
+        "haus.sanctum.force-flow.plist",
+        "haus.sanctum.memory-vault.plist",
     ):
         label = name.removesuffix(".plist")
         text = _package_asset(name).replace("@OPERATOR_HOME@", str(op_home))
@@ -521,7 +521,7 @@ def _install_plists(op_home: Path) -> None:
 
     # disable bert-side agents that would double-run
     agents = op_home / "Library" / "LaunchAgents"
-    for label in ("com.sanctum.force-flow", "com.sanctum.memory-vault"):
+    for label in ("haus.sanctum.force-flow", "haus.sanctum.memory-vault"):
         agent = agents / f"{label}.plist"
         disabled = agents / f"{label}.plist.disabled-wave1"
         if agent.is_file() and not disabled.is_file():
@@ -552,7 +552,7 @@ def run_install(*, dry_run: bool = False) -> int:
     """
     if dry_run:
         # ensure assets can be read from the package
-        _ = _package_asset("com.sanctum.proxyd.plist")
+        _ = _package_asset("haus.sanctum.proxyd.plist")
         materialize_assets(operator_home())
         return 0
 

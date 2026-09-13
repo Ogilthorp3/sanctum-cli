@@ -74,7 +74,7 @@ def test_install_dry_run(runner, monkeypatch, tmp_path):
     result = runner.invoke(app, ["service-user", "install", "--dry-run"])
     assert result.exit_code == 0
     assert "dry-run" in result.output
-    assert (tmp_path / ".sanctum/launchdaemons/com.sanctum.proxyd.plist").is_file()
+    assert (tmp_path / ".sanctum/launchdaemons/haus.sanctum.proxyd.plist").is_file()
 
 
 def test_materialize_expands_operator_home(tmp_path, monkeypatch):
@@ -84,7 +84,7 @@ def test_materialize_expands_operator_home(tmp_path, monkeypatch):
         lambda name: "HOME=@OPERATOR_HOME@\n",
     )
     dest = su.materialize_assets(tmp_path)
-    text = (dest / "com.sanctum.proxyd.plist").read_text()
+    text = (dest / "haus.sanctum.proxyd.plist").read_text()
     assert str(tmp_path) in text
     assert "@OPERATOR_HOME@" not in text
 

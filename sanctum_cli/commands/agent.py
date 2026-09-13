@@ -1,4 +1,4 @@
-"""``sanctum agent`` — manage com.sanctum.* LaunchAgents.
+"""``sanctum agent`` — manage haus.sanctum.* LaunchAgents.
 
 Wraps ``launchctl bootstrap``/``bootout``/``list`` with typed errors and
 an HTTP-quality status table. ``logs`` follows the StandardOutPath /
@@ -32,7 +32,7 @@ PLIST_LOCATIONS = [
     Path("~/Library/LaunchAgents").expanduser(),
     Path("/Library/LaunchAgents"),
 ]
-SANCTUM_PREFIX = "com.sanctum."
+SANCTUM_PREFIX = "haus.sanctum."
 
 Status = Literal["RUNNING", "LOADED", "FAILED", "MISSING"]
 
@@ -141,9 +141,9 @@ def agent_list(json_output: bool = False) -> None:
         )
         return
     if not rows:
-        console.print("[dim]no com.sanctum.* agents loaded[/]")
+        console.print("[dim]no haus.sanctum.* agents loaded[/]")
         return
-    t = Table(title=f"com.sanctum.* LaunchAgents ({len(rows)})", show_header=True, header_style="bold")
+    t = Table(title=f"haus.sanctum.* LaunchAgents ({len(rows)})", show_header=True, header_style="bold")
     t.add_column("label")
     t.add_column("pid", justify="right")
     t.add_column("last exit", justify="right")

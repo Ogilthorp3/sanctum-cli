@@ -123,7 +123,7 @@ def test_install_writes_sampler_and_plist_and_loads(
     boundary (the artifact is read back), not a mock of it.
     """
     script = tmp_path / "bin" / "wifi-stability-sentinel.sh"
-    plist = tmp_path / "LaunchAgents" / "com.sanctum.wifi-stability.plist"
+    plist = tmp_path / "LaunchAgents" / "haus.sanctum.wifi-stability.plist"
     err_log = tmp_path / "logs" / "wifi-stability.err"
     sample_log = tmp_path / "logs" / "wifi-stability.log"
     monkeypatch.setattr("sanctum_cli.net.link.sentinel_script_path", lambda: script)
@@ -150,7 +150,7 @@ def test_install_writes_sampler_and_plist_and_loads(
     plist_text = plist.read_text(encoding="utf-8")
     # The plist must name the absolute sampler path (launchd does not expand ~).
     assert str(script) in plist_text
-    assert "com.sanctum.wifi-stability" in plist_text
+    assert "haus.sanctum.wifi-stability" in plist_text
     assert str(err_log) in plist_text
     assert "<integer>180</integer>" in plist_text
 

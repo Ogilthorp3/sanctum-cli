@@ -23,9 +23,9 @@ console = Console()
 # Canonical proxy mapping. Keys are the friendly names users see; values
 # tie a LaunchAgent label to the HTTP base URL we probe.
 KNOWN_PROXIES: dict[str, tuple[str, str]] = {
-    "claude-cli-proxy": ("com.sanctum.claude-cli-proxy", "http://127.0.0.1:1234"),
-    "sanctum-server": ("com.sanctum.server", "http://127.0.0.1:8900"),
-    "lmstudio-bridge": ("com.sanctum.lmstudio-bridge", "http://127.0.0.1:1234"),
+    "claude-cli-proxy": ("haus.sanctum.claude-cli-proxy", "http://127.0.0.1:1234"),
+    "sanctum-server": ("haus.sanctum.server", "http://127.0.0.1:8900"),
+    "lmstudio-bridge": ("haus.sanctum.lmstudio-bridge", "http://127.0.0.1:1234"),
 }
 
 Target = Literal["all", "claude-cli-proxy", "sanctum-server", "lmstudio-bridge"]

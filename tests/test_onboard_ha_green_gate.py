@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import getpass
 import inspect
+import sys
 import warnings
 from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
@@ -289,13 +290,19 @@ def test_full_onboard_ha_green_gate_records_verified_pairing(
         patch("sanctum_cli.commands.onboard._run_family_setup"),
         patch("sanctum_cli.commands.onboard._run_ai_providers"),
         patch("sanctum_cli.commands.onboard._run_firewalla_pairing"),
+        patch("sanctum_cli.commands.onboard._run_firewalla_compat", return_value=False),
         patch("sanctum_cli.commands.onboard._run_network_gear"),
+        patch("sanctum_cli.commands.onboard._run_wifi_identity", return_value=False),
         # Haus-scan runs before ha-green and prompts for scan-consent; mock it so it
         # neither prompts nor runs a real arp/SSDP/httpx scan here.
         patch("sanctum_cli.commands.onboard._run_haus_scan"),
         # Network-resilience runs AFTER ha-green (own tests); mock it so a real
         # posture probe / DHCP flip / daemon install never runs here.
         patch("sanctum_cli.commands.onboard._run_network_resilience"),
+        patch("sanctum_cli.commands.onboard._run_mesh_join", return_value=False),
+        # getpass routes to /dev/tty by default which breaks under non-TTY / background runners;
+        # redirect it to sys.stdin so CliRunner's simulated input stream is read.
+        patch("getpass.getpass", lambda prompt="", stream=None: sys.stdin.readline().rstrip("\n")),
         warnings.catch_warnings(),
     ):
         warnings.simplefilter("ignore", getpass.GetPassWarning)

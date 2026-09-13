@@ -350,12 +350,12 @@ def _run_sanctum_doctor(params: dict[str, object]) -> str:  # noqa: ARG001
 
 
 def _run_agent_list(params: dict[str, object]) -> str:  # noqa: ARG001
-    """All com.sanctum.* LaunchAgents: label, pid, last_exit, status."""
+    """All haus.sanctum.* LaunchAgents: label, pid, last_exit, status."""
     from sanctum_cli.commands.agent import _launchctl_list
 
     rows = _launchctl_list()
     if not rows:
-        return "no com.sanctum.* agents loaded"
+        return "no haus.sanctum.* agents loaded"
     lines = [f"{r.label}  pid={r.pid}  last_exit={r.last_exit}  status={r.status}" for r in rows]
     return "\n".join(lines)
 
@@ -441,7 +441,7 @@ REGISTRY: dict[str, CouncilTool] = {
         CouncilTool(
             name="sanctum_doctor",
             description=(
-                "Return a full per-row health report: every com.sanctum.* "
+                "Return a full per-row health report: every haus.sanctum.* "
                 "LaunchAgent, every configured provider, and every backup repo, "
                 "each with status and detail. More verbose than sanctum_status."
             ),
@@ -452,7 +452,7 @@ REGISTRY: dict[str, CouncilTool] = {
         CouncilTool(
             name="agent_list",
             description=(
-                "List all com.sanctum.* LaunchAgents currently known to launchctl, "
+                "List all haus.sanctum.* LaunchAgents currently known to launchctl, "
                 "with their pid, last exit code, and computed status."
             ),
             input_schema={"type": "object", "properties": {}},

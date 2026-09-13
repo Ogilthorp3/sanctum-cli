@@ -20,9 +20,9 @@ def _completed(stdout: str = "", returncode: int = 0) -> subprocess.CompletedPro
 
 LAUNCHCTL_OUT = """\
 PID\tStatus\tLabel
-2087\t0\tcom.sanctum.claude-cli-proxy
--\t0\tcom.sanctum.server
--\t-9\tcom.sanctum.lmstudio-bridge
+2087\t0\thaus.sanctum.claude-cli-proxy
+-\t0\thaus.sanctum.server
+-\t-9\thaus.sanctum.lmstudio-bridge
 """
 
 

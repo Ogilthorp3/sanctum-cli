@@ -244,13 +244,13 @@ def _copy_dotfiles(target: Path, sources: list[Path]) -> list[str]:
 
 
 def _copy_sanctum_launchagents(target: Path) -> list[str]:
-    """Copy com.sanctum.*.plist files (no secrets per Sanctum doctrine)."""
+    """Copy haus.sanctum.*.plist files (no secrets per Sanctum doctrine)."""
     written: list[str] = []
     if not LAUNCHAGENT_GLOB.exists():
         return written
     out_dir = target / "launchagents"
     out_dir.mkdir(parents=True, exist_ok=True)
-    for plist in sorted(LAUNCHAGENT_GLOB.glob("com.sanctum.*.plist")):
+    for plist in sorted(LAUNCHAGENT_GLOB.glob("haus.sanctum.*.plist")):
         out = out_dir / plist.name
         out.write_bytes(plist.read_bytes())
         written.append(f"launchagents/{plist.name}")
