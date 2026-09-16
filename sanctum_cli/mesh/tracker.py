@@ -39,7 +39,13 @@ import httpx
 from sanctum_cli.errors import LocalError
 from sanctum_cli.mesh import artifact
 from sanctum_cli.mesh.adapters import Ed25519Signer
-from sanctum_cli.mesh.types import ArtifactRef, ChampionManifest, MeshIdentity
+from sanctum_cli.mesh.types import (
+    ArtifactRef,
+    ChampionManifest,
+    MeshAnalyticsSummary,
+    MeshIdentity,
+    NodeMacroMetrics,
+)
 
 if TYPE_CHECKING:
     from types import ModuleType, TracebackType
@@ -142,6 +148,8 @@ class TrackerRegistry:
         # gate prove ownership with — injectable so the whole gate is unit-tested
         # with a fake / real signer, and so a PQ signer drops in behind one shape.
         self._verify: VerifyFn = verify if verify is not None else Ed25519Signer().verify
+        # Anonymized node macro metrics for privacy-preserving mesh analytics
+        self._node_metrics: dict[str, NodeMacroMetrics] = {}
         # ``signal_invite`` is operator config (the Signal group link). ``None`` OR
         # an empty/whitespace-only string means no community is set up on this mesh
         # — normalized to ``None`` here so ``community`` returns ``not_configured``
@@ -247,6 +255,48 @@ class TrackerRegistry:
     def _add_peer(self, addr: str) -> None:
         if addr not in self._peers:
             self._peers.append(addr)
+
+    def record_pulse(self, metrics: NodeMacroMetrics) -> bool:
+        """Record an anonymized node metrics pulse."""
+        self._node_metrics[metrics.node_id] = metrics
+        return True
+
+    def analytics_summary(self) -> MeshAnalyticsSummary:
+        """Produce an aggregated summary of active mesh nodes."""
+        nodes = list(self._node_metrics.values())
+        total = len(nodes)
+        if total == 0:
+            return MeshAnalyticsSummary(
+                total_nodes=0,
+                countries={},
+                chips={},
+                memory_tiers_gb={},
+                mean_offline_ratio=0.0,
+                max_eval_baseline=0.0,
+                total_champions=len(self._catalog),
+            )
+        countries: dict[str, int] = {}
+        chips: dict[str, int] = {}
+        mem_tiers: dict[str, int] = {}
+        offline_sum = 0.0
+        max_eval = 0.0
+        for m in nodes:
+            countries[m.country] = countries.get(m.country, 0) + 1
+            chips[m.chip] = chips.get(m.chip, 0) + 1
+            tier = f"{m.memory_gb}GB"
+            mem_tiers[tier] = mem_tiers.get(tier, 0) + 1
+            offline_sum += m.offline_ratio
+            if m.eval_baseline > max_eval:
+                max_eval = m.eval_baseline
+        return MeshAnalyticsSummary(
+            total_nodes=total,
+            countries=countries,
+            chips=chips,
+            memory_tiers_gb=mem_tiers,
+            mean_offline_ratio=round(offline_sum / total, 3),
+            max_eval_baseline=round(max_eval, 4),
+            total_champions=len(self._catalog),
+        )
 
 
 # ─── the client (honest-verify HTTP; a down tracker RAISES) ──────────────
@@ -415,6 +465,24 @@ class HttpTrackerTransport:
                 fix="the tracker is misbehaving; check its version and logs",
             )
         return CommunityOutcome(invite=invite, reason="ok")
+
+    def pulse(self, metrics: NodeMacroMetrics) -> bool:
+        """Post anonymized node metrics pulse to the tracker. Returns True on ack."""
+        resp = self._send("POST", "/pulse", json_body=metrics.to_dict())
+        data = self._json(resp)
+        return bool(data.get("ok", False))
+
+    def analytics(self) -> MeshAnalyticsSummary:
+        """Fetch aggregated swarm macro analytics from the tracker."""
+        resp = self._send("GET", "/analytics")
+        data = self._json(resp)
+        try:
+            return MeshAnalyticsSummary.from_dict(data)
+        except (KeyError, TypeError) as exc:
+            raise LocalError(
+                f"mesh tracker returned malformed analytics from {self._base}/analytics",
+                fix="the tracker is misbehaving; check its version and logs",
+            ) from exc
 
     def _manifest_from(self, payload: Any, where: str) -> ChampionManifest:
         """Rebuild a manifest from the OPEN tracker's JSON, honest-verify style.
@@ -609,14 +677,26 @@ class TrackerHandlers:
             return _json_response({"reason": "not_configured"}, status=404)
         return _json_response({"reason": outcome.reason}, status=403)
 
+    async def pulse(self, request: web.Request) -> web.Response:
+        """``POST /pulse`` → record anonymized node pulse; ``{"ok": true}``."""
+        body = await request.json()
+        metrics = NodeMacroMetrics.from_dict(body)
+        ok = self.registry.record_pulse(metrics)
+        return _json_response({"ok": ok})
+
+    async def analytics(self, _request: web.Request) -> web.Response:
+        """``GET /analytics`` → aggregated :class:`MeshAnalyticsSummary`."""
+        summary = self.registry.analytics_summary()
+        return _json_response(summary.to_dict())
+
 
 def build_tracker_app(registry: TrackerRegistry | None = None) -> web.Application:
     """Wire the discovery + community routes to a fresh (or injected) :class:`TrackerRegistry`.
 
     Returns an ``aiohttp.web.Application`` ready for :func:`serve` (or for a test
     that inspects its routes). The routes are ``POST /register``, ``GET /peers``,
-    ``GET /catalog``, ``POST /announce``, ``GET /find``, and ``POST /community``
-    (community is a POST so the signed credential travels in the body, not a URL).
+    ``GET /catalog``, ``POST /announce``, ``GET /find``, ``POST /community``,
+    ``POST /pulse``, and ``GET /analytics``.
     """
     web_mod = _aiohttp_web()
     handlers = TrackerHandlers(registry if registry is not None else TrackerRegistry())
@@ -627,6 +707,8 @@ def build_tracker_app(registry: TrackerRegistry | None = None) -> web.Applicatio
     app.router.add_post("/announce", handlers.announce)
     app.router.add_get("/find", handlers.find)
     app.router.add_post("/community", handlers.community)
+    app.router.add_post("/pulse", handlers.pulse)
+    app.router.add_get("/analytics", handlers.analytics)
     return app
 
 

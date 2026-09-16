@@ -19,7 +19,9 @@ __all__ = [
     "ArtifactKind",
     "ArtifactRef",
     "ChampionManifest",
+    "MeshAnalyticsSummary",
     "MeshIdentity",
+    "NodeMacroMetrics",
     "Verdict",
 ]
 
@@ -108,3 +110,84 @@ class Verdict:
     promoted: bool
     reason: str
     stage: str
+
+
+@dataclass(frozen=True)
+class NodeMacroMetrics:
+    """Anonymized, privacy-preserving macro metrics emitted by a mesh node."""
+
+    node_id: str
+    country: str
+    chip: str
+    memory_gb: int
+    os_version: str
+    offline_ratio: float
+    eval_baseline: float
+    champions_seeded: int
+    champions_adopted: int
+    timestamp: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "node_id": self.node_id,
+            "country": self.country,
+            "chip": self.chip,
+            "memory_gb": self.memory_gb,
+            "os_version": self.os_version,
+            "offline_ratio": self.offline_ratio,
+            "eval_baseline": self.eval_baseline,
+            "champions_seeded": self.champions_seeded,
+            "champions_adopted": self.champions_adopted,
+            "timestamp": self.timestamp,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> NodeMacroMetrics:
+        return cls(
+            node_id=str(data.get("node_id", "")),
+            country=str(data.get("country", "ZZ")),
+            chip=str(data.get("chip", "Unknown")),
+            memory_gb=int(data.get("memory_gb", 0)),
+            os_version=str(data.get("os_version", "")),
+            offline_ratio=float(data.get("offline_ratio", 1.0)),
+            eval_baseline=float(data.get("eval_baseline", 0.0)),
+            champions_seeded=int(data.get("champions_seeded", 0)),
+            champions_adopted=int(data.get("champions_adopted", 0)),
+            timestamp=str(data.get("timestamp", "")),
+        )
+
+
+@dataclass(frozen=True)
+class MeshAnalyticsSummary:
+    """Swarm-level aggregated analytics visible to all mesh nodes."""
+
+    total_nodes: int
+    countries: dict[str, int]
+    chips: dict[str, int]
+    memory_tiers_gb: dict[str, int]
+    mean_offline_ratio: float
+    max_eval_baseline: float
+    total_champions: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "total_nodes": self.total_nodes,
+            "countries": dict(self.countries),
+            "chips": dict(self.chips),
+            "memory_tiers_gb": dict(self.memory_tiers_gb),
+            "mean_offline_ratio": self.mean_offline_ratio,
+            "max_eval_baseline": self.max_eval_baseline,
+            "total_champions": self.total_champions,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> MeshAnalyticsSummary:
+        return cls(
+            total_nodes=int(data.get("total_nodes", 0)),
+            countries=dict(data.get("countries", {})),
+            chips=dict(data.get("chips", {})),
+            memory_tiers_gb=dict(data.get("memory_tiers_gb", {})),
+            mean_offline_ratio=float(data.get("mean_offline_ratio", 0.0)),
+            max_eval_baseline=float(data.get("max_eval_baseline", 0.0)),
+            total_champions=int(data.get("total_champions", 0)),
+        )

@@ -53,9 +53,15 @@ from sanctum_cli.mesh.adapters import (
     vm_airgap_runner,
 )
 from sanctum_cli.mesh.identity import MeshIdentityStore
+from sanctum_cli.mesh.metrics import collect_local_macro_metrics
 from sanctum_cli.mesh.seed import seed as seed_local
 from sanctum_cli.mesh.tracker import CommunityOutcome, HttpTrackerTransport
-from sanctum_cli.mesh.types import ArtifactKind, Verdict
+from sanctum_cli.mesh.types import (
+    ArtifactKind,
+    MeshAnalyticsSummary,
+    NodeMacroMetrics,
+    Verdict,
+)
 from sanctum_cli.mesh.verify import adopt
 
 if TYPE_CHECKING:
@@ -74,6 +80,7 @@ __all__ = [
     "TailnetStatus",
     "fingerprint",
     "join_mesh",
+    "mesh_analytics_summary",
     "mesh_app",
     "mesh_status",
     "pull_champion",
@@ -136,6 +143,14 @@ class MeshDirectory(Protocol):
         :class:`~sanctum_cli.mesh.tracker.CommunityOutcome` (the invite on ``ok``,
         else an honest refusal). Task 8's HTTP-tracker adapter implements this.
         """
+        ...
+
+    def pulse(self, metrics: NodeMacroMetrics) -> bool:
+        """Post anonymized node macro metrics pulse to the tracker."""
+        ...
+
+    def analytics(self) -> MeshAnalyticsSummary:
+        """Fetch collective swarm macro analytics from the tracker."""
         ...
 
 
@@ -783,3 +798,85 @@ def community_command() -> None:
         # A fail-closed refusal (or no community configured): no invite was vended.
         # Exit non-zero so a scripted call distinguishes "got the invite" from "did not".
         raise typer.Exit(code=int(ExitCode.USER_ERROR))
+
+
+def mesh_analytics_summary(*, directory: MeshDirectory) -> MeshAnalyticsSummary:
+    """Fetch collective macro analytics across the mesh."""
+    return directory.analytics()
+
+
+def _print_analytics(summary: MeshAnalyticsSummary) -> None:
+    from rich.panel import Panel
+    from rich.table import Table
+
+    if summary.total_nodes == 0:
+        console.print(
+            Panel(
+                "[yellow]No active nodes currently reporting to this mesh tracker.[/]\n"
+                f"[dim]Total champions in catalog: {summary.total_champions}[/]",
+                title="[bold cyan]Sanctum Mesh — Swarm Macro Analytics[/]",
+            )
+        )
+        return
+
+    country_flags = {
+        "CA": "🇨🇦",
+        "US": "🇺🇸",
+        "FR": "🇫🇷",
+        "GB": "🇬🇧",
+        "DE": "🇩🇪",
+        "JP": "🇯🇵",
+        "CH": "🇨🇭",
+        "AU": "🇦🇺",
+    }
+    c_parts = [
+        f"{country_flags.get(c, '🌐')} {c}: {count}"
+        for c, count in sorted(summary.countries.items(), key=lambda x: -x[1])
+    ]
+    countries_str = " · ".join(c_parts) if c_parts else "None"
+
+    h_parts = [
+        f"{chip} ({count})"
+        for chip, count in sorted(summary.chips.items(), key=lambda x: -x[1])
+    ]
+    chips_str = " · ".join(h_parts) if h_parts else "Unknown"
+
+    m_parts = [
+        f"{tier}: {count}"
+        for tier, count in sorted(summary.memory_tiers_gb.items(), key=lambda x: -x[1])
+    ]
+    mem_str = " · ".join(m_parts) if m_parts else "Unknown"
+
+    table = Table(title="[bold cyan]Sanctum Mesh — Swarm Macro Analytics[/]", show_header=False)
+    table.add_column("Category", style="bold cyan", width=24)
+    table.add_column("Details", style="white")
+
+    table.add_row("Active Nodes", f"{summary.total_nodes} node(s)")
+    table.add_row("Countries of Origin", countries_str)
+    table.add_row("Compute Hardware", chips_str)
+    table.add_row("Memory Tiers", mem_str)
+    table.add_row(
+        "Fleet Offline Ratio",
+        f"{summary.mean_offline_ratio * 100:.1f}% local inference",
+    )
+    table.add_row("Peak Eval Baseline", f"{summary.max_eval_baseline:.4f}")
+    table.add_row("Champions in Catalog", f"{summary.total_champions}")
+
+    console.print(table)
+
+
+@mesh_app.command(
+    "analytics", help="View collective macro analytics across the mesh swarm."
+)
+def analytics_command(
+    tracker: Annotated[
+        str | None, typer.Option("--tracker", help="Override discovery tracker URL.")
+    ] = None,
+) -> None:
+    try:
+        directory = _build_directory(tracker)
+        summary = mesh_analytics_summary(directory=directory)
+    except SanctumError as exc:
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code)) from exc
+    _print_analytics(summary)

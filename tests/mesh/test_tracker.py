@@ -37,7 +37,13 @@ from sanctum_cli.mesh.tracker import (
     TrackerRegistry,
     build_tracker_app,
 )
-from sanctum_cli.mesh.types import ArtifactKind, ChampionManifest, MeshIdentity
+from sanctum_cli.mesh.types import (
+    ArtifactKind,
+    ChampionManifest,
+    MeshAnalyticsSummary,
+    MeshIdentity,
+    NodeMacroMetrics,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -141,6 +147,12 @@ def _registry_handler(registry: TrackerRegistry) -> Callable[[httpx.Request], ht
                     "manifest": ref.manifest.to_dict(),
                 },
             )
+        if path == "/pulse":
+            body = json.loads(request.content)
+            ok = registry.record_pulse(NodeMacroMetrics.from_dict(body))
+            return httpx.Response(200, json={"ok": ok})
+        if path == "/analytics":
+            return httpx.Response(200, json=registry.analytics_summary().to_dict())
         return httpx.Response(404, json={"error": "unknown route"})
 
     return handle
@@ -721,6 +733,8 @@ def test_build_tracker_app_wires_all_routes() -> None:
         ("POST", "/announce"),
         ("GET", "/find"),
         ("POST", "/community"),
+        ("POST", "/pulse"),
+        ("GET", "/analytics"),
     }
 
 
@@ -913,3 +927,100 @@ def test_find_raises_localerror_on_malformed_manifest(
     client = transport_factory(handler=handler)
     with pytest.raises(LocalError):
         client.find(str(_BAD_MANIFEST["content_hash"]))
+
+
+def test_registry_pulse_and_analytics_summary() -> None:
+    reg = TrackerRegistry()
+    empty = reg.analytics_summary()
+    assert empty.total_nodes == 0
+    assert empty.countries == {}
+
+    p1 = NodeMacroMetrics(
+        node_id="node-1",
+        country="CA",
+        chip="Apple M4 Pro",
+        memory_gb=64,
+        os_version="macOS 15.0",
+        offline_ratio=0.95,
+        eval_baseline=0.892,
+        champions_seeded=2,
+        champions_adopted=1,
+        timestamp="2026-09-15T00:00:00Z",
+    )
+    p2 = NodeMacroMetrics(
+        node_id="node-2",
+        country="US",
+        chip="Apple M3 Max",
+        memory_gb=32,
+        os_version="macOS 15.0",
+        offline_ratio=0.85,
+        eval_baseline=0.875,
+        champions_seeded=0,
+        champions_adopted=3,
+        timestamp="2026-09-15T00:00:00Z",
+    )
+    assert reg.record_pulse(p1) is True
+    assert reg.record_pulse(p2) is True
+
+    summary = reg.analytics_summary()
+    assert summary.total_nodes == 2
+    assert summary.countries == {"CA": 1, "US": 1}
+    assert summary.chips == {"Apple M4 Pro": 1, "Apple M3 Max": 1}
+    assert summary.memory_tiers_gb == {"64GB": 1, "32GB": 1}
+    assert summary.mean_offline_ratio == 0.9
+    assert summary.max_eval_baseline == 0.892
+
+
+def test_transport_pulse_and_analytics_roundtrip(
+    transport_factory: Callable[..., HttpTrackerTransport],
+) -> None:
+    reg = TrackerRegistry()
+    client = transport_factory(registry=reg)
+
+    pulse = NodeMacroMetrics(
+        node_id="node-ca-1",
+        country="CA",
+        chip="Apple M4 Pro",
+        memory_gb=64,
+        os_version="macOS 15.0",
+        offline_ratio=1.0,
+        eval_baseline=0.885,
+        champions_seeded=1,
+        champions_adopted=0,
+        timestamp="2026-09-15T00:00:00Z",
+    )
+    assert client.pulse(pulse) is True
+
+    analytics = client.analytics()
+    assert analytics.total_nodes == 1
+    assert analytics.countries == {"CA": 1}
+    assert analytics.chips == {"Apple M4 Pro": 1}
+    assert analytics.mean_offline_ratio == 1.0
+
+
+def test_handlers_pulse_and_analytics() -> None:
+    reg = TrackerRegistry()
+    handlers = TrackerHandlers(reg)
+
+    pulse_data = {
+        "node_id": "test-node",
+        "country": "FR",
+        "chip": "Apple M2",
+        "memory_gb": 16,
+        "os_version": "macOS 14.5",
+        "offline_ratio": 0.8,
+        "eval_baseline": 0.86,
+        "champions_seeded": 0,
+        "champions_adopted": 1,
+        "timestamp": "2026-09-15T00:00:00Z",
+    }
+    resp = asyncio.run(handlers.pulse(_StubRequest(json_body=pulse_data)))
+    assert resp.status == 200
+    assert json.loads(resp.body) == {"ok": True}
+
+    resp_analytics = asyncio.run(handlers.analytics(_StubRequest()))
+    assert resp_analytics.status == 200
+    res_data = json.loads(resp_analytics.body)
+    assert res_data["total_nodes"] == 1
+    assert res_data["countries"] == {"FR": 1}
+    assert res_data["memory_tiers_gb"] == {"16GB": 1}

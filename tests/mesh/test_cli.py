@@ -34,7 +34,11 @@ from sanctum_cli.errors import ExitCode, LocalError
 from sanctum_cli.mesh.artifact import build_manifest
 from sanctum_cli.mesh.identity import MeshIdentityStore
 from sanctum_cli.mesh.tracker import CommunityOutcome
-from sanctum_cli.mesh.types import ArtifactRef
+from sanctum_cli.mesh.types import (
+    ArtifactRef,
+    MeshAnalyticsSummary,
+    NodeMacroMetrics,
+)
 from sanctum_cli.mesh.verify import SandboxResult
 
 if TYPE_CHECKING:
@@ -82,6 +86,7 @@ class FakeDirectory:
         register_ack: bool = True,
         community_outcome: CommunityOutcome | None = None,
         community_error: Exception | None = None,
+        analytics_summary: MeshAnalyticsSummary | None = None,
     ) -> None:
         self._peers = list(peers)
         self._catalog = list(catalog)
@@ -89,10 +94,12 @@ class FakeDirectory:
         self._register_ack = register_ack
         self._community_outcome = community_outcome
         self._community_error = community_error
+        self._analytics_summary = analytics_summary
         self.register_calls: list[tuple[MeshIdentity, str]] = []
         self.announce_calls: list[tuple[ChampionManifest, str]] = []
         self.find_calls: list[str] = []
         self.community_calls: list[tuple[str, str, str]] = []
+        self.pulse_calls: list[NodeMacroMetrics] = []
 
     def register(self, identity: MeshIdentity, addr: str) -> bool:
         self.register_calls.append((identity, addr))
@@ -117,6 +124,21 @@ class FakeDirectory:
             raise self._community_error
         assert self._community_outcome is not None, "no community_outcome configured on FakeDirectory"
         return self._community_outcome
+
+    def pulse(self, metrics: NodeMacroMetrics) -> bool:
+        self.pulse_calls.append(metrics)
+        return True
+
+    def analytics(self) -> MeshAnalyticsSummary:
+        return self._analytics_summary or MeshAnalyticsSummary(
+            total_nodes=0,
+            countries={},
+            chips={},
+            memory_tiers_gb={},
+            mean_offline_ratio=0.0,
+            max_eval_baseline=0.0,
+            total_champions=len(self._catalog),
+        )
 
 
 class FakeVerifier:
@@ -754,3 +776,41 @@ def test_build_vm_runner_passes_configured_host_on_invocation(
     probe = runner_fn(tmp_path / "champ")
     assert probe.completed is True
     assert seen == {"path": tmp_path / "champ", "host": "vm-airgap.tailnet"}
+
+
+def test_mesh_analytics_command_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    directory = FakeDirectory(analytics_summary=MeshAnalyticsSummary(
+        total_nodes=0,
+        countries={},
+        chips={},
+        memory_tiers_gb={},
+        mean_offline_ratio=0.0,
+        max_eval_baseline=0.0,
+        total_champions=0,
+    ))
+    monkeypatch.setattr(mesh_cmd, "_build_directory", lambda _t=None: directory)
+    res = runner.invoke(app, ["mesh", "analytics"])
+    assert res.exit_code == 0
+    assert "No active nodes" in res.output
+
+
+def test_mesh_analytics_command_with_nodes(monkeypatch: pytest.MonkeyPatch) -> None:
+    summary = MeshAnalyticsSummary(
+        total_nodes=5,
+        countries={"CA": 3, "US": 2},
+        chips={"Apple M4 Pro": 3, "Apple M2": 2},
+        memory_tiers_gb={"64GB": 3, "16GB": 2},
+        mean_offline_ratio=0.92,
+        max_eval_baseline=0.895,
+        total_champions=4,
+    )
+    directory = FakeDirectory(analytics_summary=summary)
+    monkeypatch.setattr(mesh_cmd, "_build_directory", lambda _t=None: directory)
+    res = runner.invoke(app, ["mesh", "analytics"])
+    assert res.exit_code == 0
+    assert "Active Nodes" in res.output
+    assert "5 node(s)" in res.output
+    assert "CA: 3" in res.output
+    assert "US: 2" in res.output
+    assert "Apple M4 Pro (3)" in res.output
+    assert "92.0% local inference" in res.output
