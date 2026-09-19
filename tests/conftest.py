@@ -12,6 +12,33 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
 
 
+@pytest.fixture(autouse=True)
+def _home_is_never_the_operators(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """No test writes into the operator's real ``~/.sanctum``.
+
+    On 2026-09-19 a full-suite run appended 215 lines to the real
+    ``~/.sanctum/telemetry/cli.jsonl`` and 10 to ``~/.sanctum/logs/netgear-audit.jsonl``, and
+    overwrote ``~/.sanctum/wifi-mac-stability.mobileconfig``. ``HOME`` alone is not enough:
+    several defaults are bound to ``Path.home()`` at IMPORT time, so they are patched by name
+    here. A test that wants the real home asks for it explicitly.
+    """
+    fake = tmp_path / "home"
+    (fake / ".sanctum").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("HOME", str(fake))
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: fake))
+    for mod_name, attr, rel in (
+        ("sanctum_cli.devices.rails", "DEFAULT_AUDIT_LOG", ".sanctum/logs/netgear-audit.jsonl"),
+        ("sanctum_cli.service_user", "INSTALL_SCRIPT", ".sanctum/scripts/service-user/install-on-new-hub.sh"),
+        ("sanctum_cli.service_user", "STATUS_SCRIPT", ".sanctum/scripts/service-user/status.sh"),
+    ):
+        try:
+            mod = __import__(mod_name, fromlist=["_"])
+        except Exception:  # a module this suite never loads
+            continue
+        if hasattr(mod, attr):
+            monkeypatch.setattr(mod, attr, fake / rel, raising=False)
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _tls_ca_for_tests(tmp_path_factory: pytest.TempPathFactory) -> Iterator[None]:
     """Make TLS code paths hermetic on a CA-less machine (CI / a clean checkout).
@@ -148,6 +175,7 @@ cli:
       always_available: true
   telemetry:
     enabled: true
+    path: 'TELEMETRY_PATH'
     redact_prompts: true
     aggregate_window_days: 7
   cloud_backup:
@@ -163,7 +191,7 @@ cli:
       keychain:
         service: sanctum-backup-key
         account: sanctum-backup
-""",
+""".replace("TELEMETRY_PATH", str(tmp_path / "telemetry.jsonl")),
         encoding="utf-8",
     )
     return p
