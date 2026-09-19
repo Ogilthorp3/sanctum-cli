@@ -209,7 +209,7 @@ def brainstorm_top(
     ] = None,
     seats: Annotated[
         str | None,
-        typer.Option("--seats", "-s", help="Comma list to subset seats (default: all five)."),
+        typer.Option("--seats", "-s", help="Comma list to subset seats (default: all seven)."),
     ] = None,
     url: Annotated[
         str, typer.Option("--url", help="proxyd base URL.", envvar="SANCTUM_COUNCIL_URL")
@@ -218,8 +218,14 @@ def brainstorm_top(
         int, typer.Option("--max-tokens", "-t", help="Per-seat response cap.", min=1)
     ] = 900,
     timeout: Annotated[
-        int, typer.Option("--timeout", help="Per-seat timeout (seconds).", min=1)
-    ] = 240,
+        int,
+        typer.Option(
+            "--timeout",
+            min=0,
+            help="Per-seat timeout CEILING (s) for every lane but the Max bridge; "
+            "0 (default) = none: each seat waits as long as proxyd will.",
+        ),
+    ] = 0,
     cacert: Annotated[
         Path, typer.Option("--cacert", help="CA to verify proxyd's TLS chain.")
     ] = brainstorm_cmd.DEFAULT_CACERT,
@@ -230,6 +236,66 @@ def brainstorm_top(
     strict: Annotated[
         bool, typer.Option("--strict", help="Treat a duplicate-family fallback as a lost voice; exit 2 below floor.")
     ] = False,
+    seat_timeout: Annotated[
+        int | None,
+        typer.Option(
+            "--seat-timeout",
+            min=1,
+            help="Set EVERY seat's budget to N s (can raise or lower; all lanes).",
+        ),
+    ] = None,
+    stream: Annotated[
+        bool | None,
+        typer.Option(
+            "--stream/--no-stream",
+            help="Stream every seat / no seat. Default: only the heretic seat, whose proxyd "
+            "route has the shared 120 s read ceiling.",
+        ),
+    ] = None,
+    concurrency: Annotated[
+        int,
+        typer.Option(
+            "--concurrency",
+            min=0,
+            help="Max seats in flight; 0 = lane-aware (serial within single-lane backends).",
+        ),
+    ] = 0,
+    require_all: Annotated[
+        bool,
+        typer.Option(
+            "--require-all",
+            help="Exit 2 unless EVERY seat answered, complete, in its own voice.",
+        ),
+    ] = False,
+    repoll: Annotated[
+        int,
+        typer.Option(
+            "--repoll", min=0, help="Re-ask seats that did not answer, serially, up to N rounds."
+        ),
+    ] = 0,
+    repoll_wait: Annotated[
+        int,
+        typer.Option("--repoll-wait", min=0, help="Seconds to pause before each re-poll round."),
+    ] = 30,
+    wait_load: Annotated[
+        float | None,
+        typer.Option(
+            "--wait-load",
+            min=0.0,
+            help="Dispatch (and re-poll) only when the Mini's load1 is below this.",
+        ),
+    ] = None,
+    load_host: Annotated[
+        str | None,
+        typer.Option(
+            "--load-host",
+            envvar="SANCTUM_COUNCIL_LOAD_HOST",
+            help="ssh host (a NAME, not an IP) whose load1 --wait-load reads.",
+        ),
+    ] = None,
+    wait_max: Annotated[
+        int, typer.Option("--wait-max", min=0, help="Give up on --wait-load after N seconds.")
+    ] = 3600,
 ) -> None:
     try:
         brainstorm_cmd.brainstorm_command(
@@ -243,6 +309,15 @@ def brainstorm_top(
             json_output=json_output,
             min_families=min_families,
             strict=strict,
+            seat_timeout=seat_timeout,
+            stream=stream,
+            concurrency=concurrency,
+            require_all=require_all,
+            repoll=repoll,
+            repoll_wait=repoll_wait,
+            wait_load=wait_load,
+            load_host=load_host,
+            wait_max=wait_max,
         )
     except SanctumError as exc:
         _report(exc)

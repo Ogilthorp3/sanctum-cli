@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import httpx
+import pytest
 from typer.testing import CliRunner
 
 from sanctum_cli.cli import app
@@ -21,9 +22,15 @@ from sanctum_cli.commands.brainstorm import SeatResult, Status
 if TYPE_CHECKING:
     from pathlib import Path
 
-    import pytest
-
 runner = CliRunner()
+
+
+@pytest.fixture(autouse=True)
+def _no_real_telemetry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`full_instance_yaml` enables telemetry with no path, which resolves to the REAL
+    ~/.sanctum/telemetry/cli.jsonl — every CLI test would append a line there."""
+    monkeypatch.setattr(bs, "_load_telemetry", lambda: None)
+
 
 # Independent oracle (NOT bs._FAMILY_BY_MODEL).
 _DOCTRINE_FAMILY = {
@@ -54,7 +61,7 @@ def _absent(seat: str, error: str = "boom") -> SeatResult:
 
 
 def _ask_returning(table: dict[str, SeatResult]):
-    def _fake(_client, seat, _model, _lens, _topic, _max_tokens, _deadline):
+    def _fake(_client, seat, _model, _lens, _topic, _max_tokens, _deadline, **_kw):
         return table[seat]
     return _fake
 
