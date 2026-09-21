@@ -159,7 +159,7 @@ class _FakeClient:
     def __init__(self, handler) -> None:
         self._h = handler
 
-    def post(self, _path, json=None, timeout=None):
+    def post(self, _path, json=None, timeout=None, headers=None):
         return self._h(json)
 
 

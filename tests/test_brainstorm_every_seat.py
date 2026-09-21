@@ -100,6 +100,7 @@ class FakeProxyd:
             step = steps.pop(0) if len(steps) > 1 else steps[0]
             self.calls.append({"model": model, "max_tokens": body["max_tokens"],
                                "stream": bool(body.get("stream")),
+                               "no_fallback": request.headers.get("x-sanctum-no-fallback"),
                                "timeout": dict(request.extensions.get("timeout") or {})})
         lane = bs._lane_of(model)
         with self._lock:
@@ -121,7 +122,8 @@ class FakeProxyd:
 
 
 def answer(content: str = "a complete answer", *, finish: str | None = "stop",
-           served: str | None = None, latency: float = 1.0) -> Any:
+           served: str | None = None, latency: float = 1.0,
+           headers: dict[str, str] | None = None) -> Any:
     """A non-streaming seat that answers after `latency` seconds — or, when that is
     longer than the client's read timeout, lets the client's clock run out."""
     def step(p: FakeProxyd, request: httpx.Request, body: dict[str, Any]) -> httpx.Response:
@@ -135,7 +137,7 @@ def answer(content: str = "a complete answer", *, finish: str | None = "stop",
         payload: dict[str, Any] = {"choices": [{"message": {"content": content}, "finish_reason": finish}]}
         if served:
             payload["model"] = served
-        return httpx.Response(200, json=payload)
+        return httpx.Response(200, json=payload, headers=headers)
     return step
 
 
@@ -152,14 +154,15 @@ def disconnect(*, tunnel_down: int = 0, after: float = 0.0) -> Any:
     return step
 
 
-def http(code: int, message: str = "fake") -> Any:
+def http(code: int, message: str = "fake", headers: dict[str, str] | None = None) -> Any:
     def step(p: FakeProxyd, request: httpx.Request, body: dict[str, Any]) -> httpx.Response:
-        return httpx.Response(code, json={"error": {"message": message}})
+        return httpx.Response(code, json={"error": {"message": message}}, headers=headers)
     return step
 
 
 def sse(deltas: list[str], *, served: str = "claude-fable-5", keepalives: int = 0,
-        tick: float = 15.0, finish: str | None = "stop", done: bool = True) -> Any:
+        tick: float = 15.0, finish: str | None = "stop", done: bool = True,
+        headers: dict[str, str] | None = None) -> Any:
     """A streaming seat: role chunk, `keepalives` empty deltas `tick` s apart (the
     cathedral's prefill keep-alive), content deltas, finish chunk, [DONE]."""
     def step(p: FakeProxyd, request: httpx.Request, body: dict[str, Any]) -> httpx.Response:
@@ -183,7 +186,8 @@ def sse(deltas: list[str], *, served: str = "claude-fable-5", keepalives: int = 
                 yield chunk({}, finish)
             if done:
                 yield b"data: [DONE]\n\n"
-        return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=gen())
+        return httpx.Response(200, headers={"content-type": "text/event-stream", **(headers or {})},
+                              content=gen())
     return step
 
 
@@ -306,9 +310,12 @@ class _DropThenAnswer:
     def __init__(self) -> None:
         self.posts = 0
         self.gets = 0
+        self.sent_headers: list[dict[str, str]] = []
 
-    def post(self, _path: str, json: Any = None, timeout: Any = None) -> httpx.Response:
+    def post(self, _path: str, json: Any = None, timeout: Any = None,
+             headers: Any = None) -> httpx.Response:
         self.posts += 1
+        self.sent_headers.append(dict(headers or {}))
         req = httpx.Request("POST", "http://x/v1/chat/completions")
         if self.posts == 1:
             raise httpx.RemoteProtocolError("Server disconnected without sending a response.", request=req)
@@ -929,3 +936,339 @@ def test_prefer_ranks_outcomes() -> None:
     answered = mk("answered", bs.Status.OK, "own")
     assert bs._prefer(diverted, timeout) is diverted
     assert bs._prefer(diverted, answered) is answered
+
+
+# ───────── review pass 3 (2026-09-20): WHO ANSWERED is proxyd's word, not a guess ─────────
+# On 09-20 council-heretic returned 503 and proxyd answered from council-local-think:
+# HTTP 200, and the SAME model name ("Qwen3.8-27B-4bit") in the body. The client could
+# only say "ambiguous" — and counted it. A newer proxyd (a) says on the wire which seat
+# answered (x-sanctum-seated / x-sanctum-route-chain) and (b) honours an opt-in
+# `x-sanctum-no-fallback: 1`: that seat or a 503, never a substitute. The client must work
+# against BOTH the old proxyd (no such headers) and the new one.
+_SHARED = "Qwen3.8-27B-4bit"   # what :6669 (heretic) and :1337 (council-local-think) both report
+_HEALTHY = {"council-heretic": {"healthy": True, "error_rate_pct": 0}}
+
+
+def _seated(seat_key: str, requested: str, *failed: str) -> dict[str, str]:
+    """The response headers the new proxyd sets on /v1/chat/completions."""
+    h = {"x-sanctum-requested": requested, "x-sanctum-seated": seat_key,
+         "x-sanctum-route-chain": " > ".join([*failed, seat_key])}
+    if seat_key != requested:
+        h["x-sanctum-route"] = "diverted"
+    return h
+
+
+def _strict_503(requested: str) -> Any:
+    return http(503, f"ROUTE FAILED requested={requested} · [{requested}✗HTTP 503] · last=HTTP 503",
+                headers=_seated("none", requested, requested))
+
+
+# — the request header —
+def test_every_seat_request_refuses_a_substitute_by_default(
+    full_instance_yaml: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # JSON seat, streamed seat, and the client's OWN council-mlx fallback request alike.
+    proxy = FakeProxyd({"council-max-thinking": [answer("y", served="claude-fable-5")],
+                        "council-heretic": [sse(["c"], served="Qwen3.8-27B-4bit-champion-ablated")],
+                        "council-finance": [http(500)],
+                        "council-mlx": [answer("q", served=_SHARED)]})
+    res = run_cli(["-s", "Yoda,Cilghal,Mundi", "topic"], proxy, monkeypatch, full_instance_yaml)
+    assert sorted(set(proxy.models_called())) == ["council-finance", "council-heretic",
+                                                  "council-max-thinking", "council-mlx"]
+    assert [c["no_fallback"] for c in proxy.calls] == ["1"] * len(proxy.calls), proxy.calls
+    assert json.loads(res.stdout)["run"]["allow_fallback"] is False
+
+
+def test_allow_fallback_omits_the_strict_header(
+    full_instance_yaml: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    proxy = FakeProxyd({"council-max-thinking": [answer("y", served="claude-fable-5")],
+                        "council-heretic": [sse(["c"], served="Qwen3.8-27B-4bit-champion-ablated")]})
+    res = run_cli(["-s", "Yoda,Cilghal", "--allow-fallback", "topic"], proxy, monkeypatch,
+                  full_instance_yaml)
+    assert res.exit_code == 0, res.stdout + res.stderr
+    assert len(proxy.calls) == 2
+    assert [c["no_fallback"] for c in proxy.calls] == [None, None]
+    assert json.loads(res.stdout)["run"]["allow_fallback"] is True
+
+
+def test_ask_sends_the_strict_header_by_default_and_not_when_fallback_is_allowed() -> None:
+    for opts, want in ((None, {"x-sanctum-no-fallback": "1"}),
+                       (bs.AskOptions(allow_fallback=True), {})):
+        client = _DropThenAnswer()
+        client.posts = 1                     # skip the scripted drop: answer at once
+        kw = {"opts": opts} if opts else {}
+        r = bs._ask(client, "Mundi", "council-finance", "lens", "topic", 600,  # type: ignore[arg-type]
+                    time.monotonic() + 100, **kw)
+        assert r.content == "after the drop"
+        assert client.sent_headers == [want]
+
+
+# — seated == requested: proven genuine —
+@pytest.mark.parametrize("health", [_HEALTHY, _HERETIC_DOWN, None])
+def test_attested_seat_is_a_match_even_with_the_shared_weights_model_name(health: Any) -> None:
+    # Without the header this exact body reads "ambiguous" (healthy) or "diverted" (unhealthy).
+    verdict, note = bs._provenance("council-heretic", "heretic", "cathedral", _SHARED, health,
+                                   seated="council-heretic", route_chain="council-heretic")
+    assert verdict == "match"
+    assert "attested" in (note or "") and "council-heretic" in (note or "")
+
+
+@pytest.mark.parametrize("flags", [["--no-stream"], []], ids=["json", "sse"])
+def test_attested_heretic_answer_is_counted_and_recorded_as_proven(
+    flags: list[str], full_instance_yaml: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hdrs = _seated("council-heretic", "council-heretic")
+    step = (answer("ablated view", served=_SHARED, headers=hdrs) if flags
+            else sse(["ablated ", "view"], served=_SHARED, headers=hdrs))
+    proxy = FakeProxyd({"council-heretic": [step]}, seats_health=_HEALTHY)
+    res = run_cli(["-s", "Cilghal", "--require-all", *flags, "topic"], proxy, monkeypatch,
+                  full_instance_yaml)
+    assert res.exit_code == 0, res.stdout + res.stderr
+    payload = json.loads(res.stdout)
+    cil = seat(payload, "Cilghal")
+    assert cil["outcome"] == "answered" and cil["response"] == "ablated view"
+    assert cil["provenance"] == "match" and cil["provenance_basis"] == "attested"
+    assert cil["seated"] == "council-heretic" and cil["route_chain"] == "council-heretic"
+    assert "attested" in cil["note"]
+    assert payload["diversity"]["own_voice_seats"] == ["Cilghal"]
+
+
+# — seated != requested: proven NOT genuine —
+@pytest.mark.parametrize("flags", [["--no-stream"], []], ids=["json", "sse"])
+def test_attested_diversion_is_not_counted_even_when_the_body_looks_like_the_seat(
+    flags: list[str], full_instance_yaml: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The 09-20 incident, replayed against the new proxyd: heretic failed, council-local-think
+    # answered, same model name, seat HEALTHY in /health -> the old client said "ambiguous"
+    # and counted it as Cilghal's vote.
+    hdrs = _seated("council-local-think", "council-heretic", "council-heretic")
+    step = (answer("plain qwen", served=_SHARED, headers=hdrs) if flags
+            else sse(["plain ", "qwen"], served=_SHARED, headers=hdrs))
+    proxy = FakeProxyd({"council-heretic": [step]}, seats_health=_HEALTHY)
+    res = run_cli(["-s", "Cilghal", *flags, "topic"], proxy, monkeypatch, full_instance_yaml)
+    assert res.exit_code == 2                      # no seat answered in its own voice
+    payload = json.loads(res.stdout)
+    cil = seat(payload, "Cilghal")
+    assert cil["status"] == "degraded" and cil["outcome"] == "diverted"
+    assert cil["response"] is None and cil["degraded_response"] == "plain qwen"
+    assert cil["provenance"] == "diverted" and cil["provenance_basis"] == "attested"
+    assert cil["seated"] == "council-local-think"
+    assert cil["model_used"] == "council-local-think" and cil["served_model"] == _SHARED
+    assert cil["route_chain"] == "council-heretic > council-local-think"
+    assert "council-local-think" in cil["note"] and "council-heretic > council-local-think" in cil["note"]
+    assert cil["family"] == "qwen" and cil["fallback_from"] == "heretic"
+    assert _legacy_answered(payload) == []
+    assert payload["diversity"]["own_voice_seats"] == []
+    assert payload["diversity"]["diverted_seats"] == ["Cilghal"]
+    assert payload["diversity"]["answered_seats"] == 0
+
+
+@pytest.mark.parametrize(("seat_model", "designed", "lane", "served", "seated", "chain", "names"), [
+    # a claude-looking body from ANOTHER claude seat is still not this seat's answer
+    ("council-max-thinking", "claude", "bridge", "claude-fable-5", "council-brain",
+     "council-max-thinking > council-brain", "council-brain"),
+    # no body model at all: the header alone settles it
+    ("council-finance", "grok", "grok", None, "council-mlx", "council-finance > council-mlx",
+     "council-mlx"),
+    # a 200 that claims nobody answered is not an answer either
+    ("council-finance", "grok", "grok", "grok-4.6", "none", "council-finance > none", "no seat"),
+])
+def test_attested_diversion_verdicts(seat_model: str, designed: str, lane: str, served: str | None,
+                                     seated: str, chain: str, names: str) -> None:
+    verdict, note = bs._provenance(seat_model, designed, lane, served, {},
+                                   seated=seated, route_chain=chain)
+    assert verdict == "diverted"
+    assert names in (note or "") and chain in (note or "")
+
+
+def test_attested_match_still_records_a_body_that_contradicts_it() -> None:
+    # The header settles WHICH SEAT answered; what that seat's proxyd entry points at is
+    # a different question, and a contradicting body is written down, not dropped.
+    verdict, note = bs._provenance("council-finance", "grok", "grok", "Qwen3.8-27B-4bit", {},
+                                   seated="council-finance", route_chain="council-finance")
+    assert verdict == "match" and "attested" in (note or "")
+    assert "Qwen3.8-27B-4bit (qwen), not a grok model" in (note or "")
+    verdict, note = bs._provenance("council-code", "codestral", "code", "qwen/qwen3.6-plus", {},
+                                   seated="council-code", route_chain="council-code")
+    assert verdict == "match" and "HOSTED" in (note or "")
+    # the seat's own model, or the weights it shares with its fallback: nothing to flag
+    for served in ("Qwen3.8-27B-4bit-champion-ablated", _SHARED, None):
+        _, note = bs._provenance("council-heretic", "heretic", "cathedral", served, {},
+                                 seated="council-heretic", route_chain="council-heretic")
+        assert "but its backend" not in (note or ""), served
+
+
+def test_route_headers_tolerate_old_proxyd_and_header_less_doubles() -> None:
+    assert bs._route_headers(None) == (None, None)
+    assert bs._route_headers(object()) == (None, None)
+    assert bs._route_headers({}) == (None, None)
+    assert bs._route_headers(httpx.Headers({"X-Sanctum-Seated": " council-code ",
+                                            "x-sanctum-route-chain": ""})) == ("council-code", None)
+
+
+def test_attested_hosted_stand_in_still_says_the_prompt_left_the_box() -> None:
+    verdict, note = bs._provenance("council-code", "codestral", "code", "qwen/qwen3.6-plus", {},
+                                   seated="qwen36-plus", route_chain="council-code > qwen36-plus")
+    assert verdict == "diverted" and "HOSTED" in (note or "") and "left the box" in (note or "")
+
+
+# — seated ABSENT (the old proxyd): today's heuristics, byte for byte —
+_UNHEALTHY_H = {"council-heretic": {"healthy": False, "error_rate_pct": 100}}
+_HEALTHY_H = {"council-heretic": {"healthy": True, "error_rate_pct": 0}}
+# (args) -> (verdict, note), captured from the pre-header `_provenance` (main @ c0a8994).
+_LEGACY_VERDICTS: list[tuple[tuple[Any, ...], tuple[str, str | None]]] = [
+    (("council-heretic", "heretic", "cathedral", None, _UNHEALTHY_H),
+     ("diverted", "the backend did not report which model answered, while proxyd /health reports "
+                  "council-heretic unhealthy (error_rate 100%) — most likely a proxyd fallback")),
+    (("council-heretic", "heretic", "cathedral", None, _HEALTHY_H), ("unreported", None)),
+    (("council-heretic", "heretic", "cathedral", None, None), ("unreported", None)),
+    (("council-code", "codestral", "code", "qwen/qwen3.6-plus", {}),
+     ("diverted", "proxyd served qwen/qwen3.6-plus, a HOSTED model, for a local seat — "
+                  "the prompt left the box")),
+    (("council-max-thinking", "claude", "bridge", "claude-fable-5", {}), ("match", None)),
+    (("council-code", "codestral", "code", "Muse-Glimmer-30B-4bit", {}), ("match", None)),
+    (("council-finance", "grok", "grok", "grok-4.6", {}), ("match", None)),
+    (("council-spacial", "gemini", "agy", "gemini-3.7-flash-high", {}), ("match", None)),
+    (("council-heretic", "heretic", "cathedral", "Qwen3.8-27B-4bit-champion-ablated", _UNHEALTHY_H),
+     ("match", None)),
+    (("council-heretic", "heretic", "cathedral", "Qwen3.8-27B-4bit", _HEALTHY_H),
+     ("ambiguous", "served Qwen3.8-27B-4bit: weights council-heretic shares with its proxyd "
+                   "fallback — cannot prove which one answered")),
+    (("council-heretic", "heretic", "cathedral", "Qwen3.8-27B-4bit", None),
+     ("ambiguous", "served Qwen3.8-27B-4bit: weights council-heretic shares with its proxyd "
+                   "fallback — cannot prove which one answered")),
+    (("council-heretic", "heretic", "cathedral", "Qwen3.8-27B-4bit", _UNHEALTHY_H),
+     ("diverted", "served Qwen3.8-27B-4bit: weights council-heretic shares with its proxyd "
+                  "fallback, while proxyd /health reports council-heretic unhealthy "
+                  "(error_rate 100%) — a fallback answer")),
+    (("council-finance", "grok", "grok", "Qwen3.8-27B-4bit", {}),
+     ("diverted", "proxyd served Qwen3.8-27B-4bit (qwen), not a grok model")),
+    (("council-finance", "grok", "grok", "z-ai/glm-5.3", {}),
+     ("diverted", "proxyd served z-ai/glm-5.3 (hosted), not a grok model")),
+    (("council-finance", "grok", "grok", "mystery-model", {}), ("unrecognized", None)),
+    (("council-mlx", "qwen", "cathedral", "Qwen3.8-27B-4bit", {}), ("match", None)),
+]
+
+
+@pytest.mark.parametrize(("args", "expected"), _LEGACY_VERDICTS)
+def test_legacy_call_shape_gives_every_legacy_verdict_unchanged(
+    args: tuple[Any, ...], expected: tuple[str, str | None]
+) -> None:
+    # Green BEFORE and AFTER the header work: the five-argument call is untouched.
+    assert bs._provenance(*args) == expected
+
+
+@pytest.mark.parametrize(("args", "expected"), _LEGACY_VERDICTS)
+@pytest.mark.parametrize("blank", [None, "", "   "], ids=["absent", "empty", "blank"])
+def test_without_the_seated_header_every_legacy_verdict_is_unchanged(
+    args: tuple[Any, ...], expected: tuple[str, str | None], blank: str | None
+) -> None:
+    assert bs._provenance(*args, seated=blank, route_chain=blank) == expected
+
+
+def test_old_proxyd_answer_is_recorded_as_inferred(
+    full_instance_yaml: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # No x-sanctum-* headers at all: exactly the old verdict, and the record SAYS it is a guess.
+    proxy = FakeProxyd({"council-heretic": [answer("who knows", served=_SHARED)]},
+                       seats_health=_HEALTHY)
+    res = run_cli(["-s", "Cilghal", "--no-stream", "topic"], proxy, monkeypatch, full_instance_yaml)
+    assert res.exit_code == 0, res.stdout + res.stderr
+    cil = seat(json.loads(res.stdout), "Cilghal")
+    assert cil["outcome"] == "answered" and cil["provenance"] == "ambiguous"
+    assert cil["provenance_basis"] == "inferred"
+    assert cil["seated"] is None and cil["route_chain"] is None
+
+
+def test_json_rows_always_carry_the_attestation_fields(
+    full_instance_yaml: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    proxy = FakeProxyd({"council-max-thinking": [answer("x", served="claude-fable-5")],
+                        "council-finance": [http(500)], "council-mlx": [http(500)]})
+    res = run_cli(["-s", "Yoda,Mundi", "topic"], proxy, monkeypatch, full_instance_yaml)
+    for row in json.loads(res.stdout)["seats"]:
+        for k in ("seated", "route_chain", "provenance_basis"):
+            assert k in row, (row["seat"], k)
+    mundi = seat(json.loads(res.stdout), "Mundi")
+    assert mundi["provenance_basis"] is None       # no answer, no attestation: nothing established
+
+
+# — a strict 503: the seat is ABSENT, said so by name, and never re-fired —
+def test_strict_503_is_an_absent_seat_named_as_such_and_not_retried(
+    full_instance_yaml: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    proxy = FakeProxyd({"council-finance": [_strict_503("council-finance")],
+                        "council-mlx": [_strict_503("council-mlx")]})
+    res = run_cli(["-s", "Mundi", "topic"], proxy, monkeypatch, full_instance_yaml)
+    assert res.exit_code == 2
+    # ONE request per seat: the legacy 503 back-off retry must not fire on a strict 503
+    assert proxy.models_called() == ["council-finance", "council-mlx"]
+    mundi = seat(json.loads(res.stdout), "Mundi")
+    assert mundi["status"] == "absent" and mundi["outcome"] == "http_error"
+    assert mundi["response"] is None and mundi["degraded_response"] is None
+    assert "strict-seat failure" in mundi["error"] and "council-finance" in mundi["error"]
+    assert "rate-limited" not in mundi["error"]
+    # proxyd's own word that NOBODY answered is kept; there is no answer to judge
+    assert mundi["seated"] == "none" and mundi["route_chain"] == "council-finance > none"
+    assert mundi["provenance"] is None and mundi["provenance_basis"] is None
+    assert "strict" in res.stderr and "--allow-fallback would only buy a stand-in" in res.stderr
+
+
+def test_strict_503_on_the_streamed_heretic_falls_to_a_flagged_stand_in_once(
+    full_instance_yaml: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 09-20 under the new regime: the heretic 503s -> nothing answers in its name. The
+    # client's own council-mlx stand-in is asked once, flagged, and never counted.
+    proxy = FakeProxyd({"council-heretic": [_strict_503("council-heretic")],
+                        "council-mlx": [answer("qwen stand-in", served=_SHARED,
+                                               headers=_seated("council-mlx", "council-mlx"))]},
+                       seats_health=_HEALTHY)
+    res = run_cli(["-s", "Cilghal", "topic"], proxy, monkeypatch, full_instance_yaml)
+    assert res.exit_code == 2
+    assert proxy.models_called() == ["council-heretic", "council-mlx"]
+    payload = json.loads(res.stdout)
+    cil = seat(payload, "Cilghal")
+    assert cil["outcome"] == "fallback" and cil["response"] is None
+    assert cil["degraded_response"] == "qwen stand-in"
+    assert cil["seated"] == "council-mlx" and cil["provenance_basis"] == "attested"
+    assert "strict-seat failure" in cil["note"]       # WHY the home seat is missing survives
+    assert payload["diversity"]["own_voice_seats"] == []
+
+
+def test_a_503_without_the_seated_header_keeps_its_one_legacy_retry(
+    full_instance_yaml: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The old proxyd (and the new one's policy / USD-cap 503s) send no x-sanctum-seated.
+    proxy = FakeProxyd({"council-finance": [http(503, "busy"), answer("numbers", served="grok-4.6")]})
+    res = run_cli(["-s", "Mundi", "topic"], proxy, monkeypatch, full_instance_yaml)
+    assert res.exit_code == 0, res.stdout + res.stderr
+    assert proxy.models_called() == ["council-finance", "council-finance"]
+    proxy = FakeProxyd({"council-finance": [http(503, "busy")], "council-mlx": [http(503, "busy")]})
+    res = run_cli(["-s", "Mundi", "topic"], proxy, monkeypatch, full_instance_yaml)
+    err = seat(json.loads(res.stdout), "Mundi")["error"]
+    assert "rate-limited (503)" in err and "strict-seat" not in err
+
+
+def test_seated_none_503_is_only_a_strict_failure_when_strictness_was_asked_for(
+    full_instance_yaml: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    proxy = FakeProxyd({"council-finance": [_strict_503("council-finance"),
+                                            answer("numbers", served="grok-4.6")]})
+    res = run_cli(["-s", "Mundi", "--allow-fallback", "topic"], proxy, monkeypatch, full_instance_yaml)
+    assert res.exit_code == 0, res.stdout + res.stderr
+    assert proxy.models_called() == ["council-finance", "council-finance"]   # legacy transient retry
+
+
+@pytest.mark.parametrize("hdrs", [None, _seated("none", "council-finance", "council-finance")],
+                         ids=["old-proxyd", "new-proxyd"])
+def test_413_is_never_retried(
+    hdrs: dict[str, str] | None, full_instance_yaml: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A too-large prompt is too large every time (Qui-Gon 413 storm, 2026-08-18).
+    proxy = FakeProxyd({"council-finance": [http(413, "context too large", headers=hdrs)],
+                        "council-mlx": [http(413, "context too large")]})
+    res = run_cli(["-s", "Mundi", "topic"], proxy, monkeypatch, full_instance_yaml)
+    assert res.exit_code == 2
+    assert proxy.models_called() == ["council-finance", "council-mlx"]
+    assert "HTTP 413" in seat(json.loads(res.stdout), "Mundi")["error"]

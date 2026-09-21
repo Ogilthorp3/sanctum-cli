@@ -296,6 +296,15 @@ def brainstorm_top(
     wait_max: Annotated[
         int, typer.Option("--wait-max", min=0, help="Give up on --wait-load after N seconds.")
     ] = 3600,
+    allow_fallback: Annotated[
+        bool,
+        typer.Option(
+            "--allow-fallback",
+            help="Do NOT send x-sanctum-no-fallback: let proxyd answer from its fallback ladder. "
+            "Almost never what you want — a stand-in's answer is never counted as the seat's "
+            "voice anyway, and a hosted rung means the prompt left the box.",
+        ),
+    ] = False,
 ) -> None:
     try:
         brainstorm_cmd.brainstorm_command(
@@ -318,6 +327,7 @@ def brainstorm_top(
             wait_load=wait_load,
             load_host=load_host,
             wait_max=wait_max,
+            allow_fallback=allow_fallback,
         )
     except SanctumError as exc:
         _report(exc)

@@ -18,14 +18,41 @@ collapse toward homogeneity *impossible to miss*:
     served from another family (a fallback rung, a hosted model) is ``diverted``.
     Neither is counted as that seat's voice.
 
+WHO ANSWERED is proxyd's word, not the client's guess (2026-09-20 incident:
+council-heretic returned 503 and proxyd answered from council-local-think — HTTP 200
+and the SAME model name in the body, so the client recorded the seat it ASKED, not
+the model that ANSWERED):
+
+  - Every seat request carries ``x-sanctum-no-fallback: 1`` (the client's own flagged
+    Qwen fallback request included): proxyd then dials ONLY the named seat — no
+    router rewrite, no fallback ladder — and answers HTTP 503 with
+    ``x-sanctum-seated: none`` when that seat fails. That strict 503 is the seat
+    being ABSENT (reported as a "strict-seat failure") and is never re-sent: the
+    legacy 503 back-off retry would only stampede a seat that has just failed. An
+    older proxyd ignores the request header. ``--allow-fallback`` omits it — almost
+    never what you want: a stand-in's answer is never counted as the seat's voice
+    anyway, and a hosted rung means the prompt LEFT THE BOX.
+  - proxyd's ``x-sanctum-seated`` / ``x-sanctum-route-chain`` response headers are the
+    authoritative provenance signal and are read FIRST: seated == the seat asked ->
+    ``match`` (proxyd-attested); anything else, ``none`` included -> ``diverted``,
+    naming the seat that answered and the route. Only when the header is ABSENT (an
+    older proxyd) is provenance inferred from the body's ``model`` field and proxyd
+    /health, exactly as before — where a seat that shares weights with its fallback
+    can only ever read ``ambiguous``.
+  - Every JSON seat row says which it was: ``provenance_basis`` = ``attested`` |
+    ``inferred`` (``null`` when there was nothing to judge), next to ``seated`` and
+    ``route_chain`` — so a saved council record shows which answers were PROVEN
+    genuine and which were only believed to be.
+
 Roster (aligned with OpenClaw agents + proxyd):
   Yoda=max-thinking (Fable), Windu=spacial (Gemini), Qui-Gon=code (Glimmer :3301),
   Mundi=finance (Grok), Cilghal=heretic (27B :6669), Jocasta+Mothma=brain (Opus 5).
 
 Seats route through the house smart-router *proxyd* (``:4040``), which owns auth
 and per-seat backend routing. A seat whose model fails or returns empty degrades
-to the always-on local Qwen fallback — but only as a flagged last resort, and a
-duplicate family is never counted as new diversity.
+to the always-on local Qwen fallback — the CLIENT's own, explicit second request,
+never proxyd's silent ladder — but only as a flagged last resort, and a duplicate
+family is never counted as new diversity.
 
 Scheduling follows the backends, not the roster (2026-09-19 incident, where
 every Yoda attempt and most Cilghal attempts died to the CLIENT's own clock):
@@ -36,10 +63,11 @@ every Yoda attempt and most Cilghal attempts died to the CLIENT's own clock):
     guarantees a ReadTimeout on a request the server is still working. By default
     there is no operator ceiling (``--timeout 0``).
   - The on-box backends (the cathedral :1337/:6669 and the code seat :3301) each
-    generate one request at a time, and proxyd's ladders move requests between
-    them (council-code -> council-mlx, council-heretic -> council-local-think ->
-    council-code), so they are ONE serialisation domain: the client never has two
-    of its own requests in flight there. Everything else runs in parallel.
+    generate one request at a time, and proxyd's ladders (an older proxyd, or
+    ``--allow-fallback``) move requests between them (council-code -> council-mlx,
+    council-heretic -> council-local-think -> council-code), so they are ONE
+    serialisation domain: the client never has two of its own requests in flight
+    there. Everything else runs in parallel.
   - Within one run a timeout is never re-sent: on an on-box backend the first
     request keeps generating after a disconnect, so a re-send only queues behind
     it. ``--repoll`` (an explicit opt-in) re-asks a timed-out seat with DOUBLE the
@@ -102,6 +130,17 @@ DEFAULT_CACERT = Path(
 FALLBACK_MODEL = os.environ.get("COUNCIL_FALLBACK_MODEL", "council-mlx")
 CHAT_PATH = "/v1/chat/completions"
 HEALTH_PATH = "/health"
+
+# ─── Seat attestation (proxyd /v1/chat/completions, newer builds) ───
+# Request, opt-in: "this seat or an error" — proxyd dials ONLY the named seat (no router
+# rewrite, no fallback ladder) and answers 503 + `x-sanctum-seated: none` when it fails.
+# An older proxyd ignores it.
+NO_FALLBACK_HEADER = "x-sanctum-no-fallback"
+# Response, always set by a newer proxyd: the seat that ACTUALLY answered (or the literal
+# "none"), and the hops walked (failed seats, then the answering one, joined by " > ").
+SEATED_HEADER = "x-sanctum-seated"
+ROUTE_CHAIN_HEADER = "x-sanctum-route-chain"
+SEATED_NONE = "none"
 
 
 # ─── Model-family resolution (neurodiversity is computed on FAMILY, not strings) ───
@@ -375,6 +414,8 @@ THINKING_BUDGET_ESCALATED = int(os.environ.get("COUNCIL_THINKING_ESCALATED", "61
 # NOT 502: on /v1/chat/completions proxyd returns 502 only after walking the seat's
 # WHOLE ladder ("ALL SEATS FAILED ...", proxy.rs) and paging Force Flow — a retry
 # re-walks every rung (cathedral included) and pages again.
+# NOT a STRICT 503 either (`_is_strict_seat_failure`): we asked for one seat only, proxyd
+# says nobody answered — that is the seat's verdict, and a re-send is a stampede.
 _TRANSIENT_STATUS = frozenset({429, 503, 504})
 RETRY_BACKOFF_CAP_S = float(os.environ.get("COUNCIL_RETRY_BACKOFF_CAP_S", "5"))
 # httpx applies ONE scalar to connect, read, write and pool alike; split them so a
@@ -454,6 +495,9 @@ class SeatResult:
     elapsed_s: float | None = None
     attempts: int = 0
     round: int = 0             # 0 = first fan-out; N = re-poll round N
+    seated: str | None = None         # proxyd's x-sanctum-seated: the seat that answered / "none"
+    route_chain: str | None = None    # proxyd's x-sanctum-route-chain
+    provenance_basis: str | None = None   # attested (proxyd said so) | inferred (heuristics)
 
 
 @dataclass(frozen=True)
@@ -482,6 +526,7 @@ class AskOptions:
     health: Mapping[str, Any] | None = None       # proxyd /health "seats" snapshot
     lane_locks: Mapping[str, threading.Semaphore] | None = None   # keyed by _lock_key
     held_lock: str | None = None                  # the lock key the caller already holds
+    allow_fallback: bool = False                  # True = do NOT send x-sanctum-no-fallback
 
 
 @dataclass(frozen=True)
@@ -495,6 +540,7 @@ class RunOptions:
     health_wait_s: float = DROP_HEALTH_WAIT_S
     truncation_retry: bool = True
     tokens_by_seat: Mapping[str, int] = field(default_factory=dict)
+    allow_fallback: bool = False          # --allow-fallback: let proxyd walk its ladder
 
 
 # ─── low-level helpers (unit-testable, patchable) ───
@@ -597,6 +643,38 @@ class _Reply:
     served_model: str | None
     reasoning: int
     complete: bool = True
+    seated: str | None = None        # x-sanctum-seated (None = an older proxyd: not reported)
+    route_chain: str | None = None   # x-sanctum-route-chain
+
+
+def _header_value(raw: Any) -> str | None:
+    """A header value, stripped; absent / non-string / blank -> None."""
+    return (raw.strip() or None) if isinstance(raw, str) else None
+
+
+def _route_headers(headers: Any) -> tuple[str | None, str | None]:
+    """(seated, route_chain) from a response's headers. Tolerates a missing header
+    set and plain-dict test doubles; both are None against an older proxyd."""
+    get = getattr(headers, "get", None)
+    if not callable(get):
+        return None, None
+    return _header_value(get(SEATED_HEADER)), _header_value(get(ROUTE_CHAIN_HEADER))
+
+
+def _request_headers(allow_fallback: bool) -> dict[str, str]:
+    """Per-request headers for one seat: strict ("this seat or a 503") unless the
+    operator passed --allow-fallback."""
+    return {} if allow_fallback else {NO_FALLBACK_HEADER: "1"}
+
+
+def _seated_none(seated: str | None) -> bool:
+    return seated is not None and seated.lower() == SEATED_NONE
+
+
+def _is_strict_seat_failure(code: int, seated: str | None, sent_strict: bool) -> bool:
+    """proxyd's answer to a strict request whose one seat failed: 503 + seated "none".
+    Only when WE asked for strictness — any other 503 keeps its legacy handling."""
+    return sent_strict and code == 503 and _seated_none(seated)
 
 
 class _BudgetExpiredError(Exception):
@@ -617,38 +695,45 @@ class _StreamCutError(Exception):
         self.partial = partial
 
 
-def _reply_from_json(data: dict[str, Any]) -> _Reply:
+def _reply_from_json(data: dict[str, Any], headers: Any = None) -> _Reply:
     choices = data.get("choices") or []
     first = choices[0] if choices else {}
     content = (first.get("message") or {}).get("content", "") or ""
     served = data.get("model")
+    seated, route_chain = _route_headers(headers)
     return _Reply(
         content=content,
         finish_reason=first.get("finish_reason"),
         served_model=served if isinstance(served, str) and served else None,
         reasoning=_reasoning_tokens(data),
+        seated=seated,
+        route_chain=route_chain,
     )
 
 
-def _post_json(client: Any, body: dict[str, Any], read_s: float) -> _Reply:
-    resp = client.post(CHAT_PATH, json=body, timeout=_http_timeout(read_s))
+def _post_json(client: Any, body: dict[str, Any], read_s: float,
+               headers: Mapping[str, str] | None = None) -> _Reply:
+    resp = client.post(CHAT_PATH, json=body, timeout=_http_timeout(read_s), headers=dict(headers or {}))
     resp.raise_for_status()
-    return _reply_from_json(resp.json())
+    return _reply_from_json(resp.json(), getattr(resp, "headers", None))
 
 
-def _post_stream(client: Any, body: dict[str, Any], read_s: float, deadline: float) -> _Reply:
+def _post_stream(client: Any, body: dict[str, Any], read_s: float, deadline: float,
+                 headers: Mapping[str, str] | None = None) -> _Reply:
     """SSE read of one completion. proxyd passes the upstream stream through; the
     cathedral emits a keep-alive delta every 15 s during queue/prefill, so a long
     generation never looks idle — the seat's wall budget is enforced here, between
-    events. A JSON reply to a stream request (proxyd's gap guard) is parsed as JSON."""
+    events. A JSON reply to a stream request (proxyd's gap guard) is parsed as JSON.
+    proxyd's seat headers arrive with the status line, before the first event."""
     with client.stream("POST", CHAT_PATH, json={**body, "stream": True},
-                       timeout=_http_timeout(read_s)) as resp:
+                       timeout=_http_timeout(read_s), headers=dict(headers or {})) as resp:
         if resp.status_code >= 400:
             resp.read()
             resp.raise_for_status()
         if "text/event-stream" not in resp.headers.get("content-type", ""):
             resp.read()
-            return _reply_from_json(resp.json())
+            return _reply_from_json(resp.json(), resp.headers)
+        seated, route_chain = _route_headers(resp.headers)
         parts: list[str] = []
         finish: str | None = None
         served: str | None = None
@@ -684,7 +769,8 @@ def _post_stream(client: Any, body: dict[str, Any], read_s: float, deadline: flo
                     finish = choice["finish_reason"]
         if not done and finish is None:
             raise _StreamCutError("".join(parts))
-        return _Reply("".join(parts), finish, served, _reasoning_tokens({"usage": usage}))
+        return _Reply("".join(parts), finish, served, _reasoning_tokens({"usage": usage}),
+                      seated=seated, route_chain=route_chain)
 
 
 def _probe_health(client: Any) -> dict[str, Any] | None:
@@ -732,10 +818,47 @@ _PERMANENT_CONNECT_TOKENS = (
 )
 
 
+def _attested_provenance(
+    seat_model: str, designed: str, lane: str, served: str | None, seated: str, route_chain: str | None
+) -> tuple[str, str]:
+    """Provenance from proxyd's own word (``x-sanctum-seated``): the seat that answered
+    either IS the one asked, or it is not. The body's ``model`` field no longer decides
+    anything — it cannot tell a seat from a fallback that shares its weights — but a
+    body that contradicts a ``match`` is written into the note rather than dropped."""
+    route = f"route {route_chain}" if route_chain else "no route chain reported"
+    hosted = bool(served) and lane in _LOCAL_LANES and "/" in (served or "")
+    if seated == seat_model:
+        note = f"proxyd-attested: {seat_model} answered this request itself (x-sanctum-seated; {route})"
+        fam = _family_of(served) if served else designed
+        if hosted:
+            note += (f" — but its backend reported {served}, a HOSTED model, on a local seat: check "
+                     "this seat's proxyd entry, the prompt may have left the box")
+        elif fam != designed and _real_family(fam) and fam not in _SHARED_WEIGHTS.get(designed, frozenset()):
+            note += (f" — but its backend reported {served} ({fam}), not a {designed} model: check "
+                     "this seat's proxyd entry")
+        return "match", note
+    if _seated_none(seated):
+        note = f"proxyd attests that no seat answered {seat_model} (x-sanctum-seated: none; {route})"
+    else:
+        note = (f"proxyd attests that {seated} answered, not {seat_model} (x-sanctum-seated; {route}) "
+                "— a stand-in, not this seat's voice")
+    if hosted:
+        note += f"; it served {served}, a HOSTED model, for a local seat — the prompt left the box"
+    return "diverted", note
+
+
 def _provenance(
-    seat_model: str, designed: str, lane: str, served: str | None, health: Mapping[str, Any] | None
+    seat_model: str, designed: str, lane: str, served: str | None, health: Mapping[str, Any] | None,
+    *, seated: str | None = None, route_chain: str | None = None,
 ) -> tuple[str, str | None]:
-    """Did the answer come from the seat's own family? Returns (verdict, note)."""
+    """Did the answer come from the seat's own family? Returns (verdict, note).
+
+    proxyd's ``x-sanctum-seated`` is read FIRST and is final (`_attested_provenance`).
+    ABSENT (an older proxyd) -> the heuristics below, unchanged: the body's ``model``
+    field plus proxyd /health."""
+    seated = _header_value(seated)
+    if seated is not None:
+        return _attested_provenance(seat_model, designed, lane, served, seated, _header_value(route_chain))
     if not served:
         h = (health or {}).get(seat_model)
         if isinstance(h, dict) and h.get("healthy") is False:
@@ -774,6 +897,8 @@ class _Attempt:
     partial: str | None = None
     starved: bool = False
     ladder_tried_fallback: bool = False   # proxyd's 502 ladder already included FALLBACK_MODEL
+    seated: str | None = None             # x-sanctum-seated on the deciding response
+    route_chain: str | None = None        # x-sanctum-route-chain on the deciding response
 
 
 def _ladder_tried(text: str, model: str) -> bool:
@@ -795,10 +920,12 @@ def _ask(
 ) -> SeatResult:
     """Resolve one seat. ALWAYS returns a SeatResult — never raises (a raised _ask
     would nuke the whole fan-out). Chain: home model (thinking-floored, one same-model
-    escalation on starvation, one bounded retry on transient status, one retry after
-    a transport drop once /health answers, one larger-cap retry on truncation for
-    non-serial lanes) -> Qwen fallback (flagged) -> ABSENT. Every non-home answer is
-    flagged DEGRADED; no answer is ABSENT with the verbatim error preserved."""
+    escalation on starvation, one bounded retry on transient status — never on a STRICT
+    503 —, one retry after a transport drop once /health answers, one larger-cap retry
+    on truncation for non-serial lanes) -> Qwen fallback (flagged) -> ABSENT. Every
+    non-home answer is flagged DEGRADED; no answer is ABSENT with the verbatim error
+    preserved. Every request is strict (``x-sanctum-no-fallback: 1``) unless
+    ``opts.allow_fallback``."""
     opts = opts or AskOptions()
     home_family = _CANONICAL_SEAT_FAMILY.get(seat, SEATS.get(seat, {}).get("family", _family_of(model)))
     designed = SEATS.get(seat, {}).get("family", _family_of(model))
@@ -818,6 +945,8 @@ def _ask(
         empty_retry_used = False
         drops = 0
         body = _body(candidate, lens, topic, tokens)
+        sent_strict = not opts.allow_fallback
+        req_headers = _request_headers(opts.allow_fallback)
         while True:
             remaining = _remaining()
             if remaining <= 0:
@@ -827,11 +956,17 @@ def _ask(
             attempts += 1
             drop: BaseException
             try:
-                reply = (_post_stream(client, body, remaining, deadline) if opts.stream
-                         else _post_json(client, body, remaining))
+                reply = (_post_stream(client, body, remaining, deadline, req_headers) if opts.stream
+                         else _post_json(client, body, remaining, req_headers))
             except httpx.HTTPStatusError as exc:
                 code = exc.response.status_code if exc.response is not None else 0
-                if code in _TRANSIENT_STATUS and not transient_used and _remaining() > 1:
+                seated, route_chain = _route_headers(
+                    exc.response.headers if exc.response is not None else None)
+                # We asked for THIS seat only and proxyd says nobody answered: the seat's
+                # own verdict, not a transient to wait out — never re-sent.
+                strict_failure = _is_strict_seat_failure(code, seated, sent_strict)
+                if (code in _TRANSIENT_STATUS and not strict_failure and not transient_used
+                        and _remaining() > 1):
                     transient_used = True
                     _sleep(_retry_after_seconds(exc))
                     continue
@@ -842,8 +977,13 @@ def _ask(
                 label = f"rate-limited ({code})" if code in (429, 503) else f"HTTP {code}"
                 if code == 502 and "ALL SEATS FAILED" in full:
                     label = "HTTP 502 — proxyd walked this seat's whole ladder, every rung failed (not re-walked)"
+                if strict_failure:
+                    label = (f"strict-seat failure (HTTP 503) — proxyd dialled ONLY {candidate} "
+                             f"({NO_FALLBACK_HEADER}: 1) and it failed; no stand-in was served"
+                             f"{' [route ' + route_chain + ']' if route_chain else ''}; not re-sent")
                 return _Attempt(Outcome.HTTP_ERROR, error=f"{label}{': ' + detail if detail else ''}",
-                                ladder_tried_fallback=code == 502 and _ladder_tried(full, FALLBACK_MODEL))
+                                ladder_tried_fallback=code == 502 and _ladder_tried(full, FALLBACK_MODEL),
+                                seated=seated, route_chain=route_chain)
             except _BudgetExpiredError as exc:
                 return _Attempt(Outcome.TIMEOUT, partial=exc.partial or None, error=(
                     f"client budget expired mid-stream: no complete answer within {budget:.0f}s "
@@ -869,18 +1009,20 @@ def _ask(
                 return _Attempt(Outcome.ERROR, error=f"{type(exc).__name__}: {exc}")
             else:
                 content = reply.content.strip()
+                who: dict[str, Any] = {"seated": reply.seated, "route_chain": reply.route_chain}
                 if content:
                     if reply.finish_reason == "length":
                         return _Attempt(Outcome.TRUNCATED, served_model=reply.served_model,
                                         finish_reason="length", partial=content, error=(
                                             f"truncated at the {tokens}-token cap "
-                                            "(finish_reason=length) — not a complete answer"))
+                                            "(finish_reason=length) — not a complete answer"), **who)
                     return _Attempt(Outcome.ANSWERED, content=content, served_model=reply.served_model,
-                                    finish_reason=reply.finish_reason)
+                                    finish_reason=reply.finish_reason, **who)
                 if reply.reasoning > 0:   # thinking starvation — the load-bearing signal
                     return _Attempt(Outcome.EMPTY, served_model=reply.served_model, starved=True,
                                     finish_reason=reply.finish_reason,
-                                    error=f"empty (thinking starvation, reasoning={reply.reasoning})")
+                                    error=f"empty (thinking starvation, reasoning={reply.reasoning})",
+                                    **who)
                 err = f"empty response from {candidate} (finish={reply.finish_reason})"
                 # codestral empties ~1/3 of the time — one quick own-model retry
                 if _family_of(candidate) == "codestral" and not empty_retry_used and _remaining() > 1:
@@ -888,7 +1030,7 @@ def _ask(
                     _sleep(min(0.5, RETRY_BACKOFF_CAP_S))
                     continue
                 return _Attempt(Outcome.EMPTY, served_model=reply.served_model,
-                                finish_reason=reply.finish_reason, error=err)
+                                finish_reason=reply.finish_reason, error=err, **who)
 
             # ── transport drop: the connection died, the seat did not answer ──
             msg = f"{type(drop).__name__}: {drop}"
@@ -917,25 +1059,43 @@ def _ask(
                 f"proxy-tunnel-watchdog restarting the ssh tunnel does this); "
                 f"{drops} retry(ies) after /health"))
 
-    def _result(a: _Attempt, candidate: str, *, fallback: bool) -> SeatResult:
+    def _result(a: _Attempt, candidate: str, *, fallback: bool,
+                home_error: str | None = None) -> SeatResult:
         elapsed = round(time.monotonic() - started, 1)
+        # the SAME predicate `_provenance` branches on, so the recorded basis cannot
+        # disagree with how the verdict was actually reached
+        attested = _header_value(a.seated) is not None
         common: dict[str, Any] = {
             "served_model": a.served_model, "finish_reason": a.finish_reason, "lane": lane,
             "budget_s": round(budget, 1), "elapsed_s": elapsed, "attempts": attempts,
+            "seated": a.seated, "route_chain": a.route_chain,
         }
         if a.content is None:
+            # no answer to judge (provenance and its basis stay None) — but proxyd's word
+            # on who handled the request, "none" included, is kept in seated / route_chain
             return SeatResult(seat, model, None, None, a.error, "absent", Status.ABSENT, True,
                               home_family, outcome=a.outcome.value, partial=a.partial, **common)
         want = FALLBACK_FAMILY if fallback else designed
         verdict, note = _provenance(candidate, want, _lane_of(candidate) if fallback else lane,
-                                    a.served_model, opts.health)
+                                    a.served_model, opts.health,
+                                    seated=a.seated, route_chain=a.route_chain)
+        common["provenance_basis"] = "attested" if attested else "inferred"
         if verdict == "diverted":
-            # an unreported model is NOT the candidate's family — never credit it one
-            fam = _family_of(a.served_model) if a.served_model else "unknown:unreported"
-            return SeatResult(seat, model, a.served_model, a.content, None, fam,
+            # an unreported model is NOT the candidate's family — never credit it one;
+            # the seat proxyd NAMES as having answered may be credited its own, and is
+            # the proven `model_used` (the body's name stays in `served_model`)
+            stand_in = a.seated if attested and not _seated_none(a.seated) else None
+            if a.served_model:
+                fam = _family_of(a.served_model)
+            else:
+                fam = _family_of(stand_in) if stand_in else "unknown:unreported"
+            return SeatResult(seat, model, stand_in or a.served_model, a.content, None, fam,
                               Status.DEGRADED, True, home_family, outcome=Outcome.DIVERTED.value,
                               provenance=verdict, note=note, **common)
         if fallback:
+            # WHY the seat's own model is missing must survive a successful stand-in
+            if home_error:
+                note = "; ".join(n for n in (f"home seat {model} failed: {home_error}", note) if n)
             return SeatResult(seat, model, candidate, a.content, None, FALLBACK_FAMILY,
                               Status.DEGRADED, True, home_family, outcome=Outcome.FALLBACK.value,
                               provenance=verdict, note=note, **common)
@@ -992,7 +1152,7 @@ def _ask(
                     if lock:
                         lock.release()
                 if f.content:
-                    return _result(f, FALLBACK_MODEL, fallback=True)
+                    return _result(f, FALLBACK_MODEL, fallback=True, home_error=a.error)
                 a = dataclasses.replace(a, error=f"{a.error}; fallback {FALLBACK_MODEL}: {f.error}")
             else:
                 a = dataclasses.replace(a, error=f"{a.error}; fallback {FALLBACK_MODEL} skipped "
@@ -1151,6 +1311,7 @@ def _emit_seat_status(results: list[SeatResult]) -> None:
                   else "")
         bits = [f"{r.seat}: {o.value.upper()}", f"lane={r.lane}" if r.lane else "", timing,
                 f"served={r.served_model}" if r.served_model else "",
+                f"seated={r.seated}" if r.seated else "",
                 f"attempts={r.attempts}" if r.attempts else "",
                 f"round={r.round}" if r.round else ""]
         line = "  ".join(b for b in bits if b)
@@ -1213,6 +1374,11 @@ def _failure_fix(results: list[SeatResult]) -> str:
     if outcomes & {Outcome.DIVERTED, Outcome.FALLBACK}:
         hints.append("a stand-in answered for a seat whose own model failed (proxyd fallback rung or the "
                      "client's council-mlx) — check that seat's backend in proxyd /health")
+    if any(_outcome_of(r) is Outcome.HTTP_ERROR and _seated_none(r.seated) for r in results):
+        hints.append("a seat failed STRICTLY (proxyd dialled only that seat and answered 503, "
+                     "x-sanctum-seated: none) — its own backend is down or refusing: check it in "
+                     "proxyd /health and proxyd.log; --allow-fallback would only buy a stand-in, "
+                     "which is never counted")
     if outcomes & {Outcome.HTTP_ERROR, Outcome.EMPTY, Outcome.ERROR}:
         hints.append("check proxyd :4040 seat routing and the *_MODEL env overrides")
     return "; ".join(hints) or "check proxyd :4040 seat routing and the *_MODEL env overrides"
@@ -1316,6 +1482,7 @@ def _summon(
                         stream=_seat_streams(seat, run.stream), transport_retries=run.transport_retries,
                         health_wait_s=run.health_wait_s, truncation_retry=run.truncation_retry,
                         health=health, lane_locks=locks, held_lock=key,
+                        allow_fallback=run.allow_fallback,
                     )
                     return _ask(client, seat, SEATS[seat]["model"], SEATS[seat]["lens"], text,
                                 run.tokens_by_seat.get(seat, max_tokens),
@@ -1402,7 +1569,9 @@ def _seat_json(r: SeatResult) -> dict[str, Any]:
     """One seat row. ``response`` holds ONLY the seat's own, complete answer — the DF2
     senders (and anything else) count a non-empty ``response`` as "this seat answered".
     A stand-in's text (client fallback / proxyd diversion) is in ``degraded_response``;
-    a cut answer's text is in ``partial_response``."""
+    a cut answer's text is in ``partial_response``. ``provenance_basis`` says whether
+    ``provenance`` was PROVEN (``attested``: proxyd's x-sanctum-seated, echoed in
+    ``seated`` / ``route_chain``) or only ``inferred`` from the body and /health."""
     own = _outcome_of(r) is Outcome.ANSWERED
     return {
         "seat": r.seat, "model_attempted": r.model_attempted, "model_used": r.model_used,
@@ -1413,6 +1582,7 @@ def _seat_json(r: SeatResult) -> dict[str, Any]:
         "finish_reason": r.finish_reason, "partial_response": r.partial,
         "provenance": r.provenance, "note": r.note, "lane": r.lane, "budget_s": r.budget_s,
         "elapsed_s": r.elapsed_s, "attempts": r.attempts, "round": r.round,
+        "seated": r.seated, "route_chain": r.route_chain, "provenance_basis": r.provenance_basis,
     }
 
 
@@ -1470,6 +1640,13 @@ def brainstorm_command(
     wait_max: Annotated[
         int, typer.Option("--wait-max", min=0, help="Give up on --wait-load after N seconds.")
     ] = 3600,
+    allow_fallback: Annotated[
+        bool, typer.Option("--allow-fallback",
+                           help="Do NOT send x-sanctum-no-fallback: let proxyd answer from its fallback "
+                                "ladder. Almost never what you want — a stand-in's answer is never "
+                                "counted as the seat's voice anyway, and a hosted rung means the prompt "
+                                "left the box.")
+    ] = False,
 ) -> None:
     """Convene the heterogeneous council and print each Jedi's take."""
     haus_required("council")
@@ -1488,7 +1665,8 @@ def brainstorm_command(
         )
 
     run = RunOptions(stream=stream, concurrency=concurrency,
-                     seat_timeout=float(seat_timeout) if seat_timeout else None)
+                     seat_timeout=float(seat_timeout) if seat_timeout else None,
+                     allow_fallback=allow_fallback)
     tokens_by_seat = dict.fromkeys(chosen, max_tokens)
     rounds_used = 0
 
@@ -1578,6 +1756,7 @@ def brainstorm_command(
                 "stream": stream, "streamed": {s: _seat_streams(s, stream) for s in chosen},
                 "concurrency": concurrency, "require_all": require_all,
                 "repoll": repoll, "repoll_rounds_used": rounds_used,
+                "allow_fallback": allow_fallback,
                 "budgets_s": {s: _seat_budget(s, float(timeout), run.seat_timeout) for s in chosen},
                 "lanes": {s: _seat_lane(s) for s in chosen},
             },
