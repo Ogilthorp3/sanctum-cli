@@ -577,6 +577,22 @@ def test_repoll_gives_a_truncated_seat_room_to_finish(
                   proxy, monkeypatch, full_instance_yaml)
     assert res.exit_code == 0, res.stdout + res.stderr
     assert seat(json.loads(res.stdout), "Qui-Gon")["response"] == "complete"
+    # Qui-Gon is a thinking seat (2026-09-20): it starts at the thinking floor, and the
+    # re-poll must give it MORE than that — never the doubled CLI cap, which is less.
+    sent = [c["max_tokens"] for c in proxy.calls]
+    assert sent == [bs.THINKING_BUDGET_FLOOR, bs._bumped_tokens(bs.THINKING_BUDGET_FLOOR)]
+    assert sent[1] > sent[0] > 600
+
+
+def test_repoll_doubles_the_cli_cap_for_a_seat_that_does_not_think(
+    full_instance_yaml: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    proxy = FakeProxyd({"council-finance": [answer("cut", finish="length"),
+                                            answer("complete", served="grok-4.6")]})
+    res = run_cli(["-s", "Mundi", "-t", "600", "--repoll", "1", "topic"],
+                  proxy, monkeypatch, full_instance_yaml)
+    assert res.exit_code == 0, res.stdout + res.stderr
+    assert seat(json.loads(res.stdout), "Mundi")["response"] == "complete"
     assert [c["max_tokens"] for c in proxy.calls] == [600, 1200]
 
 

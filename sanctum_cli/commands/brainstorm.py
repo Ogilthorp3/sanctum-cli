@@ -405,8 +405,11 @@ SEAT_TIMEOUT_FLOOR = 30.0
 
 
 # ─── Voice-preservation tuning (env-overridable where noted) ───
+# Qui-Gon joined Windu on 2026-09-20: Glimmer reasons before it answers, does NOT report
+# reasoning tokens, and at the default 900 cap it spent the whole budget thinking — the
+# live seven-seat poll got `content: ""`, finish=length, twice, and then a stand-in.
 THINKING_SEATS = frozenset(
-    s.strip() for s in os.environ.get("COUNCIL_THINKING_SEATS", "Windu").split(",") if s.strip()
+    s.strip() for s in os.environ.get("COUNCIL_THINKING_SEATS", "Windu,Qui-Gon").split(",") if s.strip()
 )
 THINKING_BUDGET_FLOOR = int(os.environ.get("COUNCIL_THINKING_FLOOR", "3072"))
 THINKING_BUDGET_ESCALATED = int(os.environ.get("COUNCIL_THINKING_ESCALATED", "6144"))
@@ -1027,11 +1030,16 @@ def _ask(
                                             "(finish_reason=length) — not a complete answer"), **who)
                     return _Attempt(Outcome.ANSWERED, content=content, served_model=reply.served_model,
                                     finish_reason=reply.finish_reason, **who)
-                if reply.reasoning > 0:   # thinking starvation — the load-bearing signal
+                # thinking starvation — the load-bearing signal. Two ways to see it: the
+                # backend reports reasoning tokens, or it reports nothing but the WHOLE cap
+                # was consumed with no visible text (finish=length + empty). The second is
+                # how a backend that hides its reasoning counter (Glimmer) starves.
+                if reply.reasoning > 0 or reply.finish_reason == "length":
+                    seen = (f"reasoning={reply.reasoning}" if reply.reasoning > 0
+                            else f"the whole {tokens}-token cap was spent with no visible text")
                     return _Attempt(Outcome.EMPTY, served_model=reply.served_model, starved=True,
                                     finish_reason=reply.finish_reason,
-                                    error=f"empty (thinking starvation, reasoning={reply.reasoning})",
-                                    **who)
+                                    error=f"empty (thinking starvation, {seen})", **who)
                 err = f"empty response from {candidate} (finish={reply.finish_reason})"
                 # codestral empties ~1/3 of the time — one quick own-model retry
                 if _family_of(candidate) == "codestral" and not empty_retry_used and _remaining() > 1:
@@ -1112,8 +1120,7 @@ def _ask(
                           None, outcome=Outcome.ANSWERED.value, provenance=verdict, note=note, **common)
 
     try:
-        is_thinking = seat in THINKING_SEATS
-        tokens = max(max_tokens, THINKING_BUDGET_FLOOR) if is_thinking else max_tokens
+        tokens = _effective_tokens(seat, max_tokens)
 
         # 1. home model
         a = _try(model, tokens)
@@ -1199,6 +1206,12 @@ def _rank(r: SeatResult) -> int:
 def _prefer(old: SeatResult, new: SeatResult) -> SeatResult:
     """Keep the better of two results for one seat (ties go to the newer one)."""
     return new if _rank(new) >= _rank(old) else old
+
+
+def _effective_tokens(seat: str, max_tokens: int) -> int:
+    """The completion cap a seat is actually sent: a thinking seat never runs below its
+    floor, whatever the CLI cap says. One definition — `_ask` and the re-poll both use it."""
+    return max(max_tokens, THINKING_BUDGET_FLOOR) if seat in THINKING_SEATS else max_tokens
 
 
 def _bumped_tokens(tokens: int) -> int:
@@ -1712,7 +1725,11 @@ def brainstorm_command(
                     continue
                 _gate()
                 if _outcome_of(prev) is Outcome.TRUNCATED:
-                    tokens_by_seat[prev.seat] = _bumped_tokens(tokens_by_seat[prev.seat])
+                    # bump from what the seat was REALLY given: a thinking seat already ran at
+                    # its floor, so doubling the CLI cap (600 -> 1200) would hand it LESS room
+                    # than the attempt that was just truncated.
+                    tokens_by_seat[prev.seat] = _bumped_tokens(
+                        _effective_tokens(prev.seat, tokens_by_seat[prev.seat]))
                 seat_run = dataclasses.replace(run, concurrency=1, tokens_by_seat=tokens_by_seat,
                                                seat_timeout=budget)
                 try:

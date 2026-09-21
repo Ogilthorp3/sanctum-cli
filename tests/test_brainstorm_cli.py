@@ -189,6 +189,44 @@ def test_ask_gemini_starvation_escalates_same_model_no_fallback() -> None:
     assert max(calls) >= bs.THINKING_BUDGET_ESCALATED
 
 
+def test_empty_at_the_cap_is_starvation_even_when_no_reasoning_tokens_are_reported() -> None:
+    # Live 2026-09-20: council-code (Glimmer) returned content "" with finish=length and
+    # NO reasoning-token count, twice at 900 tokens; the client called it a plain empty
+    # answer, never escalated, and a stand-in spoke for Qui-Gon.
+    calls: list[tuple[str, int]] = []
+
+    def handler(body: dict) -> _FakeResp:
+        calls.append((body["model"], body["max_tokens"]))
+        if body["model"] != "council-code":
+            raise AssertionError("must escalate on the seat's OWN model before any stand-in")
+        if body["max_tokens"] < bs.THINKING_BUDGET_ESCALATED:
+            return _FakeResp(payload={"choices": [{"message": {"content": ""}, "finish_reason": "length"}]})
+        return _FakeResp(payload={"choices": [{"message": {"content": "PONG"}, "finish_reason": "stop"}]})
+
+    with patch.object(bs, "_sleep"):
+        r = bs._ask(_FakeClient(handler), "Qui-Gon", "council-code", "lens", "topic", 900, _deadline())
+    assert r.status is Status.OK and r.model_used == "council-code"
+    assert [m for m, _ in calls] == ["council-code", "council-code"]
+    # Qui-Gon is a thinking seat: its FIRST request already carries the thinking floor.
+    assert calls[0][1] >= bs.THINKING_BUDGET_FLOOR > 900
+    assert calls[1][1] >= bs.THINKING_BUDGET_ESCALATED
+
+
+def test_an_empty_answer_that_did_not_hit_the_cap_is_not_called_starvation() -> None:
+    # Control: empty + finish=stop + no reasoning count is a plain empty answer, as before.
+    sizes: list[int] = []
+
+    def handler(body: dict) -> _FakeResp:
+        if body["model"] == "gemini-31-pro":
+            sizes.append(body["max_tokens"])
+            return _FakeResp(payload={"choices": [{"message": {"content": ""}, "finish_reason": "stop"}]})
+        return _FakeResp(payload={"choices": [{"message": {"content": "stand-in"}, "finish_reason": "stop"}]})
+
+    with patch.object(bs, "_sleep"):
+        bs._ask(_FakeClient(handler), "Windu", "gemini-31-pro", "lens", "topic", 900, _deadline())
+    assert sizes and max(sizes) < bs.THINKING_BUDGET_ESCALATED, "no escalation without a starvation signal"
+
+
 def test_ask_429_one_bounded_retry_then_recovers() -> None:
     state = {"n": 0}
 
