@@ -823,19 +823,28 @@ def _attested_provenance(
 ) -> tuple[str, str]:
     """Provenance from proxyd's own word (``x-sanctum-seated``): the seat that answered
     either IS the one asked, or it is not. The body's ``model`` field no longer decides
-    anything — it cannot tell a seat from a fallback that shares its weights — but a
-    body that contradicts a ``match`` is written into the note rather than dropped."""
+    anything about WHICH SEAT answered — it cannot tell a seat from a fallback that
+    shares its weights. It can still VETO: a body naming a hosted model on a local seat,
+    or another real family, turns an attested ``match`` into ``diverted`` (fail closed)."""
     route = f"route {route_chain}" if route_chain else "no route chain reported"
     hosted = bool(served) and lane in _LOCAL_LANES and "/" in (served or "")
     if seated == seat_model:
         note = f"proxyd-attested: {seat_model} answered this request itself (x-sanctum-seated; {route})"
         fam = _family_of(served) if served else designed
+        # FAIL CLOSED on a body that contradicts the attestation. The header says WHICH
+        # proxyd entry answered; it says nothing about what that entry points at. An
+        # entry repointed at a hosted endpoint, or at another family's model, would
+        # otherwise be a proven-genuine vote — and would forge the family-diversity
+        # floor, which is computed from the DESIGNED families. A misconfigured seat is
+        # not that seat's voice.
         if hosted:
-            note += (f" — but its backend reported {served}, a HOSTED model, on a local seat: check "
-                     "this seat's proxyd entry, the prompt may have left the box")
-        elif fam != designed and _real_family(fam) and fam not in _SHARED_WEIGHTS.get(designed, frozenset()):
-            note += (f" — but its backend reported {served} ({fam}), not a {designed} model: check "
-                     "this seat's proxyd entry")
+            return "diverted", (note + f" — but its backend reported {served}, a HOSTED model, on a "
+                                "local seat: this seat's proxyd entry points off-box — the prompt "
+                                "left the box")
+        if fam != designed and _real_family(fam) and fam not in _SHARED_WEIGHTS.get(designed, frozenset()):
+            return "diverted", (note + f" — but its backend reported {served} ({fam}), not a "
+                                f"{designed} model: this seat's proxyd entry is misconfigured, so "
+                                f"this is not a {designed} voice")
         return "match", note
     if _seated_none(seated):
         note = f"proxyd attests that no seat answered {seat_model} (x-sanctum-seated: none; {route})"

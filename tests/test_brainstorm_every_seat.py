@@ -1082,16 +1082,17 @@ def test_attested_diversion_verdicts(seat_model: str, designed: str, lane: str, 
     assert names in (note or "") and chain in (note or "")
 
 
-def test_attested_match_still_records_a_body_that_contradicts_it() -> None:
-    # The header settles WHICH SEAT answered; what that seat's proxyd entry points at is
-    # a different question, and a contradicting body is written down, not dropped.
+def test_an_attested_seat_whose_backend_contradicts_it_fails_closed() -> None:
+    # The header settles WHICH proxyd entry answered; it cannot vouch for what that entry
+    # points at. A repointed entry must not become a proven-genuine vote, and must not
+    # forge the family-diversity floor (computed from the DESIGNED families).
     verdict, note = bs._provenance("council-finance", "grok", "grok", "Qwen3.8-27B-4bit", {},
                                    seated="council-finance", route_chain="council-finance")
-    assert verdict == "match" and "attested" in (note or "")
+    assert verdict == "diverted" and "attested" in (note or "")
     assert "Qwen3.8-27B-4bit (qwen), not a grok model" in (note or "")
     verdict, note = bs._provenance("council-code", "codestral", "code", "qwen/qwen3.6-plus", {},
                                    seated="council-code", route_chain="council-code")
-    assert verdict == "match" and "HOSTED" in (note or "")
+    assert verdict == "diverted" and "HOSTED" in (note or "") and "left the box" in (note or "")
     # the seat's own model, or the weights it shares with its fallback: nothing to flag
     for served in ("Qwen3.8-27B-4bit-champion-ablated", _SHARED, None):
         _, note = bs._provenance("council-heretic", "heretic", "cathedral", served, {},
