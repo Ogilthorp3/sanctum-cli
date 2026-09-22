@@ -12,7 +12,6 @@ import platform
 import subprocess
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Any
 
 from sanctum_cli.mesh.types import NodeMacroMetrics
 

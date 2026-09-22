@@ -40,7 +40,6 @@ from sanctum_cli.mesh.tracker import (
 from sanctum_cli.mesh.types import (
     ArtifactKind,
     ChampionManifest,
-    MeshAnalyticsSummary,
     MeshIdentity,
     NodeMacroMetrics,
 )

@@ -53,7 +53,6 @@ from sanctum_cli.mesh.adapters import (
     vm_airgap_runner,
 )
 from sanctum_cli.mesh.identity import MeshIdentityStore
-from sanctum_cli.mesh.metrics import collect_local_macro_metrics
 from sanctum_cli.mesh.seed import seed as seed_local
 from sanctum_cli.mesh.tracker import CommunityOutcome, HttpTrackerTransport
 from sanctum_cli.mesh.types import (
@@ -395,13 +394,15 @@ def _resolve_baseline() -> float:
         return _DEFAULT_BASELINE
 
 
-def _resolve_tracker_url() -> str:
+def _resolve_tracker_url(override: str | None = None) -> str:
     """The mesh discovery/tracker URL: ``mesh.tracker_url`` → the loopback default.
 
     Layer-1 defaults to a loopback tracker (:data:`_DEFAULT_TRACKER_URL`); a shared
     Sanctum tracker URL is set via ``mesh.tracker_url`` in instance.yaml. Constructing
     the client over this URL does NO network I/O — the first request is the boundary.
     """
+    if override and override.strip():
+        return override.strip()
     raw = config.instance_value("mesh.tracker_url", _DEFAULT_TRACKER_URL)
     if isinstance(raw, str) and raw.strip():
         return raw.strip()
@@ -515,13 +516,13 @@ def _build_identity_store() -> MeshIdentityStore:
     return MeshIdentityStore(Ed25519Signer(), path=_resolve_identity_dir())
 
 
-def _build_directory() -> MeshDirectory:
+def _build_directory(tracker: str | None = None) -> MeshDirectory:
     """The discovery/tracker client (the HTTP-tracker adapter).
 
     Construction does NO network I/O — :class:`HttpTrackerTransport` builds its httpx
     client without issuing a request; the first real read/write is the boundary.
     """
-    return HttpTrackerTransport(_resolve_tracker_url())
+    return HttpTrackerTransport(_resolve_tracker_url(tracker))
 
 
 def _build_vm_runner() -> VmRunner:
