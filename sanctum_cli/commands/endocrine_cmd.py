@@ -197,21 +197,39 @@ def tick_cmd(
 ) -> None:
     # Imported lazily so the CLI doesn't pull urllib paths unless used.
     from sanctum_cli.endocrine import gland_daemon
-
-    signals = gland_daemon.read_signals()
-    current = gland_daemon.load_checkpoint()
-    from sanctum_cli.endocrine.gland import step_panel
-
-    nxt = step_panel(current, signals)
-    if not dry_run:
-        bloodstream.publish_panel_file(nxt)
-        ok = bloodstream.broadcast_to_chitti(nxt)
-        chitti = "broadcast→chitti OK" if ok else "chitti broadcast skipped (unreachable)"
-    else:
-        chitti = "dry-run (no broadcast)"
-    console.print(
-        f"tick: signals(headroom_mb={signals.headroom_mb} "
-        f"alert_rate_1h={signals.alert_rate_1h} hour={signals.hour} "
-        f"creative={signals.creative_mode}) → {chitti}"
+    from sanctum_cli.endocrine.tick_deadline import (
+        EXIT_TEMPFAIL,
+        TickDeadlineExceeded,
+        bounded_tick,
     )
-    status_cmd()
+
+    # The launchd job is StartInterval: a beat that does not return holds the
+    # slot and the panel goes stale. Die at the wall deadline instead.
+    try:
+        with bounded_tick():
+            signals = gland_daemon.read_signals()
+            current = gland_daemon.load_checkpoint()
+            from sanctum_cli.endocrine.gland import step_panel
+
+            nxt = step_panel(current, signals)
+            if not dry_run:
+                bloodstream.publish_panel_file(nxt)
+                ok = bloodstream.broadcast_to_chitti(nxt)
+                chitti = (
+                    "broadcast→chitti OK"
+                    if ok
+                    else "chitti broadcast skipped (unreachable)"
+                )
+            else:
+                chitti = "dry-run (no broadcast)"
+            console.print(
+                f"tick: signals(headroom_mb={signals.headroom_mb} "
+                f"alert_rate_1h={signals.alert_rate_1h} hour={signals.hour} "
+                f"creative={signals.creative_mode}) → {chitti}"
+            )
+            status_cmd()
+    except TickDeadlineExceeded as exc:
+        console.print(
+            f"tick: {exc} — beat abandoned so the next interval can run"
+        )
+        raise SystemExit(EXIT_TEMPFAIL) from None

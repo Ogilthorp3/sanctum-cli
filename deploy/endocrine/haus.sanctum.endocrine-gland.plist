@@ -6,14 +6,14 @@
       cp com.sanctum.endocrine-gland.plist ~/Library/LaunchAgents/
       launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.sanctum.endocrine-gland.plist
 
-  Runs one gland tick every 120s (StartInterval) via `sanctum endocrine tick`.
+  Runs one gland tick every 120s (StartInterval) via endocrine-tick.sh.
   Off-by-default in effect: a running gland publishes a NEUTRAL panel until a
   seat opts in (SANCTUM_ENDOCRINE=1) AND the operator doses creative mode — so
   loading this alone changes NO seat behaviour.
 
-  StartInterval (not a long-running KeepAlive loop) keeps the organ stateless
-  between ticks and crash-trivial: each invocation reads the checkpoint, steps
-  once, publishes, exits. A wedged tick can't accumulate.
+  StartInterval does not overlap a beat that is still running. A tick that
+  never exits holds the slot and the sentinel pages GLAND_DOWN at 600s.
+  endocrine-tick.sh kills the beat at 25s so one wedge cannot freeze the panel.
 -->
 <plist version="1.0">
 <dict>
@@ -21,9 +21,7 @@
     <string>com.sanctum.endocrine-gland</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/bert/.local/bin/sanctum</string>
-        <string>endocrine</string>
-        <string>tick</string>
+        <string>/Users/bert/.sanctum/scripts/endocrine-tick.sh</string>
     </array>
     <key>EnvironmentVariables</key>
     <dict>

@@ -44,6 +44,7 @@ import urllib.request
 
 from . import bloodstream
 from .gland import Panel, Signals, step_panel
+from .tick_deadline import EXIT_TEMPFAIL, TickDeadlineExceeded, bounded_tick
 
 
 def read_memory_headroom_mb(*, timeout: float = 4.0) -> int | None:
@@ -166,20 +167,29 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     if args.once or args.dry_run:
-        signals = read_signals()
-        current = load_checkpoint()
-        nxt = step_panel(current, signals)
-        if not args.dry_run:
-            bloodstream.publish_panel_file(nxt)
-            bloodstream.broadcast_to_chitti(nxt)
+        try:
+            with bounded_tick():
+                signals = read_signals()
+                current = load_checkpoint()
+                nxt = step_panel(current, signals)
+                if not args.dry_run:
+                    bloodstream.publish_panel_file(nxt)
+                    bloodstream.broadcast_to_chitti(nxt)
+        except TickDeadlineExceeded as e:
+            print(f"endocrine tick deadline: {e}", file=sys.stderr)
+            return EXIT_TEMPFAIL
         _print_panel(nxt, signals)
         return 0
 
-    # long-running loop (the daemon proper). Each tick is independently
-    # bounded; a single failed read cannot wedge it (read_* returns None).
+    # long-running loop (the daemon proper). Each beat has its own wall
+    # deadline. A failed read returns None; a beat that blows the deadline
+    # is abandoned so the next one can still publish. Neither holds the loop.
     while True:
         try:
-            tick()
+            with bounded_tick():
+                tick()
+        except TickDeadlineExceeded as e:
+            print(f"endocrine tick deadline: {e}", file=sys.stderr)
         except Exception as e:
             print(f"endocrine tick error (non-fatal): {e}", file=sys.stderr)
         time.sleep(max(1, args.interval))

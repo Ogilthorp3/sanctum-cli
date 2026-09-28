@@ -29,6 +29,11 @@ Hard invariants (each enforced by a test in tests/test_endocrine.py):
   • Homeostatic: a damped negative-feedback regulator that CANNOT run away.
   • Fail-soft: a neutral/absent panel (or opt-out SANCTUM_ENDOCRINE=0) changes NOTHING.
   • No hardcoded endpoints: ports come from instance.yaml via config.
+  • Bounded beat: a tick dies at a wall-clock deadline instead of holding the
+    StartInterval slot. A held slot freezes panel.json; the sentinel pages
+    GLAND_DOWN at 600s. The deadline is a BaseException so a blind-read
+    ``except Exception`` cannot swallow it. launchd's outer cap is
+    deploy/endocrine/endocrine-tick.sh.
 
 Subscription-first (DESIGNED, NOT YET WIRED): receptor.diversity_seats() would
   exclude metered seats, but council_ask() does not yet consult it — it fans out

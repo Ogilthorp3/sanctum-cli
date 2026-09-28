@@ -595,6 +595,151 @@ class TestGlandDaemon:
         assert p.cortisol == pytest.approx(Regulator.for_hormone("cortisol").setpoint, abs=0.05)
 
 
+class TestTickDeadline:
+    """A beat that does not return holds the launchd StartInterval slot and
+    the panel freezes. The deadline is a BaseException so the blind-read
+    helpers cannot swallow it, and the launchd wrapper kills the process
+    even if the interpreter never arms the alarm."""
+
+    def test_alarm_is_not_swallowed_by_except_exception(self) -> None:
+        import time
+
+        from sanctum_cli.endocrine.tick_deadline import (
+            TickDeadlineExceeded,
+            arm,
+            disarm,
+        )
+
+        arm(0.2)
+        try:
+            try:
+                time.sleep(2)
+            except Exception:
+                pytest.fail("wall deadline was swallowed by except Exception")
+        except TickDeadlineExceeded:
+            pass
+        else:
+            pytest.fail("wall deadline did not fire")
+        finally:
+            disarm()
+
+    def test_zero_env_disables_the_alarm(self, monkeypatch) -> None:
+        import time
+
+        from sanctum_cli.endocrine import tick_deadline
+
+        monkeypatch.setenv(tick_deadline.ENV, "0")
+        assert tick_deadline.deadline_seconds() is None
+        assert tick_deadline.arm() is None
+        time.sleep(0.05)  # a disabled alarm must not fire
+
+    def test_tick_cmd_abandons_a_wedged_read_without_publishing(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        import time
+
+        from sanctum_cli.commands import endocrine_cmd
+        from sanctum_cli.endocrine import bloodstream, gland_daemon
+        from sanctum_cli.endocrine.tick_deadline import EXIT_TEMPFAIL
+
+        monkeypatch.setenv(bloodstream.STATE_DIR_ENV, str(tmp_path))
+        monkeypatch.setenv("SANCTUM_ENDOCRINE_TICK_DEADLINE", "0.2")
+
+        def hang(**_k: object) -> None:
+            time.sleep(5)
+
+        monkeypatch.setattr(gland_daemon, "read_memory_headroom_mb", hang)
+        with pytest.raises(SystemExit) as caught:
+            endocrine_cmd.tick_cmd(dry_run=False)
+        assert caught.value.code == EXIT_TEMPFAIL
+        assert not (tmp_path / "panel.json").exists()
+
+    def test_tick_cmd_happy_path_disarms(self, tmp_path, monkeypatch) -> None:
+        import time
+
+        from sanctum_cli.commands import endocrine_cmd
+        from sanctum_cli.endocrine import bloodstream, gland_daemon
+
+        monkeypatch.setenv(bloodstream.STATE_DIR_ENV, str(tmp_path))
+        # Short enough that a leaked timer would fire before the sleep below.
+        monkeypatch.setenv("SANCTUM_ENDOCRINE_TICK_DEADLINE", "0.4")
+        monkeypatch.setattr(gland_daemon, "read_memory_headroom_mb", lambda **k: 8000)
+        monkeypatch.setattr(gland_daemon, "read_alert_rate_1h", lambda **k: 0)
+        monkeypatch.setattr(bloodstream, "broadcast_to_chitti", lambda *a, **k: False)
+        bloodstream.set_creative_mode(False)
+
+        endocrine_cmd.tick_cmd(dry_run=False)
+        assert bloodstream.read_panel() is not None
+        time.sleep(0.6)
+
+    def test_wrapper_kills_a_wedged_beat_and_reaps_its_watchdog(
+        self, tmp_path
+    ) -> None:
+        import os
+        import stat
+        import subprocess
+        import time
+        from pathlib import Path
+
+        script = Path(__file__).resolve().parents[1] / "deploy" / "endocrine" / "endocrine-tick.sh"
+        fake = tmp_path / "sanctum"
+        fake.write_text("#!/bin/bash\nsleep 30\n")
+        fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
+
+        started = time.monotonic()
+        proc = subprocess.run(
+            ["bash", str(script)],
+            env={
+                **os.environ,
+                "SANCTUM_BIN": str(fake),
+                "SANCTUM_ENDOCRINE_TICK_WALL": "1",
+                "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            },
+            capture_output=True,
+            text=True,
+            timeout=8,
+        )
+        elapsed = time.monotonic() - started
+        assert proc.returncode != 0
+        assert elapsed < 6
+        assert "outer deadline" in proc.stderr
+        # The fake sleep and the watchdog sleep must both be gone.
+        leftover = subprocess.run(
+            ["pgrep", "-fl", "sleep 30"],
+            capture_output=True,
+            text=True,
+        )
+        assert str(fake) not in leftover.stdout
+
+    def test_wrapper_returns_a_fast_beats_exit_code(self, tmp_path) -> None:
+        import os
+        import stat
+        import subprocess
+        import time
+        from pathlib import Path
+
+        script = Path(__file__).resolve().parents[1] / "deploy" / "endocrine" / "endocrine-tick.sh"
+        fake = tmp_path / "sanctum"
+        fake.write_text("#!/bin/bash\nexit 0\n")
+        fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
+
+        started = time.monotonic()
+        proc = subprocess.run(
+            ["bash", str(script)],
+            env={
+                **os.environ,
+                "SANCTUM_BIN": str(fake),
+                "SANCTUM_ENDOCRINE_TICK_WALL": "10",
+                "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            },
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        assert proc.returncode == 0
+        assert time.monotonic() - started < 3
+
+
 class TestAlertRateReadsRealForceFlowHistory:
     """Contracts-at-the-Boundary §2/§3: drive read_alert_rate_1h against a REAL
     /history response shape (a bare JSON array of notification rows with
