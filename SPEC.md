@@ -406,11 +406,11 @@ Every command emits a JSONL event to `~/.sanctum/telemetry/cli.jsonl`. Schema:
 | API keys on disk | Never. All credentials in macOS Keychain. CLI reads at invocation; never caches. |
 | Config file with secrets | `instance.yaml` references Keychain entries by name only. `chmod 600`. Schema-validated on every load. |
 | Telemetry leaking prompts | Redacted by default. Opt-in only. Banner when off. |
-| Provider impersonation | mTLS / CA-pinning on the local proxy transport (proxyd, sanctum-server). Standard certificate-validated HTTPS to Anthropic/Google via their SDKs. Public-endpoint certificate pinning is not implemented. |
+| Provider impersonation | Local proxyd is verified against `~/.sanctum/certs/ca.crt`. Anthropic and Google use the platform trust store (`verify=True`). Leaf-pinning those public endpoints is intentionally not done: their certificates rotate, and a pin would brick a beta install. `SANCTUM_PROXYD_INSECURE` is an explicit dev hatch and does not apply to the public providers. |
 | Replay attack on cached responses | All responses streamed live, no cache shorthand by default. Optional response cache uses content-hashed keys. |
 | Wizard state file leak | `~/.sanctum/wizard-state.json` is `chmod 600`, contains no secrets (only "step 4 of B2 wizard, awaiting paste"). |
 | Self-update tampering | Today `sanctum update` upgrades via the Homebrew tap and gates on a post-upgrade `sanctum self-test`. Sigstore/cosign signature verification of releases is a v1.0 roadmap item (§12), not yet implemented. |
-| Compromised PATH binary | _Roadmap._ Install-path self-check and refusing to run from world-writable directories are planned, not yet implemented. |
+| Compromised PATH binary | Every invocation refuses to run when the executable, or any directory above it, is world-writable (`sanctum_cli.install_path`). A Homebrew prefix and a normal home checkout pass. |
 
 The Keychain is the single trust anchor. Lose it, lose everything — same as the existing restic model.
 

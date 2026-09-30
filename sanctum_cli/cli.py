@@ -58,6 +58,7 @@ from sanctum_cli.commands.node import node_app
 from sanctum_cli.commands.tailnet import tailnet_app
 from sanctum_cli.errors import ExitCode, SanctumError
 from sanctum_cli.haus import haus_required
+from sanctum_cli.install_path import InstallPathError, enforce_install_path
 
 app = typer.Typer(
     name="sanctum",
@@ -117,6 +118,16 @@ def main(
     Pipes, scripts, and sentinels calling bare ``sanctum`` keep getting the
     banner and a clean exit; an automation must never hang in a REPL.
     """
+    try:
+        enforce_install_path()
+    except InstallPathError as exc:
+        err_console.print(f"[bold red]{exc}[/]")
+        err_console.print(
+            "[dim]The sanctum binary is in a directory other users can write. "
+            "Install it with Homebrew, or move it out of that directory.[/]"
+        )
+        raise typer.Exit(code=int(ExitCode.LOCAL_ERROR)) from exc
+
     ctx.ensure_object(dict)
     ctx.obj["traceback"] = traceback
 
