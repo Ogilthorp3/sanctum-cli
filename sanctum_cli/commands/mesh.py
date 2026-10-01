@@ -13,6 +13,9 @@ Four subcommands, mirroring the ``sanctum net`` guided/reversible shape:
                leaves the local one authoritative.
 * ``seed``   — sign + announce a local champion to the mesh, iff it beats the
                local baseline (the mirror of ``adopt``'s eval gate).
+* ``send``   — sign a file and serve it until the peer fetches the ticket.
+* ``receive``— fetch a ticket, check the signature and the hash, save the file.
+               A file parcel never enters the champion eval or the sandbox.
 
 Every external dependency is an injected seam behind a module-level builder
 (:func:`_build_command_runner` / :func:`_build_identity_store` /
@@ -51,6 +54,14 @@ from sanctum_cli.mesh.adapters import (
     make_promote,
     mlx_eval_runner,
     vm_airgap_runner,
+)
+from sanctum_cli.mesh.files import (
+    ParcelServer,
+    build_file_parcel,
+    encode_ticket,
+    receive_parcel,
+    serve_until_stopped,
+    tailscale_ipv4,
 )
 from sanctum_cli.mesh.identity import MeshIdentityStore
 from sanctum_cli.mesh.seed import seed as seed_local
@@ -881,3 +892,76 @@ def analytics_command(
         _report(exc)
         raise typer.Exit(code=int(exc.exit_code)) from exc
     _print_analytics(summary)
+
+
+def _default_inbox() -> Path:
+    """Where a received parcel is saved: ``~/.sanctum/mesh/inbox``."""
+    return Path.home() / ".sanctum" / "mesh" / "inbox"
+
+
+@mesh_app.command(
+    "send",
+    help="Sign a file and serve it. The other haus receives it with the printed ticket.",
+)
+def send_command(
+    path: Annotated[Path, typer.Argument(help="The file to send, for example a zip.")],
+    port: Annotated[int, typer.Option("--port", help="Port to serve on.")] = 8788,
+) -> None:
+    """Serve one signed file. Ctrl-C stops the server. Does not adopt a champion."""
+    servers: list[ParcelServer] = []
+    try:
+        store = _build_identity_store()
+        identity = store.ensure(_resolve_label())
+        parcel = build_file_parcel(path, identity)
+        local = ParcelServer(path, parcel, "127.0.0.1", port)
+        local.start()
+        servers.append(local)
+        urls = [local.url]
+        peer = tailscale_ipv4(_build_command_runner())
+        if peer:
+            try:
+                remote = ParcelServer(path, parcel, peer, port)
+                remote.start()
+                servers.append(remote)
+                urls.append(remote.url)
+            except OSError:
+                console.print(f"[yellow]•[/] Could not serve on the tailnet address {peer}.")
+        ticket = encode_ticket(parcel, urls)
+    except OSError as exc:
+        for server in servers:
+            server.stop()
+        _report(LocalError(f"could not serve the parcel: {exc}", fix="choose another --port"))
+        raise typer.Exit(code=int(ExitCode.LOCAL_ERROR)) from exc
+    except SanctumError as exc:
+        for server in servers:
+            server.stop()
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code)) from exc
+    console.print(f"[green]✓[/] Signed {escape(parcel.filename)} ({parcel.size_bytes} bytes)")
+    console.print(f"Hash: {escape(parcel.content_hash)}")
+    if len(urls) == 1:
+        console.print(
+            "[yellow]•[/] Only this Mac can fetch it. Bring Tailscale up, then send again, "
+            "so the other haus has an address it can reach."
+        )
+    console.print("\nOn the other Mac, after [bold]sanctum mesh join[/]:\n")
+    console.print(f"sanctum mesh receive {ticket}\n")
+    console.print("[dim]Serving until Ctrl-C. The file is not executed on the other side.[/]")
+    serve_until_stopped(servers)
+
+
+@mesh_app.command(
+    "receive",
+    help="Fetch a file ticket, verify the signature and hash, and save it.",
+)
+def receive_command(
+    ticket: Annotated[str, typer.Argument(help="The one-line ticket from sanctum mesh send.")],
+) -> None:
+    """Save a signed parcel into ~/.sanctum/mesh/inbox. Never runs it."""
+    try:
+        saved = receive_parcel(ticket, _default_inbox(), Ed25519Signer().verify)
+    except SanctumError as exc:
+        _report(exc)
+        raise typer.Exit(code=int(exc.exit_code)) from exc
+    console.print(f"[bold green]✓ Received[/] {escape(str(saved))}")
+    console.print("[dim]The file was checked and saved. It was not run.[/]")
