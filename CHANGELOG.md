@@ -14,13 +14,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-
-- `sanctum mesh send` and `sanctum mesh receive` move one signed file between hauses. The receiver checks the signature and the sha256, saves the file, and does not run it. Champion pull still goes through eval and the sandbox.
-
 ### Security
 
 - The `sanctum` command refuses to start when its binary, or any directory above it, is world-writable.
+
+## [0.15.5] - 2026-10-01
+
+### Added
+
+- `sanctum mesh send` and `sanctum mesh receive` move one signed file across the tailnet. The receiver checks the signature and the sha256, saves the file, and does not run it.
+- `sanctum mesh join --tribe <key>` puts a friend's Mac on the trusted tribe tag. A haus node that already carries an admin, host, or mobile tag refuses the switch. Champion pull still goes through eval and the sandbox.
 
 ## [0.15.3] - 2026-07-24
 

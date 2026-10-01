@@ -188,11 +188,14 @@ class ParcelServer:
         self._thread: threading.Thread | None = None
 
     @property
-    def url(self) -> str:
+    def bound_port(self) -> int:
         if self._httpd is None:
             raise LocalError("parcel server is not started")
-        bound_port = self._httpd.server_address[1]
-        return f"http://{self.host}:{bound_port}/v1/file"
+        return int(self._httpd.server_address[1])
+
+    @property
+    def url(self) -> str:
+        return f"http://{self.host}:{self.bound_port}/v1/file"
 
     def start(self) -> None:
         path = self.path

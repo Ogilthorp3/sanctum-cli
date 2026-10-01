@@ -217,6 +217,72 @@ def read_tailnet(run: CommandRunner) -> TailnetStatus:
     return TailnetStatus(up=up, self_addr=self_addr)
 
 
+_HAUS_TAGS = frozenset({"tag:sanctum-admin", "tag:sanctum-host", "tag:sanctum-mobile"})
+_TRIBE_TAG = "tag:sanctum-tribe"
+
+
+def read_self_tags(run: CommandRunner) -> list[str]:
+    """Tags on this node, from the same ``tailscale status --json`` read.
+
+    An unreadable status is an empty list. The haus guard uses that empty list
+    as "not a haus node", so a friend's first join is allowed.
+    """
+    raw = run([_TS_BINARY, "status", "--json"])
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return []
+    if not isinstance(data, dict):
+        return []
+    self_node = data.get("Self")
+    if not isinstance(self_node, dict):
+        return []
+    tags = self_node.get("Tags")
+    if not isinstance(tags, list):
+        return []
+    return [tag for tag in tags if isinstance(tag, str)]
+
+
+def tribe_up_argv(auth_key: str, hostname: str) -> list[str]:
+    """The exact ``tailscale up`` a friend runs to enter the trusted tribe.
+
+    The key is a Tailscale device auth key. The tag is fixed. A haus node must
+    not run this: that would trade its admin tag for the tribe tag.
+    """
+    key = auth_key.strip()
+    if not key.startswith("tskey-auth-"):
+        raise UserError(
+            "that is not a tribe auth key",
+            fix="use the one-time key the operator sent, it starts with tskey-auth-",
+        )
+    host = hostname.strip().lower().replace("'", "").replace(" ", "-")
+    if not host or any(ch not in "abcdefghijklmnopqrstuvwxyz0123456789-" for ch in host):
+        raise UserError(
+            f"bad tribe hostname {hostname!r}",
+            fix="letters, numbers, and dashes only",
+        )
+    return [
+        _TS_BINARY,
+        "up",
+        "--auth-key",
+        key,
+        "--advertise-tags",
+        _TRIBE_TAG,
+        "--hostname",
+        host,
+    ]
+
+
+def guard_tribe_join(tags: list[str]) -> None:
+    """Refuse to move a haus node onto the tribe tag."""
+    blocked = sorted(_HAUS_TAGS.intersection(tags))
+    if blocked:
+        raise UserError(
+            "this Mac is a haus node (" + ", ".join(blocked) + ")",
+            fix="run sanctum mesh join --tribe on the friend's Mac, not this one",
+        )
+
+
 def fingerprint(pubkey: str) -> str:
     """A short, stable, quotable id for a mesh public key.
 
@@ -265,6 +331,7 @@ def join_mesh(
     directory: MeshDirectory,
     run: CommandRunner,
     label: str,
+    require_tracker: bool = True,
 ) -> JoinReport:
     """Bring the node onto the mesh: tailnet check → mint identity → register.
 
@@ -280,12 +347,17 @@ def join_mesh(
     peers: list[str] = []
     champions: list[str] = []
     if status.up and addr is not None:
-        registered = directory.register(identity.identity, addr)
-        # Reach the tracker for peers/champions ONLY once the tailnet is really up —
-        # otherwise a "tailnet down" (the actionable problem) would be masked behind
-        # a tracker-unreachable error from these two calls.
-        peers = directory.peers()
-        champions = [m.content_hash for m in directory.catalog()]
+        try:
+            registered = directory.register(identity.identity, addr)
+            # Reach the tracker for peers/champions ONLY once the tailnet is really up —
+            # otherwise a "tailnet down" (the actionable problem) would be masked behind
+            # a tracker-unreachable error from these two calls.
+            peers = directory.peers()
+            champions = [m.content_hash for m in directory.catalog()]
+        except SanctumError:
+            if require_tracker:
+                raise
+            registered = False
     return JoinReport(
         tailnet_up=status.up,
         identity_fingerprint=fingerprint(identity.pubkey),
@@ -681,6 +753,27 @@ def _parse_scores(raw: list[str] | None) -> dict[str, float]:
 # ─── commands ────────────────────────────────────────────────────────────
 
 
+def _run_tribe_up(argv: list[str]) -> None:
+    """Run ``tailscale up`` for a tribe join. The auth key is never echoed."""
+    key = argv[argv.index("--auth-key") + 1]
+
+    def _redact(text: str) -> str:
+        return text.replace(key, "[redacted]")
+
+    try:
+        proc = subprocess.run(
+            argv, capture_output=True, text=True, errors="replace", timeout=60, check=False
+        )
+    except (subprocess.SubprocessError, OSError, ValueError) as exc:
+        raise LocalError(
+            "could not run tailscale up",
+            fix="install Tailscale, then run the join again",
+        ) from exc
+    if proc.returncode != 0:
+        detail = _redact((proc.stderr or proc.stdout or "tailscale up failed").strip())
+        raise LocalError(detail, fix="ask the operator for a fresh tribe key")
+
+
 @mesh_app.command("join", help="Join the open Sanctum mesh (tailnet + identity + discovery).")
 def join_command(
     label: Annotated[
@@ -689,15 +782,34 @@ def join_command(
     yes: Annotated[
         bool, typer.Option("--yes", "-y", help="Non-interactive: skip prompts (onboard/scripts).")
     ] = False,
+    tribe: Annotated[
+        str | None,
+        typer.Option("--tribe", help="One-time Tailscale auth key for the trusted tribe."),
+    ] = None,
 ) -> None:
     try:
         run = _build_command_runner()
         store = _build_identity_store()
         directory = _build_directory()
         chosen_label = label.strip() if label and label.strip() else _resolve_label()
-        report = join_mesh(store=store, directory=directory, run=run, label=chosen_label)
+        if tribe:
+            guard_tribe_join(read_self_tags(run))
+            _run_tribe_up(tribe_up_argv(tribe, chosen_label))
+        report = join_mesh(
+            store=store,
+            directory=directory,
+            run=run,
+            label=chosen_label,
+            require_tracker=not bool(tribe),
+        )
         _persist_mesh_config(chosen_label, report.addr)
         _print_join(report, yes=yes)
+        if tribe and report.tailnet_up:
+            console.print(
+                "\n[bold green]✓ In the trusted tribe.[/] "
+                "The operator can send a file. You receive it with "
+                "[bold]sanctum mesh receive[/]."
+            )
     except SanctumError as exc:
         _report(exc)
         raise typer.Exit(code=int(exc.exit_code)) from exc
@@ -925,7 +1037,13 @@ def send_command(
                 servers.append(remote)
                 urls.append(remote.url)
             except OSError:
-                console.print(f"[yellow]•[/] Could not serve on the tailnet address {peer}.")
+                for server in servers:
+                    server.stop()
+                servers.clear()
+                wide = ParcelServer(path, parcel, "0.0.0.0", port)
+                wide.start()
+                servers.append(wide)
+                urls = [f"http://{peer}:{wide.bound_port}/v1/file"]
         ticket = encode_ticket(parcel, urls)
     except OSError as exc:
         for server in servers:
