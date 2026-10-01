@@ -739,6 +739,144 @@ class TestTickDeadline:
         assert proc.returncode == 0
         assert time.monotonic() - started < 3
 
+    def test_wrapper_kills_a_stall_before_sanctum_starts(self, tmp_path) -> None:
+        """The 2026-10-01 beats blocked before the sleeper was armed and
+        never logged a deadline. A pre-start stall must still die at the wall."""
+        import os
+        import stat
+        import subprocess
+        import time
+        from pathlib import Path
+
+        script = Path(__file__).resolve().parents[1] / "deploy" / "endocrine" / "endocrine-tick.sh"
+        pre = tmp_path / "prehook"
+        pre.write_text("#!/bin/bash\nsleep 30\n")
+        pre.chmod(pre.stat().st_mode | stat.S_IEXEC)
+
+        started = time.monotonic()
+        proc = subprocess.run(
+            ["bash", str(script)],
+            env={
+                **os.environ,
+                "SANCTUM_ENDOCRINE_TICK_PREHOOK": str(pre),
+                "SANCTUM_ENDOCRINE_TICK_WALL": "1",
+                "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            },
+            capture_output=True,
+            text=True,
+            timeout=8,
+        )
+        assert proc.returncode != 0
+        assert time.monotonic() - started < 6
+        assert "outer deadline" in proc.stderr
+        leftover = subprocess.run(
+            ["pgrep", "-fl", str(pre)],
+            capture_output=True,
+            text=True,
+        )
+        assert str(pre) not in leftover.stdout
+
+
+class TestEndocrineReaper:
+    """The reaper is a different process from the beat. It SIGKILLs a pid
+    that is still the gland's launchd pid past the wall, and leaves a new
+    or short-lived pid alone."""
+
+    def _run(self, tmp_path, launchctl_text: str, state: str | None, wall: str = "25"):
+        import os
+        import stat
+        import subprocess
+        from pathlib import Path
+
+        script = (
+            Path(__file__).resolve().parents[1]
+            / "deploy"
+            / "endocrine"
+            / "endocrine-tick-reaper.sh"
+        )
+        fake = tmp_path / "launchctl"
+        fake.write_text("#!/bin/bash\n" + launchctl_text)
+        fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
+        seen = tmp_path / "reaper-seen"
+        if state is not None:
+            seen.write_text(state)
+        proc = subprocess.run(
+            ["bash", str(script)],
+            env={
+                **os.environ,
+                "LAUNCHCTL": str(fake),
+                "SANCTUM_ENDOCRINE_REAPER_STATE": str(seen),
+                "SANCTUM_ENDOCRINE_TICK_WALL": wall,
+                "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            },
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        return proc, seen
+
+    def test_first_sight_records_the_pid(self, tmp_path) -> None:
+        import subprocess
+
+        sleep = subprocess.Popen(["sleep", "60"])
+        try:
+            proc, seen = self._run(tmp_path, f"echo 'pid = {sleep.pid}'\n", None)
+            assert proc.returncode == 0
+            assert "SIGKILL" not in proc.stderr
+            assert seen.read_text().split()[0] == str(sleep.pid)
+            assert sleep.poll() is None
+        finally:
+            sleep.kill()
+            sleep.wait(timeout=5)
+
+    def test_same_pid_past_the_wall_is_killed(self, tmp_path) -> None:
+        import time
+        import subprocess
+
+        sleep = subprocess.Popen(["sleep", "60"])
+        try:
+            past = int(time.time()) - 30
+            proc, seen = self._run(
+                tmp_path,
+                f"echo 'pid = {sleep.pid}'\n",
+                f"{sleep.pid} {past}\n",
+            )
+            assert proc.returncode == 0
+            assert "SIGKILL" in proc.stderr
+            sleep.wait(timeout=5)
+            assert not seen.exists()
+        finally:
+            if sleep.poll() is None:
+                sleep.kill()
+                sleep.wait(timeout=5)
+
+    def test_idle_job_clears_a_remembered_pid(self, tmp_path) -> None:
+        proc, seen = self._run(
+            tmp_path,
+            "echo 'state = not running'\n",
+            "999999 1\n",
+        )
+        assert proc.returncode == 0
+        assert not seen.exists()
+
+    def test_a_new_pid_resets_the_clock(self, tmp_path) -> None:
+        import subprocess
+
+        sleep = subprocess.Popen(["sleep", "60"])
+        try:
+            proc, seen = self._run(
+                tmp_path,
+                f"echo 'pid = {sleep.pid}'\n",
+                "4242 1\n",
+            )
+            assert proc.returncode == 0
+            assert "SIGKILL" not in proc.stderr
+            assert seen.read_text().split()[0] == str(sleep.pid)
+            assert sleep.poll() is None
+        finally:
+            sleep.kill()
+            sleep.wait(timeout=5)
+
 
 class TestAlertRateReadsRealForceFlowHistory:
     """Contracts-at-the-Boundary §2/§3: drive read_alert_rate_1h against a REAL

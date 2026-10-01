@@ -20,7 +20,9 @@ secret-rotator pattern (the OneDrive-synced repo tree is not launchd-readable).
 | File | Deploy target | Role |
 |------|---------------|------|
 | `haus.sanctum.endocrine-gland.plist` | `~/Library/LaunchAgents/` | Gland daemon — one bounded beat every 120 s via `endocrine-tick.sh`. |
-| `endocrine-tick.sh` | `~/.sanctum/scripts/` | Outer wall cap (25 s). Kills a wedged tick so it cannot hold the StartInterval slot. |
+| `endocrine-tick.sh` | `~/.sanctum/scripts/` | Outer wall cap (25 s). Forks the timer before stat/exec and SIGKILLs the launchd process group so a wedged child cannot hold the StartInterval slot. |
+| `endocrine-tick-reaper.sh` | `~/.sanctum/scripts/` | Separate job. SIGKILLs the gland pid if it is still the same pid past the wall (covers a stall before the in-script timer, including xpcproxy). Does not kickstart. |
+| `haus.sanctum.endocrine-gland-reaper.plist` | `~/Library/LaunchAgents/` | Runs the reaper every 10 s. |
 | `endocrine-gland-sentinel.py` | `~/.sanctum/sentinels/` | Watches the gland; pages Force Flow ONLY on pathological state, damped via `alert-confirm.sh`. |
 | `haus.sanctum.endocrine-gland-sentinel.plist` | `~/Library/LaunchAgents/` | Runs the sentinel every 300 s. |
 | `watchdog-catalog-entry.yaml` | `~/.sanctum/services/endocrine-gland.yaml` | Living-Force monitoring entry. Liveness/startup use the `command` check type (the only freshness-capable primitive service-graph.py supports — enum is command\|http\|port\|process\|interface; there is no `file-fresh`), exiting 0 iff the gland sentinel reports a fresh, non-DOWN panel. |
@@ -32,11 +34,13 @@ SRC=~/Projects/sanctum-cli/deploy/endocrine
 
 # 1. deploy the daemon-side copies
 cp "$SRC/endocrine-tick.sh"                          ~/.sanctum/scripts/
-chmod +x ~/.sanctum/scripts/endocrine-tick.sh
+cp "$SRC/endocrine-tick-reaper.sh"                   ~/.sanctum/scripts/
+chmod +x ~/.sanctum/scripts/endocrine-tick.sh ~/.sanctum/scripts/endocrine-tick-reaper.sh
 cp "$SRC/endocrine-gland-sentinel.py"                 ~/.sanctum/sentinels/
 cp "$SRC/watchdog-catalog-entry.yaml"                 ~/.sanctum/services/endocrine-gland.yaml
 cp "$SRC/haus.sanctum.endocrine-gland.plist"           ~/Library/LaunchAgents/
 cp "$SRC/haus.sanctum.endocrine-gland-sentinel.plist"  ~/Library/LaunchAgents/
+cp "$SRC/haus.sanctum.endocrine-gland-reaper.plist"    ~/Library/LaunchAgents/
 
 # 2. dry-verify BEFORE loading (reads real signals, broadcasts nothing)
 sanctum endocrine tick --dry-run
@@ -45,6 +49,7 @@ python3 ~/.sanctum/sentinels/endocrine-gland-sentinel.py --self-test
 # 3. load the organ + its guard
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/haus.sanctum.endocrine-gland.plist
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/haus.sanctum.endocrine-gland-sentinel.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/haus.sanctum.endocrine-gland-reaper.plist
 
 # 4. confirm it's publishing a (neutral) panel
 sanctum endocrine panel

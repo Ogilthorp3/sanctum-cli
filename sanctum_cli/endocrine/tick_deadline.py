@@ -14,7 +14,9 @@ The launchd wrapper (``deploy/endocrine/endocrine-tick.sh``, 25s) is the
 outer cap. It still kills the process if this alarm never gets to run
 (interpreter stuck before ``tick`` is entered, or a C extension holding the
 GIL). This alarm is the inner cap (20s) so a live interpreter exits on its
-own before that SIGTERM.
+own before that SIGKILL. ``deploy/endocrine/endocrine-tick-reaper.sh`` is a
+separate job that SIGKILLs the launchd pid if it is still the same pid past
+the wall, which covers a stall before the wrapper's timer is forked.
 """
 
 from __future__ import annotations
