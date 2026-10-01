@@ -830,8 +830,8 @@ class TestEndocrineReaper:
             sleep.wait(timeout=5)
 
     def test_same_pid_past_the_wall_is_killed(self, tmp_path) -> None:
-        import time
         import subprocess
+        import time
 
         sleep = subprocess.Popen(["sleep", "60"])
         try:
