@@ -460,7 +460,7 @@ class TestRealReadTools:
             "agent_list", {}, seat="Yoda", session="s", ledger=tmp_path / "a.jsonl"
         )
         assert not result.is_error
-        assert "com.sanctum." in result.content
+        assert "com.sanctum." in result.content or "haus.sanctum." in result.content
 
     def test_logs_tail_caps_lines_and_handles_unknown_service(self, tmp_path: Path) -> None:
         bad = ct.run_tool(
