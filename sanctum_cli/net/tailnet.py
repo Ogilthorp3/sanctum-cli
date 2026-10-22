@@ -84,6 +84,42 @@ class TrifectaState:
     providers_row: bool
 
 
+@dataclass(frozen=True)
+class DaemonSkewState:
+    """Comparison between on-disk ``tailscale`` CLI version and the running
+    ``tailscaled`` daemon version (from ``tailscale status --json`` ``.Version``).
+
+    On macOS, ``brew upgrade tailscale`` swaps ``/opt/homebrew/bin/tailscaled`` on
+    disk while ``launchd`` keeps the old daemon running and caches its CDHash in
+    the in-memory Launch Constraint (``LWCR``) table — so ``launchctl kickstart -k``
+    fails with ``OS_REASON_CODESIGNING``. Realignment requires ``bootout`` +
+    ``bootstrap``.
+    """
+
+    cli_version: str
+    daemon_version: str
+
+
+LWCR_REALIGN_CMD = (
+    "sudo launchctl bootout system/com.tailscale.tailscaled && "
+    "sudo launchctl bootstrap system /Library/LaunchDaemons/com.tailscale.tailscaled.plist"
+)
+
+
+def classify_daemon_skew(cli_version: str | None, daemon_version: str | None) -> tuple[RowStatus, str]:
+    """Map ``(cli_version, daemon_version)`` into a row status + remediation detail."""
+    cli = (cli_version or "").strip().split("-")[0]
+    daemon = (daemon_version or "").strip().split("-")[0]
+    if not cli or not daemon:
+        return RowStatus.UNKNOWN, "version probe unavailable"
+    if cli == daemon:
+        return RowStatus.OK, f"CLI and running daemon aligned ({cli})"
+    return (
+        RowStatus.ATTENTION,
+        f"CLI {cli} != running daemon {daemon} — realign via: {LWCR_REALIGN_CMD}",
+    )
+
+
 # ── pure classifiers (individually unit-tested) ──────────────────────────────
 
 

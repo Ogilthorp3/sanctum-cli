@@ -85,7 +85,11 @@ REGISTRY: tuple[ToolSpec, ...] = (
         ("safer",),
         "the mesh every node lives on",
         post_cmd=("tailscale", "version"),
-        restart_hint="brew services restart tailscale (mesh daemon rides on it)",
+        restart_hint=(
+            "sudo launchctl bootout system/com.tailscale.tailscaled && "
+            "sudo launchctl bootstrap system /Library/LaunchDaemons/com.tailscale.tailscaled.plist "
+            "(bootout+bootstrap clears macOS LWCR CDHash cache)"
+        ),
     ),
     ToolSpec(
         "node",

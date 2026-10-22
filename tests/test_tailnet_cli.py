@@ -202,3 +202,19 @@ def test_creds_fails_when_token_mint_fails() -> None:
         result = runner.invoke(app, ["tailnet", "creds"], input="cid\ncsec\n")
     assert result.exit_code != 0
     store.assert_not_called()
+
+
+def test_classify_daemon_skew_aligned_and_skewed() -> None:
+    from sanctum_cli.net.status import RowStatus
+    from sanctum_cli.net.tailnet import classify_daemon_skew
+
+    status_ok, detail_ok = classify_daemon_skew("1.104.2", "1.104.2-te26db7a57")
+    assert status_ok == RowStatus.OK
+    assert "1.104.2" in detail_ok
+
+    status_skew, detail_skew = classify_daemon_skew("1.104.2", "1.102.5-1-t5fb2a81b0")
+    assert status_skew == RowStatus.ATTENTION
+    assert "bootout" in detail_skew and "bootstrap" in detail_skew
+
+    status_unk, _ = classify_daemon_skew("", "1.104.2")
+    assert status_unk == RowStatus.UNKNOWN
