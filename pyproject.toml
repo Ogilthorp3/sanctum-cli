@@ -37,6 +37,9 @@ dependencies = [
   # aiohttp is imported directly by mesh/tracker.py (the tracker server); declare it
   # explicitly rather than relying on the sagemcom_api transitive (a fresh install crashed without it).
   "aiohttp>=3.9",
+  # websocket-client is imported by ~/.sanctum/scripts/ha-green-bridge.py, which
+  # runs under ~/.sanctum/cli-venv (haus.sanctum.ha-green-bridge LaunchAgent).
+  "websocket-client>=1.8",
 ]
 
 [project.optional-dependencies]
