@@ -31,6 +31,7 @@ from sanctum_cli.commands import (
     init_cmd,
     service_user_cmd,
     status,
+    vault_armor_cmd,
 )
 from sanctum_cli.commands import council as council_cmd
 from sanctum_cli.commands import deadman as deadman_cmd
@@ -536,6 +537,7 @@ app.add_typer(tailnet_app, name="tailnet")
 # adds no behavior to any seat until a seat opts into the receptor.
 app.add_typer(endocrine_cmd.app, name="endocrine")
 app.add_typer(service_user_cmd.app, name="service-user")
+app.add_typer(vault_armor_cmd.app, name="vault-armor")
 
 keys_app = typer.Typer(help="Keychain-backed credential helpers.")
 app.add_typer(keys_app, name="keys")
