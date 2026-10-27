@@ -18,11 +18,11 @@ requires:
 - chitti        # reads /fluid for the cortisol memory-pressure signal
 launchagent: com.sanctum.endocrine-gland
 health:
-  # The gland is a StartInterval tick, not a long-running PID — liveness is a
-  # FRESH published panel, not a process check (a stale panel == dead organ).
-  # The gland sentinel's --check encodes the freshness (STALE_SEC=600) and emits
-  # {"state": "GLAND_DOWN"} on a missing/stale/unparseable panel, so a probe that
-  # exits 0 iff the verdict is NOT GLAND_DOWN means "fresh published panel".
+  # The gland is a StartInterval tick, not a long-running PID. GLAND_DOWN means
+  # the loop stopped: panel missing, unparseable, or stale with no beat-seen
+  # inside STALE_SEC. STEP_LAG (stale panel, fresh beat-seen) is not a page —
+  # beats are still being scheduled and dying before publish. A probe that
+  # exits 0 iff the verdict is NOT GLAND_DOWN stays green for STEP_LAG.
   # We use `command` because it is the only freshness-capable primitive
   # service-graph.py dispatches (there is no file-fresh check type).
   startup:

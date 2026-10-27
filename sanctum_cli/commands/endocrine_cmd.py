@@ -207,6 +207,10 @@ def tick_cmd(
     # slot and the panel goes stale. Die at the wall deadline instead.
     try:
         with bounded_tick():
+            # Before the signal reads. A beat killed in those reads has
+            # already refreshed the last real panel.
+            if not dry_run:
+                gland_daemon.republish_checkpoint()
             signals = gland_daemon.read_signals()
             current = gland_daemon.load_checkpoint()
             from sanctum_cli.endocrine.gland import step_panel

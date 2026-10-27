@@ -16,8 +16,8 @@ mis-running — a real, page-worthy organ fault, never the math running away.
 Pages (any → CRITICAL, confirm-twice + 30-min cooldown):
   GLAND_DOWN   — the gland launchd job is unloaded, OR loaded but its last tick
                  exited non-zero with no panel (crashing), OR the panel file is
-                 stale > STALE_SEC / unparseable (the tick loop has stopped — the
-                 organ is dead)
+                 stale > STALE_SEC / unparseable AND no beat has started inside
+                 that window (the tick loop has stopped — the organ is dead)
   HORMONE_STORM— a published level is out of [0,1] (regulator invariant
                  violated → mis-running gland; the math cannot produce this) OR
                  cortisol pinned high (>= STORM_CORTISOL) for the whole confirm
@@ -28,6 +28,11 @@ Pages (any → CRITICAL, confirm-twice + 30-min cooldown):
                  STORM_CORTISOL > the gland's max reachable target if either moves.)
 
 Observed, NEVER pages:
+  STEP_LAG     — panel.json is older than STALE_SEC, but beat-seen is newer.
+                 The loop is still being scheduled; the beat is dying before
+                 publish (the 25s wall, or the reaper on an xpcproxy stall).
+                 That is not a stopped organ. On 2026-10-27 four such beats
+                 aged the panel to 729s and paged a false GLAND_DOWN.
   GLAND_STARTING— no panel yet but the gland job is loaded and its last tick was
                  clean (the organ is being born — a few seconds at boot). An organ
                  is not "dead" the instant it loads; this is the boot-race fix.
@@ -57,6 +62,11 @@ import time
 HOME = os.environ.get("HOME", "/Users/bert")
 PANEL_FILE = os.environ.get(
     "ENDOCRINE_PANEL_FILE", os.path.join(HOME, ".sanctum/state/endocrine/panel.json")
+)
+# Written by endocrine-tick.sh once its timer is armed, and by the reaper
+# when it sees the launchd pid (including a stall before that timer).
+BEAT_FILE = os.environ.get(
+    "ENDOCRINE_BEAT_FILE", os.path.join(HOME, ".sanctum/state/endocrine/beat-seen")
 )
 STATE_FILE = os.environ.get(
     "ENDOCRINE_SENTINEL_STATE",
@@ -93,13 +103,24 @@ def read_panel() -> tuple[dict | None, int | None]:
     return panel, age
 
 
+def read_beat_age() -> int | None:
+    """Seconds since a beat was noted, or None if the stamp was never written.
+
+    mtime is the signal. The file body is only there for a person reading it.
+    """
+    try:
+        return NOW - int(os.path.getmtime(BEAT_FILE))
+    except OSError:
+        return None
+
+
 def gland_status() -> tuple[bool, int | None]:
     """(job_loaded, last_exit_code) for the gland launchd job, via `launchctl print`.
 
     Pure-ish side helper kept OUT of `diagnose` so the verdict stays unit-pure.
     Returns (False, None) if the job is not loaded or launchctl is unreadable;
     (True, None) if loaded but it has not exited yet (just bootstrapped)."""
-    label = os.environ.get("ENDOCRINE_GLAND_LABEL", "com.sanctum.endocrine-gland")
+    label = os.environ.get("ENDOCRINE_GLAND_LABEL", "haus.sanctum.endocrine-gland")
     try:
         out = subprocess.run(
             ["launchctl", "print", f"gui/{os.getuid()}/{label}"],
@@ -126,6 +147,7 @@ def diagnose(
     age: int | None,
     gland_loaded: bool = False,
     gland_last_exit: int | None = None,
+    beat_age: int | None = None,
 ) -> tuple[str, str]:
     """Pure verdict. Returns (state, detail). HEALTHY when the organ is fine.
 
@@ -153,11 +175,17 @@ def diagnose(
         return "GLAND_DOWN", (
             f"panel file present but unparseable (age {age}s) — gland mis-writing"
         )
+    # A fresh beat-seen means launchd is still spawning beats. The panel is
+    # stale because those beats died before publish, not because the loop
+    # stopped. Hormone checks still run; the verdict is STEP_LAG, not a page.
+    step_lag = False
     if age is not None and age > STALE_SEC:
-        return "GLAND_DOWN", (
-            f"panel stale {age}s (> {STALE_SEC}s) — the gland tick loop has "
-            f"stopped; disposition is frozen"
-        )
+        if beat_age is None or beat_age < 0 or beat_age > STALE_SEC:
+            return "GLAND_DOWN", (
+                f"panel stale {age}s (> {STALE_SEC}s) — the gland tick loop has "
+                f"stopped; disposition is frozen"
+            )
+        step_lag = True
     # invariant: every level must be a real number in [0,1]
     for h in HORMONES:
         v = panel.get(h)
@@ -171,6 +199,11 @@ def diagnose(
         return "HORMONE_STORM", (
             f"cortisol pinned high ({cort:.2f} >= {STORM_CORTISOL}) — stuck "
             f"stress axis; the council is jammed convergent"
+        )
+    if step_lag:
+        return "STEP_LAG", (
+            f"panel stale {age}s (> {STALE_SEC}s) but a beat started {beat_age}s "
+            f"ago — the tick loop is alive; the beat is dying before it can publish"
         )
     return "HEALTHY", (
         f"gland fresh ({age}s); levels in range; "
@@ -273,7 +306,7 @@ def _sentinel_label_loaded() -> bool | None:
     is unreadable). Honest about the deploy state so --self-test can report
     LOADED vs not-yet-bootstrapped rather than implying it's always running."""
     label = os.environ.get(
-        "ENDOCRINE_SENTINEL_LABEL", "com.sanctum.endocrine-gland-sentinel"
+        "ENDOCRINE_SENTINEL_LABEL", "haus.sanctum.endocrine-gland-sentinel"
     )
     try:
         out = subprocess.run(
@@ -292,6 +325,15 @@ def self_test() -> int:
         passed = state == want
         ok = ok and passed
         print(f"  [{'PASS' if passed else 'FAIL'}] {name:10s} -> {state} (want {want})")
+    stale_panel = SYNTHETIC["stale"][0]
+    lag_state, _ = diagnose(stale_panel, 9000, True, 0, beat_age=30)
+    lag_ok = lag_state == "STEP_LAG"
+    ok = ok and lag_ok
+    print(f"  [{'PASS' if lag_ok else 'FAIL'}] {'step_lag':10s} -> {lag_state} (want STEP_LAG)")
+    down_state, _ = diagnose(stale_panel, 9000, True, 0, beat_age=None)
+    down_ok = down_state == "GLAND_DOWN"
+    ok = ok and down_ok
+    print(f"  [{'PASS' if down_ok else 'FAIL'}] {'no_beat':10s} -> {down_state} (want GLAND_DOWN)")
     # Deploy honesty: report whether the sentinel's own launchd label is loaded.
     # This is observational (never affects the PASS/FAIL exit) — it tells the
     # operator if the sentinel is actually running on this host.
@@ -314,7 +356,8 @@ def main() -> None:
 
     panel, age = read_panel()
     loaded, last_exit = gland_status()
-    state, detail = diagnose(panel, age, loaded, last_exit)
+    beat_age = read_beat_age()
+    state, detail = diagnose(panel, age, loaded, last_exit, beat_age)
     verdict = {"ts": NOW, "state": state, "detail": detail, "age": age}
 
     if "--check" in args:
@@ -331,7 +374,7 @@ def main() -> None:
                 "critical",
                 f"Endocrine {state} — the seventh organ is unhealthy",
                 f"{detail}  [observe-only; investigate: cat {PANEL_FILE}; "
-                f"check com.sanctum.endocrine-gland launchd job]",
+                f"check haus.sanctum.endocrine-gland launchd job]",
             )
             write_state({"last_alert": NOW, "last_state": state, "detail": detail})
     print(json.dumps(verdict))

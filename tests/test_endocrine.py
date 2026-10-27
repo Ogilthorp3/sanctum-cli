@@ -654,6 +654,51 @@ class TestTickDeadline:
         assert caught.value.code == EXIT_TEMPFAIL
         assert not (tmp_path / "panel.json").exists()
 
+    def test_tick_cmd_refreshes_an_existing_panel_before_a_wedged_read(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """A beat killed during signal I/O must not leave the last real panel stale.
+
+        Four of those on 2026-10-27 aged panel.json past 600s while launchd
+        was still spawning beats.
+        """
+        import json
+        import time
+
+        from sanctum_cli.commands import endocrine_cmd
+        from sanctum_cli.endocrine import bloodstream, gland_daemon
+        from sanctum_cli.endocrine.gland import Panel
+        from sanctum_cli.endocrine.tick_deadline import EXIT_TEMPFAIL
+
+        monkeypatch.setenv(bloodstream.STATE_DIR_ENV, str(tmp_path))
+        monkeypatch.setenv("SANCTUM_ENDOCRINE_TICK_DEADLINE", "0.2")
+        prior = Panel(
+            dopamine=0.3,
+            cortisol=0.0,
+            noradrenaline=0.0,
+            oxytocin=0.5,
+            melatonin=0.2,
+            serotonin=0.6,
+        )
+        bloodstream.publish_panel_file(prior)
+        written = json.loads((tmp_path / "panel.json").read_text())
+        # publish_panel_file stamps ts with second resolution; step off it.
+        stale_ts = "2020-01-01T00:00:00Z"
+        written["ts"] = stale_ts
+        (tmp_path / "panel.json").write_text(json.dumps(written))
+
+        def hang(**_k: object) -> None:
+            time.sleep(5)
+
+        monkeypatch.setattr(gland_daemon, "read_memory_headroom_mb", hang)
+        with pytest.raises(SystemExit) as caught:
+            endocrine_cmd.tick_cmd(dry_run=False)
+        assert caught.value.code == EXIT_TEMPFAIL
+        again = json.loads((tmp_path / "panel.json").read_text())
+        assert again["ts"] != stale_ts
+        assert again["panel"]["dopamine"] == 0.3
+        assert again["panel"]["cortisol"] == 0.0
+
     def test_tick_cmd_happy_path_disarms(self, tmp_path, monkeypatch) -> None:
         import time
 
@@ -693,6 +738,7 @@ class TestTickDeadline:
                 **os.environ,
                 "SANCTUM_BIN": str(fake),
                 "SANCTUM_ENDOCRINE_TICK_WALL": "1",
+                "SANCTUM_ENDOCRINE_BEAT_SEEN": str(tmp_path / "beat-seen"),
                 "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
             },
             capture_output=True,
@@ -710,6 +756,8 @@ class TestTickDeadline:
             text=True,
         )
         assert str(fake) not in leftover.stdout
+        # Noted before sanctum, so a beat killed in the wedge still counts.
+        assert (tmp_path / "beat-seen").read_text().strip().isdigit()
 
     def test_wrapper_returns_a_fast_beats_exit_code(self, tmp_path) -> None:
         import os
@@ -730,6 +778,7 @@ class TestTickDeadline:
                 **os.environ,
                 "SANCTUM_BIN": str(fake),
                 "SANCTUM_ENDOCRINE_TICK_WALL": "10",
+                "SANCTUM_ENDOCRINE_BEAT_SEEN": str(tmp_path / "beat-seen"),
                 "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
             },
             capture_output=True,
@@ -738,6 +787,7 @@ class TestTickDeadline:
         )
         assert proc.returncode == 0
         assert time.monotonic() - started < 3
+        assert (tmp_path / "beat-seen").read_text().strip().isdigit()
 
     def test_wrapper_kills_a_stall_before_sanctum_starts(self, tmp_path) -> None:
         """The 2026-10-01 beats blocked before the sleeper was armed and
@@ -760,6 +810,7 @@ class TestTickDeadline:
                 **os.environ,
                 "SANCTUM_ENDOCRINE_TICK_PREHOOK": str(pre),
                 "SANCTUM_ENDOCRINE_TICK_WALL": "1",
+                "SANCTUM_ENDOCRINE_BEAT_SEEN": str(tmp_path / "beat-seen"),
                 "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
             },
             capture_output=True,
@@ -775,6 +826,8 @@ class TestTickDeadline:
             text=True,
         )
         assert str(pre) not in leftover.stdout
+        # The stamp is written once the timer is armed, before sanctum.
+        assert (tmp_path / "beat-seen").read_text().strip().isdigit()
 
 
 class TestEndocrineReaper:
@@ -806,6 +859,7 @@ class TestEndocrineReaper:
                 **os.environ,
                 "LAUNCHCTL": str(fake),
                 "SANCTUM_ENDOCRINE_REAPER_STATE": str(seen),
+                "SANCTUM_ENDOCRINE_BEAT_SEEN": str(tmp_path / "beat-seen"),
                 "SANCTUM_ENDOCRINE_TICK_WALL": wall,
                 "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
             },
@@ -825,6 +879,7 @@ class TestEndocrineReaper:
             assert "SIGKILL" not in proc.stderr
             assert seen.read_text().split()[0] == str(sleep.pid)
             assert sleep.poll() is None
+            assert (tmp_path / "beat-seen").read_text().strip().isdigit()
         finally:
             sleep.kill()
             sleep.wait(timeout=5)
@@ -845,6 +900,8 @@ class TestEndocrineReaper:
             assert "SIGKILL" in proc.stderr
             sleep.wait(timeout=5)
             assert not seen.exists()
+            # The kill must not erase the liveness stamp the sentinel reads.
+            assert (tmp_path / "beat-seen").read_text().strip().isdigit()
         finally:
             if sleep.poll() is None:
                 sleep.kill()
@@ -858,6 +915,18 @@ class TestEndocrineReaper:
         )
         assert proc.returncode == 0
         assert not seen.exists()
+
+    def test_idle_job_leaves_an_existing_beat_stamp(self, tmp_path) -> None:
+        stamp = tmp_path / "beat-seen"
+        stamp.write_text("1\n")
+        proc, seen = self._run(
+            tmp_path,
+            "echo 'state = not running'\n",
+            "999999 1\n",
+        )
+        assert proc.returncode == 0
+        assert not seen.exists()
+        assert stamp.read_text() == "1\n"
 
     def test_a_new_pid_resets_the_clock(self, tmp_path) -> None:
         import subprocess
@@ -876,6 +945,49 @@ class TestEndocrineReaper:
         finally:
             sleep.kill()
             sleep.wait(timeout=5)
+
+
+class TestEndocrineSentinelBeatStamp:
+    """GLAND_DOWN is a stopped loop. A stale panel with a fresh beat-seen is
+    a beat dying before publish, which must not page."""
+
+    def _sentinel(self):
+        import importlib.util
+        from pathlib import Path
+
+        script = (
+            Path(__file__).resolve().parents[1]
+            / "deploy"
+            / "endocrine"
+            / "endocrine-gland-sentinel.py"
+        )
+        spec = importlib.util.spec_from_file_location("endocrine_gland_sentinel", script)
+        assert spec is not None and spec.loader is not None
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_stale_panel_with_a_fresh_beat_is_not_gland_down(self) -> None:
+        mod = self._sentinel()
+        panel = {
+            "dopamine": 0.3,
+            "cortisol": 0.2,
+            "noradrenaline": 0.1,
+            "oxytocin": 0.5,
+            "melatonin": 0.2,
+            "serotonin": 0.6,
+        }
+        state, detail = mod.diagnose(panel, 9000, True, 0, beat_age=30)
+        assert state == "STEP_LAG"
+        assert "tick loop is alive" in detail
+        state, _ = mod.diagnose(panel, 9000, True, 0, beat_age=None)
+        assert state == "GLAND_DOWN"
+        state, _ = mod.diagnose(panel, 9000, True, 0, beat_age=9000)
+        assert state == "GLAND_DOWN"
+        storm = dict(panel)
+        storm["cortisol"] = 0.99
+        state, _ = mod.diagnose(storm, 9000, True, 0, beat_age=30)
+        assert state == "HORMONE_STORM"
 
 
 class TestAlertRateReadsRealForceFlowHistory:

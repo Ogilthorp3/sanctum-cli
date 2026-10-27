@@ -4,7 +4,9 @@
 # endocrine-tick.sh arms its own timer after it has been exec'd. A stall
 # inside xpcproxy, or in this process before that timer is forked, never
 # reaches it. launchd will not start the next StartInterval while that pid
-# lives, and the panel then ages past 600s.
+# lives, and the panel then ages past 600s. Seeing a live pid writes
+# beat-seen (same file as endocrine-tick.sh) so that stall still counts
+# as a scheduled beat. This script never deletes that stamp.
 #
 # This job is not a child of the beat. Each run records the gland pid.
 # The same pid still alive SANCTUM_ENDOCRINE_TICK_WALL seconds later is
@@ -28,7 +30,18 @@ fi
 
 LABEL="${SANCTUM_ENDOCRINE_LABEL:-haus.sanctum.endocrine-gland}"
 STATE="${SANCTUM_ENDOCRINE_REAPER_STATE:-${HOME:-}/.sanctum/state/endocrine/reaper-seen}"
+BEAT_SEEN="${SANCTUM_ENDOCRINE_BEAT_SEEN:-${HOME:-}/.sanctum/state/endocrine/beat-seen}"
 LAUNCHCTL="${LAUNCHCTL:-/bin/launchctl}"
+
+note_beat() {
+  local dir prev
+  dir="$(dirname "$BEAT_SEEN")"
+  mkdir -p "$dir" 2>/dev/null || return 0
+  prev="$(umask)"
+  umask 077
+  date +%s > "$BEAT_SEEN" 2>/dev/null || true
+  umask "$prev"
+}
 
 out="$("$LAUNCHCTL" print "gui/$(id -u)/${LABEL}" 2>/dev/null)" || exit 0
 pid="$(printf '%s\n' "$out" | /usr/bin/awk '$1 == "pid" && $2 == "=" { print $3; exit }')"
@@ -40,6 +53,10 @@ if ! kill -0 "$pid" 2>/dev/null; then
   rm -f "$STATE"
   exit 0
 fi
+
+# The pid is a real beat, including one still inside xpcproxy. Note it
+# before the wall clock, and leave the stamp in place after SIGKILL.
+note_beat
 
 mkdir -p "$(dirname "$STATE")" 2>/dev/null || exit 0
 now="$(date +%s)"

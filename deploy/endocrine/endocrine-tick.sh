@@ -13,6 +13,11 @@
 # of the launchd pid, so a child still stuck in the kernel does not keep
 # the slot. endocrine-tick-reaper.sh covers a stall before this fork,
 # including xpcproxy.
+#
+# beat-seen is written as soon as the timer is armed, before sanctum.
+# The sentinel treats that mtime as "the loop is scheduled", so a streak
+# of beats killed before publish does not page GLAND_DOWN. The reaper
+# writes the same file for a stall that never reaches this point.
 
 set -u
 
@@ -50,6 +55,20 @@ done_flag="${TMPDIR:-/tmp}/endocrine-tick.done.${beat_pid}"
   kill "KILL", -$pid;
 ' "$OUTER_DEADLINE" "$beat_pid" "$done_flag" &
 watch_pid=$!
+
+# Prove the loop is scheduled before any slow work. A killed beat still
+# leaves this mtime behind. umask is restored so sanctum does not inherit it.
+BEAT_SEEN="${SANCTUM_ENDOCRINE_BEAT_SEEN:-${HOME:-}/.sanctum/state/endocrine/beat-seen}"
+note_beat() {
+  local dir prev
+  dir="$(dirname "$BEAT_SEEN")"
+  mkdir -p "$dir" 2>/dev/null || return 0
+  prev="$(umask)"
+  umask 077
+  date +%s > "$BEAT_SEEN" 2>/dev/null || true
+  umask "$prev"
+}
+note_beat
 
 stop_watch() {
   # SIGKILL the timer itself. Killing only a child sleep would let the

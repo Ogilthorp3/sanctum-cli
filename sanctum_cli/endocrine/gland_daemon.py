@@ -133,11 +133,28 @@ def load_checkpoint() -> Panel:
     return p if p is not None else Panel.neutral()
 
 
+def republish_checkpoint() -> None:
+    """Refresh the last real panel before slow signal reads.
+
+    The finished panel is written at the end of the beat. A beat the wall
+    kills never gets there, and a short streak of those ages ``panel.json``
+    past the sentinel. Rewriting the checkpoint here moves its mtime once
+    this interpreter is up. No checkpoint means write nothing: a cold start
+    must not invent a neutral panel.
+    """
+    current = bloodstream.read_panel()
+    if current is None:
+        return
+    bloodstream.publish_panel_file(current)
+
+
 def tick(*, dry_run: bool = False) -> Panel:
     """One homeostatic tick: read real signals → step → broadcast.
 
     Returns the new panel. With ``dry_run`` it computes but broadcasts nothing.
     """
+    if not dry_run:
+        republish_checkpoint()
     current = load_checkpoint()
     signals = read_signals()
     nxt = step_panel(current, signals)
@@ -169,6 +186,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.once or args.dry_run:
         try:
             with bounded_tick():
+                if not args.dry_run:
+                    republish_checkpoint()
                 signals = read_signals()
                 current = load_checkpoint()
                 nxt = step_panel(current, signals)
