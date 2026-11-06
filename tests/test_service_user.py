@@ -96,3 +96,11 @@ def test_onboard_operator_lists_service_user_gate():
     assert "service-user-install" not in onboard.RECIPE_GATES["family"]
     assert "service-user-install" in onboard._CHAPTER_GATES["Your Network"]
     assert "service-user-install" in onboard._GATE_LABELS
+
+
+def test_memory_vault_template_listens_on_loopback_only():
+    import plistlib
+
+    raw = su._package_asset("haus.sanctum.memory-vault.plist")
+    pl = plistlib.loads(raw.encode())
+    assert pl["EnvironmentVariables"]["MEMORY_VAULT_HOST"] == "127.0.0.1"

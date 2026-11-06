@@ -13,7 +13,7 @@
     <key>MEMORY_VAULT_DIR</key>
     <string>@OPERATOR_HOME@/.sanctum/memory</string>
     <key>MEMORY_VAULT_HOST</key>
-    <string>0.0.0.0</string>
+    <string>127.0.0.1</string>
     <key>MEMORY_VAULT_PORT</key>
     <string>42069</string>
     <key>MEMORY_VAULT_TRANSPORT</key>
