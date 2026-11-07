@@ -137,7 +137,7 @@ def publish_panel_file(panel: Panel) -> None:
     _write_private_atomic(panel_path(), json.dumps(rec))
 
 
-def broadcast_to_chitti(panel: Panel, *, timeout: float = 5.0) -> bool:
+def broadcast_to_chitti(panel: Panel, *, timeout: float = 3.0) -> bool:
     """Append the panel timeseries to chitti's samskara journal.
 
     Uses the SAME write contract as launchd-health-sentinel

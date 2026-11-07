@@ -3,8 +3,8 @@
 <!--
   STAGED — NOT LOADED. This is the gland daemon (the seventh organ).
   Bert turns it on:
-      cp com.sanctum.endocrine-gland.plist ~/Library/LaunchAgents/
-      launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.sanctum.endocrine-gland.plist
+      cp haus.sanctum.endocrine-gland.plist ~/Library/LaunchAgents/
+      launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/haus.sanctum.endocrine-gland.plist
 
   Runs one gland tick every 120s (StartInterval) via endocrine-tick.sh.
   Off-by-default in effect: a running gland publishes a NEUTRAL panel until a
@@ -14,11 +14,17 @@
   StartInterval does not overlap a beat that is still running. A tick that
   never exits holds the slot and the sentinel pages GLAND_DOWN at 600s.
   endocrine-tick.sh kills the beat at 25s so one wedge cannot freeze the panel.
+
+  Standard, not Background (2026-11-07): under sustained GPU/CPU load on
+  2026-11-06 (1794013790 / 1794015464), launchd coalesced/deferred Background
+  StartInterval=120 beats past STALE_SEC (1179s / 3468s) while IOPOL_THROTTLE
+  starved cold Python imports past the 25s wall, paging false GLAND_DOWN.
+  One 60ms beat every 120s uses ~0.03% of one core.
 -->
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.sanctum.endocrine-gland</string>
+    <string>haus.sanctum.endocrine-gland</string>
     <key>ProgramArguments</key>
     <array>
         <string>/Users/bert/.sanctum/scripts/endocrine-tick.sh</string>
@@ -35,7 +41,7 @@
     <key>StartInterval</key>
     <integer>120</integer>
     <key>ProcessType</key>
-    <string>Background</string>
+    <string>Standard</string>
     <key>StandardOutPath</key>
     <string>/Users/bert/.sanctum/logs/endocrine-gland.log</string>
     <key>StandardErrorPath</key>

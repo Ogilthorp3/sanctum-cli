@@ -4,8 +4,8 @@
   Separate from haus.sanctum.endocrine-gland. SIGKILLs that job's pid when
   the same pid is still running past the 25s wall, including a stall in
   xpcproxy before endocrine-tick.sh can arm its own timer. Does not
-  kickstart. ProcessType stays Standard so this job is not deferred with
-  the Background gland beat.
+  kickstart. ProcessType stays Standard so this job is never deferred under
+  system load.
 -->
 <plist version="1.0">
 <dict>

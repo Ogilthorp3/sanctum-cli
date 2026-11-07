@@ -1280,3 +1280,103 @@ class TestCouncilSeatReceptorContract:
         )
         assert "temperature" not in body
         assert body["system"] == seat.persona
+
+
+class TestLaunchdDeferralAndImportBudget:
+    """Regression suite for 2026-11-06 GLAND_DOWN (ts=1794015464, panel stale 1179s):
+    1. LaunchAgent plists must run ProcessType=Standard with haus.sanctum.* labels so
+       macOS launchd never coalesces/defers StartInterval=120 past STALE_SEC=600s or
+       throttles cold imports under IOPOL_THROTTLE.
+    2. Sum of per-probe default HTTP timeouts must sit well inside DEFAULT_DEADLINE_SEC.
+    3. gland_daemon --once --compact runs the stdlib-only fast-path without importing
+       Typer/Rich, and endocrine-tick.sh uses SANCTUM_PYTHON when SANCTUM_BIN is unset.
+    """
+
+    def test_plists_use_haus_labels_and_standard_process_type(self) -> None:
+        import plistlib
+        from pathlib import Path
+
+        deploy_dir = Path(__file__).resolve().parents[1] / "deploy" / "endocrine"
+        expected = {
+            "haus.sanctum.endocrine-gland.plist": "haus.sanctum.endocrine-gland",
+            "haus.sanctum.endocrine-gland-sentinel.plist": "haus.sanctum.endocrine-gland-sentinel",
+        }
+        for filename, want_label in expected.items():
+            pl = plistlib.loads((deploy_dir / filename).read_bytes())
+            assert pl["Label"] == want_label
+            assert pl["ProcessType"] == "Standard"
+
+    def test_default_probe_timeouts_fit_inside_inner_deadline(self) -> None:
+        import inspect
+
+        from sanctum_cli.endocrine import bloodstream, gland_daemon
+        from sanctum_cli.endocrine.tick_deadline import DEFAULT_DEADLINE_SEC
+
+        mem_t = float(inspect.signature(gland_daemon.read_memory_headroom_mb).parameters["timeout"].default)
+        alert_t = float(inspect.signature(gland_daemon.read_alert_rate_1h).parameters["timeout"].default)
+        chitti_t = float(inspect.signature(bloodstream.broadcast_to_chitti).parameters["timeout"].default)
+        # 1 memory read + 3 Force Flow severity reads + 1 chitti broadcast
+        worst_case = mem_t + 3.0 * alert_t + chitti_t
+        assert worst_case <= 12.0
+        assert worst_case < DEFAULT_DEADLINE_SEC - 5.0
+
+    def test_gland_daemon_compact_mode_matches_tick_summary(
+        self, tmp_path, monkeypatch, capsys
+    ) -> None:
+        from sanctum_cli.endocrine import bloodstream, gland_daemon
+
+        monkeypatch.setenv(bloodstream.STATE_DIR_ENV, str(tmp_path))
+        monkeypatch.setattr(gland_daemon, "read_memory_headroom_mb", lambda **k: 14000)
+        monkeypatch.setattr(gland_daemon, "read_alert_rate_1h", lambda **k: 0)
+        monkeypatch.setattr(bloodstream, "broadcast_to_chitti", lambda *a, **k: True)
+
+        rc = gland_daemon.main(["--once", "--compact"])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "tick: signals(headroom_mb=14000 alert_rate_1h=0" in out
+        assert "broadcast→chitti OK" in out
+        assert "endocrine: resting | disposition=" in out
+        assert bloodstream.read_panel() is not None
+
+    def test_wrapper_fast_paths_via_sanctum_python_when_sanctum_bin_unset(
+        self, tmp_path
+    ) -> None:
+        import os
+        import stat
+        import subprocess
+        from pathlib import Path
+
+        script = Path(__file__).resolve().parents[1] / "deploy" / "endocrine" / "endocrine-tick.sh"
+        args_file = tmp_path / "py_args.txt"
+        fake_py = tmp_path / "fake-python"
+        fake_py.write_text(f"#!/bin/bash\nprintf '%s\\n' \"$@\" > '{args_file}'\nexit 0\n")
+        fake_py.chmod(fake_py.stat().st_mode | stat.S_IEXEC)
+
+        env = {
+            k: v
+            for k, v in os.environ.items()
+            if k != "SANCTUM_BIN"
+        }
+        env.update(
+            {
+                "SANCTUM_PYTHON": str(fake_py),
+                "SANCTUM_ENDOCRINE_TICK_WALL": "5",
+                "SANCTUM_ENDOCRINE_BEAT_SEEN": str(tmp_path / "beat-seen"),
+                "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            }
+        )
+        proc = subprocess.run(
+            ["bash", str(script), "--dry-run"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        assert proc.returncode == 0
+        assert args_file.read_text().splitlines() == [
+            "-m",
+            "sanctum_cli.endocrine.gland_daemon",
+            "--once",
+            "--compact",
+            "--dry-run",
+        ]

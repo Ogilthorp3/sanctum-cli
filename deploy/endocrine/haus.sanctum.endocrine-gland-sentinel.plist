@@ -6,13 +6,13 @@
   cooldown). Observe-only: never restarts/doses anything.
   Bert turns it on:
       cp endocrine-gland-sentinel.py ~/.sanctum/sentinels/
-      cp com.sanctum.endocrine-gland-sentinel.plist ~/Library/LaunchAgents/
-      launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.sanctum.endocrine-gland-sentinel.plist
+      cp haus.sanctum.endocrine-gland-sentinel.plist ~/Library/LaunchAgents/
+      launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/haus.sanctum.endocrine-gland-sentinel.plist
 -->
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.sanctum.endocrine-gland-sentinel</string>
+    <string>haus.sanctum.endocrine-gland-sentinel</string>
     <key>ProgramArguments</key>
     <array>
         <string>/opt/homebrew/bin/python3</string>
@@ -30,7 +30,7 @@
     <key>StartInterval</key>
     <integer>300</integer>
     <key>ProcessType</key>
-    <string>Background</string>
+    <string>Standard</string>
     <key>StandardOutPath</key>
     <string>/Users/bert/.sanctum/logs/endocrine-gland-sentinel.log</string>
     <key>StandardErrorPath</key>

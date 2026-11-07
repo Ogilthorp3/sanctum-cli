@@ -47,7 +47,7 @@ from .gland import Panel, Signals, step_panel
 from .tick_deadline import EXIT_TEMPFAIL, TickDeadlineExceeded, bounded_tick
 
 
-def read_memory_headroom_mb(*, timeout: float = 4.0) -> int | None:
+def read_memory_headroom_mb(*, timeout: float = 2.5) -> int | None:
     """Memory headroom from chitti /fluid → cortisol. None if blind.
 
     Reads ``kosha.annamaya.memory_available_gb`` (the live fluid shape verified
@@ -66,7 +66,7 @@ def read_memory_headroom_mb(*, timeout: float = 4.0) -> int | None:
         return None
 
 
-def read_alert_rate_1h(*, timeout: float = 4.0) -> int | None:
+def read_alert_rate_1h(*, timeout: float = 2.0) -> int | None:
     """Count high-severity Force-Flow notifications in the last hour.
 
     → noradrenaline (acute) + sustained cortisol. Force-Flow exposes
@@ -176,10 +176,32 @@ def _print_panel(panel: Panel, signals: Signals | None = None) -> None:
     print(json.dumps(out, indent=2))
 
 
+def _format_compact_status(panel: Panel, *, creative: bool, live: bool = True) -> str:
+    axis = panel.dopamine - panel.cortisol
+    if axis >= 0.25:
+        disp = "exploratory (divergent)"
+    elif axis <= -0.25:
+        disp = "focused (convergent)"
+    else:
+        disp = "balanced"
+    state = "creative" if creative else "resting"
+    src = "live" if live else "neutral(off)"
+    return (
+        f"endocrine: {state} | disposition={disp} | "
+        f"dopamine={panel.dopamine:.2f} cortisol={panel.cortisol:.2f} "
+        f"noradrenaline={panel.noradrenaline:.2f} | source={src}"
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Sanctum endocrine gland daemon.")
     ap.add_argument("--once", action="store_true", help="one tick then exit")
     ap.add_argument("--dry-run", action="store_true", help="compute, broadcast nothing")
+    ap.add_argument(
+        "--compact",
+        action="store_true",
+        help="print compact two-line beat summary (matches `sanctum endocrine tick` without Typer/Rich import)",
+    )
     ap.add_argument("--interval", type=int, default=60, help="tick cadence in seconds (default 60)")
     args = ap.parse_args(argv)
 
@@ -193,11 +215,26 @@ def main(argv: list[str] | None = None) -> int:
                 nxt = step_panel(current, signals)
                 if not args.dry_run:
                     bloodstream.publish_panel_file(nxt)
-                    bloodstream.broadcast_to_chitti(nxt)
+                    ok = bloodstream.broadcast_to_chitti(nxt)
+                    chitti = (
+                        "broadcast→chitti OK"
+                        if ok
+                        else "chitti broadcast skipped (unreachable)"
+                    )
+                else:
+                    chitti = "dry-run (no broadcast)"
         except TickDeadlineExceeded as e:
             print(f"endocrine tick deadline: {e}", file=sys.stderr)
             return EXIT_TEMPFAIL
-        _print_panel(nxt, signals)
+        if args.compact:
+            print(
+                f"tick: signals(headroom_mb={signals.headroom_mb} "
+                f"alert_rate_1h={signals.alert_rate_1h} hour={signals.hour} "
+                f"creative={signals.creative_mode}) → {chitti}"
+            )
+            print(_format_compact_status(nxt, creative=bool(signals.creative_mode), live=not args.dry_run))
+        else:
+            _print_panel(nxt, signals)
         return 0
 
     # long-running loop (the daemon proper). Each beat has its own wall

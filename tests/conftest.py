@@ -50,7 +50,14 @@ def _tls_ca_for_tests(tmp_path_factory: pytest.TempPathFactory) -> Iterator[None
     cafile. No-op when a real CA exists (tests use it); never writes to
     ``~/.sanctum``.
     """
-    if Path("~/.sanctum/certs/ca.crt").expanduser().exists():
+    real_ca = Path("~/.sanctum/certs/ca.crt").expanduser()
+    if real_ca.exists():
+        # Pin the absolute real CA path into env BEFORE function-scoped
+        # _home_is_never_the_operators swaps HOME to tmp_path/home; otherwise
+        # lazy imports of sanctum_cli.proxyd evaluate DEFAULT_CA against the
+        # empty fake HOME and fail with FileNotFoundError.
+        for env in ("SANCTUM_PROXYD_CA", "SANCTUM_COUNCIL_CACERT", "SANCTUM_COUNCIL_CA"):
+            os.environ.setdefault(env, str(real_ca))
         yield
         return
     import datetime
