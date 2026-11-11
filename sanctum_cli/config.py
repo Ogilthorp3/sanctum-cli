@@ -64,7 +64,18 @@ class ClaudeProvider(StrictModel):
 
 
 class GeminiProvider(StrictModel):
+    """Gemini routing config.
+
+    ``via=direct`` (default) uses the ``google-genai`` SDK against Google AI
+    Studio and bills the API key in Keychain. ``via=proxy`` talks to a local
+    OpenAI-compatible Gemini subscription bridge (``sanctum-agy-proxy`` on
+    ``proxy_url``, default ``http://127.0.0.1:6543``) with zero per-token API
+    charges.
+    """
+
+    via: Literal["direct", "proxy"] = "direct"
     endpoint: str = "https://generativelanguage.googleapis.com"
+    proxy_url: str = "http://127.0.0.1:6543"
     model: str = "gemini-2.5-pro"
     keychain: KeychainRef = Field(
         default_factory=lambda: KeychainRef(service="google-ai-api-key", account="sanctum")
@@ -331,9 +342,7 @@ def scaffold_instance(path: Path | None = None, *, name: str | None = None) -> P
         chosen_name, slug = name, slugify_name(name)
     else:
         chosen_name, slug = _default_identity()
-    target.write_text(
-        f"instance:\n  name: {chosen_name}\n  slug: {slug}\n", encoding="utf-8"
-    )
+    target.write_text(f"instance:\n  name: {chosen_name}\n  slug: {slug}\n", encoding="utf-8")
     return target
 
 

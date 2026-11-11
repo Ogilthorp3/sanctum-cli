@@ -13,6 +13,7 @@ import json
 import shutil
 import socket
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -28,7 +29,10 @@ console = Console()
 
 DF_PATH = "/System/Volumes/Data"
 DF_TIMEOUT_S = 2
-RESTIC_TIMEOUT_S = 5
+# rclone-backed cloud repos (e.g. Google Drive) spend ~4-6s refreshing listing
+# metadata on cold calls, which exceeded the old 5s cap while doctor (10s)
+# passed. 25s covers cold cloud round-trips without hanging an interactive CLI.
+RESTIC_TIMEOUT_S = 25
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,7 +112,17 @@ def probe_backup(repo: str, password_env: dict[str, str]) -> BackupInfo:
         return BackupInfo(repo, None, None, None, "UNKNOWN", "restic not installed")
     try:
         out = subprocess.run(
-            ["restic", "-r", repo, "snapshots", "--json", "--latest", "1", "--no-lock"],
+            [
+                "restic",
+                "-r",
+                repo,
+                "snapshots",
+                "--json",
+                "--latest",
+                "1",
+                "--compact",
+                "--no-lock",
+            ],
             capture_output=True,
             text=True,
             timeout=RESTIC_TIMEOUT_S,
@@ -224,19 +238,50 @@ def _password_env(cfg: config.Config) -> dict[str, str]:
     return env
 
 
+def _repo_password_env(
+    repo_cfg: config.CloudBackupRepo,
+    base_env: dict[str, str],
+    cache: dict[tuple[str, str], str | None],
+) -> dict[str, str]:
+    """Build env with RESTIC_PASSWORD for a single repo, caching Keychain lookups."""
+    key = (repo_cfg.keychain.account, repo_cfg.keychain.service)
+    if key not in cache:
+        try:
+            from sanctum_cli import keychain
+
+            cache[key] = keychain.read(account=key[0], service=key[1])
+        except LocalError:
+            cache[key] = None
+    env = dict(base_env)
+    pwd = cache[key]
+    if pwd is not None:
+        env["RESTIC_PASSWORD"] = pwd
+    return env
+
+
 # ─── Aggregator ─────────────────────────────────────────────────────
 
 
 def collect(cfg: config.Config) -> dict[str, Any]:
+    import os as _os
+
     disk = probe_disk()
-    env = _password_env(cfg)
     backups: list[BackupInfo] = []
     cb = cfg.cli.cloud_backup
     if cb is not None:
+        base_env = dict(_os.environ)
+        cache: dict[tuple[str, str], str | None] = {}
+        targets: list[tuple[str, dict[str, str]]] = []
         if cb.primary is not None:
-            backups.append(probe_backup(cb.primary.repo, env))
+            targets.append((cb.primary.repo, _repo_password_env(cb.primary, base_env, cache)))
         if cb.secondary is not None:
-            backups.append(probe_backup(cb.secondary.repo, env))
+            targets.append((cb.secondary.repo, _repo_password_env(cb.secondary, base_env, cache)))
+        if len(targets) == 1:
+            backups.append(probe_backup(*targets[0]))
+        elif len(targets) > 1:
+            with ThreadPoolExecutor(max_workers=len(targets)) as pool:
+                futures = [pool.submit(probe_backup, repo, env) for repo, env in targets]
+                backups.extend(f.result() for f in futures)
     telemetry = probe_telemetry(
         Path(cfg.cli.telemetry.path).expanduser(),
         cfg.cli.telemetry.aggregate_window_days,
@@ -317,7 +362,9 @@ def render_table(snap: dict[str, Any]) -> None:
         console.print(bk)
         console.print()
 
-    console.print(f"telemetry: {tel.request_count} requests · {tel.error_count} errors · last {tel.window_days}d")
+    console.print(
+        f"telemetry: {tel.request_count} requests · {tel.error_count} errors · last {tel.window_days}d"
+    )
 
 
 def render_json(snap: dict[str, Any]) -> str:

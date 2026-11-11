@@ -32,6 +32,9 @@ def make_provider(name: str, cfg: Providers) -> Provider:
         )
         return ClaudeProvider(cfg.claude, api_key)
     if name == "gemini":
+        if cfg.gemini.via == "proxy":
+            # Gemini subscription via local OpenAI-compatible bridge — no API key needed
+            return GeminiProvider(cfg.gemini, api_key=None)
         api_key = keychain.read(
             account=cfg.gemini.keychain.account,
             service=cfg.gemini.keychain.service,
