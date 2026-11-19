@@ -7,6 +7,7 @@ import subprocess
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
+import pytest
 from typer.testing import CliRunner
 
 from sanctum_cli.cli import app
@@ -15,9 +16,15 @@ from sanctum_cli.providers.base import HealthSnapshot, Provider
 if TYPE_CHECKING:
     from pathlib import Path
 
-    import pytest
-
 runner = CliRunner()
+
+
+@pytest.fixture(autouse=True)
+def _daemon_probes_are_hermetic():  # type: ignore[no-untyped-def]
+    """``doctor`` probes force-flow/thalamus over local HTTP. Pin the probe so these
+    tests do not depend on a service listening on the machine that runs them."""
+    with patch("sanctum_cli.commands.doctor._http_ok", return_value=True):
+        yield
 
 
 LAUNCHCTL_ALL_GREEN = """\
