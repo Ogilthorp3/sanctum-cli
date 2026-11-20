@@ -83,3 +83,42 @@ def test_restic_env_for_repo_local_and_cache_dedup() -> None:
     kc.assert_called_once_with(account="acct", service="svc")
     assert env1["RESTIC_PASSWORD"] == "local-pw"
     assert env2["RESTIC_PASSWORD"] == "local-pw"
+
+
+def test_restic_env_for_repo_partial_r2_keychain_is_atomic() -> None:
+    def fake_read(*, account: str, service: str) -> str:
+        if service == "svc":
+            return "repo-pw"
+        if service == "r2-access-key-id":
+            return "r2-only-access-key"
+        raise KeychainEntryMissingError("missing r2 secret")
+
+    with patch("sanctum_cli.keychain.read", side_effect=fake_read):
+        env = restic_env_for_repo(
+            _repo("s3:s3.amazonaws.com/my-bucket"),
+            base_env={
+                "AWS_ACCESS_KEY_ID": "aws-key",
+                "AWS_SECRET_ACCESS_KEY": "aws-secret",
+            },
+        )
+
+    assert env["RESTIC_PASSWORD"] == "repo-pw"
+    assert env["AWS_ACCESS_KEY_ID"] == "aws-key"
+    assert env["AWS_SECRET_ACCESS_KEY"] == "aws-secret"
+    assert "AWS_DEFAULT_REGION" not in env
+
+
+def test_restic_env_for_repo_uppercase_r2_host_fails_closed() -> None:
+    def fake_read(*, account: str, service: str) -> str:
+        if service == "svc":
+            return "repo-pw"
+        raise KeychainEntryMissingError("missing r2 cred")
+
+    with (
+        patch("sanctum_cli.keychain.read", side_effect=fake_read),
+        pytest.raises(KeychainEntryMissingError),
+    ):
+        restic_env_for_repo(
+            _repo("s3:https://id.R2.CLOUDFLARESTORAGE.COM/my-bucket"),
+            base_env={"AWS_ACCESS_KEY_ID": "x", "AWS_SECRET_ACCESS_KEY": "y"},
+        )

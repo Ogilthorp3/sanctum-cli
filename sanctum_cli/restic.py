@@ -56,24 +56,27 @@ def restic_env_for_repo_path(
         )
     elif repo.startswith(("s3:", "r2:")):
         try:
-            env["AWS_ACCESS_KEY_ID"] = _read_cached(
+            r2_access_key = _read_cached(
                 _b2.KEYCHAIN_ACCOUNT, _r2.KEYCHAIN_SERVICE_R2_ACCESS_KEY, cache
             )
-            env["AWS_SECRET_ACCESS_KEY"] = _read_cached(
+            r2_secret_key = _read_cached(
                 _b2.KEYCHAIN_ACCOUNT, _r2.KEYCHAIN_SERVICE_R2_SECRET, cache
             )
-            env["AWS_DEFAULT_REGION"] = "auto"
         except KeychainEntryMissingError:
             # Generic non-R2 s3: repos can rely on caller-supplied AWS_* env vars.
             if (
                 repo.startswith("s3:")
-                and "r2.cloudflarestorage.com" not in repo
+                and "r2.cloudflarestorage.com" not in repo.lower()
                 and env.get("AWS_ACCESS_KEY_ID")
                 and env.get("AWS_SECRET_ACCESS_KEY")
             ):
                 pass
             else:
                 raise
+        else:
+            env["AWS_ACCESS_KEY_ID"] = r2_access_key
+            env["AWS_SECRET_ACCESS_KEY"] = r2_secret_key
+            env["AWS_DEFAULT_REGION"] = "auto"
     return env
 
 

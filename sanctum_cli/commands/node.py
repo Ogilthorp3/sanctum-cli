@@ -23,6 +23,8 @@ zero live network, zero keygen, and zero SSH.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import concurrent.futures
 import contextlib
 import enum
@@ -585,7 +587,13 @@ echo "[4/4] passwordless sudo: skipped (re-generate with --sudo-nopasswd to enab
 
 def _validate_pubkey(pubkey: str) -> None:
     clean = pubkey.strip()
-    if "'" in pubkey or "\n" in pubkey or "\r" in pubkey or not _SSH_PUBKEY_RE.fullmatch(clean):
+    if (
+        "'" in pubkey
+        or "\n" in pubkey
+        or "\r" in pubkey
+        or "\x00" in pubkey
+        or not _SSH_PUBKEY_RE.fullmatch(clean)
+    ):
         msg = "automation public key is malformed or contains unsafe characters — refusing to embed it"
         raise LocalError(msg, fix="regenerate the key: delete the pair and re-run")
 
@@ -1055,11 +1063,25 @@ def _probe_identity(host: str, user: str) -> tuple[LayerResult, str]:
 def _probe_key_hygiene(host: str, user: str, pubkey: str) -> LayerResult:
     """L4: authorized_keys perms + our key actually present (not just "auth worked").
 
-    Validates the key's base64 blob and quotes it safely before SSH execution.
+    Validates the full key line / base64 blob locally and quotes it safely
+    before SSH execution.
     """
-    parts = pubkey.split()
-    blob = parts[1] if len(parts) >= 2 else pubkey
-    if not _BASE64_BLOB_RE.fullmatch(blob):
+    if not pubkey or "\r" in pubkey or "\n" in pubkey or "\x00" in pubkey:
+        return LayerResult("L4", "key hygiene", LayerStatus.FAIL, "invalid automation public key blob")
+    clean = pubkey.strip()
+    if not clean:
+        return LayerResult("L4", "key hygiene", LayerStatus.FAIL, "invalid automation public key blob")
+    if any(ch.isspace() for ch in clean):
+        if not _SSH_PUBKEY_RE.fullmatch(clean):
+            return LayerResult("L4", "key hygiene", LayerStatus.FAIL, "invalid automation public key blob")
+        blob = clean.split(None, 2)[1]
+    else:
+        blob = clean
+    if len(blob) < 16 or not _BASE64_BLOB_RE.fullmatch(blob):
+        return LayerResult("L4", "key hygiene", LayerStatus.FAIL, "invalid automation public key blob")
+    try:
+        base64.b64decode(blob, validate=True)
+    except (binascii.Error, ValueError):
         return LayerResult("L4", "key hygiene", LayerStatus.FAIL, "invalid automation public key blob")
     cmd = (
         'stat -f%Lp "$HOME/.ssh"; stat -f%Lp "$HOME/.ssh/authorized_keys"; '

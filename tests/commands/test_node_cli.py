@@ -33,8 +33,8 @@ if TYPE_CHECKING:
 
 runner = CliRunner()
 
-# A shaped-like-the-real-thing automation pubkey (blob is fake but base64-ish).
-PUBKEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeBlobForNodeTests sanctum-automation-console-2026-07-18"
+# A shaped-like-the-real-thing automation pubkey (44-char valid base64 blob).
+PUBKEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeBlobForNodeTest sanctum-automation-console-2026-07-18"
 
 
 # ── pure parsers ──────────────────────────────────────────────────────────────
@@ -360,7 +360,7 @@ def test_node_adopt_happy_path_registers(
     assert node["tier"] == "edge"
     assert node["adopted"]  # dated
     # The key-hygiene probe grepped for OUR blob, not just any key.
-    assert any("AAAAC3NzaC1lZDI1NTE5AAAAIFakeBlobForNodeTests" in c for c in ssh.calls)
+    assert any("AAAAC3NzaC1lZDI1NTE5AAAAIFakeBlobForNodeTest" in c for c in ssh.calls)
 
 
 def test_node_adopt_name_override(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -1034,15 +1034,45 @@ def test_probe_key_hygiene_rejects_malformed_blob_and_uses_double_dash(
         lambda _h, _u, cmd: ssh_calls.append(cmd) or (0, "700\n600\nkey-present\n"),
     )
 
-    for bad_key in ("ssh-ed25519 ';id;'", "ssh-ed25519 -e", "ssh-ed25519 $(whoami)"):
+    hostile_keys = (
+        "",
+        "   ",
+        "ssh-ed25519 ';id;'",
+        "ssh-ed25519 -e",
+        "ssh-ed25519 $(whoami)",
+        "-f /etc/passwd",
+        "ssh-ed25519\nrm -rf /",
+        "ssh-ed25519 AA AA",
+        "AAA\nrm -rf /",
+        "ssh-ed25519 AAAA\nrm -rf /",
+        "AAA\nBBB",
+        "'-e'",
+        f"{PUBKEY}\x00extra",
+        "ssh-ed25519 AAAAAAAAAAAAAAA",  # <16 chars and invalid base64 len
+        "ssh-ed25519 AAAAAAAAAAAAAAAAA",  # >=16 chars but invalid base64 len (17 % 4 == 1)
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeBlobForNodeTest\r",
+    )
+    for bad_key in hostile_keys:
         res = node_cmd._probe_key_hygiene("h", "u", bad_key)
-        assert res.status == node_cmd.LayerStatus.FAIL
+        assert res.status == node_cmd.LayerStatus.FAIL, f"expected FAIL for {bad_key!r}"
     assert ssh_calls == []
 
     ok = node_cmd._probe_key_hygiene("h", "u", PUBKEY)
     assert ok.status == node_cmd.LayerStatus.PASS
     assert len(ssh_calls) == 1
     assert "grep -qF -- " in ssh_calls[0]
+
+
+def test_validate_pubkey_rejects_nul_byte() -> None:
+    from sanctum_cli.errors import LocalError
+
+    nul_in_comment = f"{PUBKEY}\x00extra"
+    with pytest.raises(LocalError):
+        node_cmd._validate_pubkey(nul_in_comment)
+    with pytest.raises(LocalError):
+        node_cmd.render_bootstrap_script(nul_in_comment, sudo_nopasswd=False)
+    with pytest.raises(LocalError):
+        node_cmd.render_postinstall(nul_in_comment, sudo_nopasswd=False, code="000000")
 
 
 def test_node_source_has_no_personal_leaks() -> None:

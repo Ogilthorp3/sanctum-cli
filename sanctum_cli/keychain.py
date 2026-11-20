@@ -41,6 +41,12 @@ def _ensure_security_bin() -> None:
 def read(account: str, service: str) -> str:
     """Read a generic-password entry. Strips trailing newline.
 
+    Returns ``security find-generic-password -w`` stdout verbatim (without
+    attempting heuristic hex decoding): macOS ``security -w`` emits hex for
+    non-ASCII or multiline values regardless of whether ``-w`` or ``-X`` was
+    used on write, and cannot be distinguished from genuine hex API keys or
+    tokens without risking silent corruption of real hex credentials.
+
     Raises ``KeychainEntryMissing`` if the (account, service) tuple is
     not present, ``KeychainLocked`` if the Keychain is locked, and
     ``LocalError`` for any other ``security`` failure.
@@ -87,7 +93,15 @@ def _escape_security_interactive_arg(text: str) -> str:
 
 
 def write(account: str, service: str, value: str, *, update: bool = True) -> None:
-    """Write a generic-password entry via ``security -i`` (never puts secret in argv)."""
+    """Write a generic-password entry via ``security -i`` (never puts secret in argv).
+
+    Encodes ``value`` as UTF-8 hex via ``-X`` (or ``-w ""`` when empty) so
+    single-line interactive stdin parsing handles quotes, backslashes, and
+    shell metacharacters safely. Note that macOS ``security find-generic-password
+    -w`` returns hex for non-ASCII/multiline items identically for ``-w`` and
+    ``-X`` writes; callers expecting lossless ``read()`` round-trips should
+    store printable single-line ASCII secrets.
+    """
     _ensure_security_bin()
     acct_tok = _escape_security_interactive_arg(account)
     svc_tok = _escape_security_interactive_arg(service)

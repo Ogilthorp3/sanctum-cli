@@ -516,13 +516,20 @@ _is_root_trusted() {{
   _target="$1"
   [ -n "$_target" ] || return 1
   if [ -L "$_target" ]; then
-    _linfo=$(/usr/bin/stat -L -f '%u %Lp' "$_target" 2>/dev/null) || true
     _sinfo=$(/usr/bin/stat -f '%u %Lp' "$_target" 2>/dev/null) || return 1
     _suid="${{_sinfo%% *}}"
     _smode="${{_sinfo##* }}"
     [ "$_suid" = "0" ] || return 1
     [ $((8#$_smode & 8#022)) -eq 0 ] || return 1
   fi
+  _tdir=$(/usr/bin/dirname "$_target")
+  while [ -n "$_tdir" ]; do
+    _check_root_owner_perms "$_tdir" || return 1
+    [ "$_tdir" = "/" ] && break
+    _next=$(/usr/bin/dirname "$_tdir")
+    [ "$_next" = "$_tdir" ] && break
+    _tdir="$_next"
+  done
   _resolved=$(/bin/realpath "$_target" 2>/dev/null) || return 1
   [ -f "$_resolved" ] && [ -x "$_resolved" ] || return 1
   _check_root_owner_perms "$_resolved" || return 1

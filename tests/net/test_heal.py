@@ -388,3 +388,60 @@ def test_heal_wrapper_root_trust_rejects_user_owned_binary(tmp_path: object) -> 
         check=False,
     )
     assert proc.returncode != 0
+
+
+def test_heal_wrapper_root_trust_rejects_group_writable_symlink_parent(tmp_path: object) -> None:
+    import os
+    import subprocess
+    from pathlib import Path
+
+    from sanctum_cli.net.heal import HEAL_WRAPPER
+
+    assert "_linfo" not in HEAL_WRAPPER
+
+    lines = HEAL_WRAPPER.splitlines()
+    start = next(i for i, ln in enumerate(lines) if ln.startswith("_check_root_owner_perms()"))
+    end = next(i for i, ln in enumerate(lines) if ln.startswith("if [ \"$(/usr/bin/id -u)\""))
+    helper_src = "\n".join(lines[start:end]).replace("/usr/bin/stat", "stat")
+
+    tmp = Path(str(tmp_path))
+    fake_bin = tmp / "bin"
+    fake_bin.mkdir()
+    writable_dir = tmp / "group_writable"
+    writable_dir.mkdir()
+    link_path = writable_dir / "sanctum"
+    link_path.symlink_to("/usr/bin/true")
+
+    stat_stub = fake_bin / "stat"
+    stat_stub.write_text(
+        f"""#!/bin/bash
+_p="${{@: -1}}"
+if [ "$_p" = {str(writable_dir)!r} ]; then
+  echo "0 ${{TEST_DIR_MODE:-775}}"
+else
+  echo "0 755"
+fi
+""",
+        encoding="utf-8",
+    )
+    stat_stub.chmod(0o755)
+
+    env_bad = {**os.environ, "PATH": f"{fake_bin}:/usr/bin:/bin", "TEST_DIR_MODE": "775"}
+    proc_bad = subprocess.run(
+        ["/bin/bash", "-c", f"{helper_src}\n_is_root_trusted {str(link_path)!r}"],
+        env=env_bad,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc_bad.returncode != 0
+
+    env_ok = {**os.environ, "PATH": f"{fake_bin}:/usr/bin:/bin", "TEST_DIR_MODE": "755"}
+    proc_ok = subprocess.run(
+        ["/bin/bash", "-c", f"{helper_src}\n_is_root_trusted {str(link_path)!r}"],
+        env=env_ok,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc_ok.returncode == 0
