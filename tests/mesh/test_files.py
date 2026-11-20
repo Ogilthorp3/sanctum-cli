@@ -107,7 +107,25 @@ def test_tailscale_ipv4_ignores_other_addresses() -> None:
     assert tailscale_ipv4(lambda _argv: "") is None
 
 
-@pytest.mark.parametrize("wildcard", ["0.0.0.0", "::"])
+@pytest.mark.parametrize(
+    "wildcard",
+    [
+        "0.0.0.0",
+        "::",
+        "::0",
+        "::ffff:0.0.0.0",
+        "",
+        "   ",
+        "0",
+        "0.0",
+        "0x0",
+        "0x00000000",
+        "[::]",
+        "[",
+        "]",
+        ":",
+    ],
+)
 def test_parcel_server_refuses_wildcard_bind(tmp_path, wildcard: str) -> None:
     source = tmp_path / "pkg.zip"
     source.write_bytes(b"data")

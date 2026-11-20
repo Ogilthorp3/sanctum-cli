@@ -200,6 +200,43 @@ def test_keys_restore_rejects_tar_traversal_symlink_and_bad_manifest(
     assert fake.store == {}
 
 
+@pytest.mark.parametrize(
+    "dup_member",
+    [
+        "./sanctum-keys/openrouter-api-key",
+        "sanctum-keys/./openrouter-api-key",
+        "sanctum-keys//openrouter-api-key",
+    ],
+)
+def test_keys_restore_rejects_uncanonical_duplicate_tar_members(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dup_member: str
+) -> None:
+    fake = _patch_fake_keychain(monkeypatch)
+    passphrase = "correct-horse-staple"
+    monkeypatch.setattr(kb.getpass, "getpass", lambda *a, **k: passphrase)
+
+    manifest = json.dumps(
+        {"services": [{"service": "openrouter-api-key", "account": "sanctum"}]}
+    ).encode("utf-8")
+
+    def _build_dup(tf: tarfile.TarFile) -> None:
+        for name, data in (
+            ("sanctum-keys/MANIFEST.json", manifest),
+            ("sanctum-keys/openrouter-api-key", b"v1"),
+            (dup_member, b"v2"),
+        ):
+            ti = tarfile.TarInfo(name)
+            ti.size = len(data)
+            tf.addfile(ti, io.BytesIO(data))
+
+    bundle = tmp_path / "dup.enc"
+    bundle.write_bytes(_build_malicious_v2_bundle(passphrase, _build_dup))
+    with pytest.raises(click.exceptions.Exit) as exc:
+        kb.keys_restore_command(path=bundle)
+    assert exc.value.exit_code == 1
+    assert fake.store == {}
+
+
 def test_keys_restore_legacy_v1_requires_flag_and_works_with_flag(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

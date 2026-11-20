@@ -17,6 +17,7 @@ import hashlib
 import ipaddress
 import json
 import re
+import socket
 import threading
 import time
 from dataclasses import dataclass
@@ -177,10 +178,29 @@ def url_is_allowed(url: str) -> bool:
 
 
 def _validate_parcel_bind_host(host: str) -> None:
-    """Refuse unspecified wildcard bind addresses (``0.0.0.0`` / ``::``)."""
+    """Refuse unspecified wildcard bind addresses (``0.0.0.0`` / ``::``) and invalid hosts."""
+    if not isinstance(host, str) or not host or host != host.strip() or any(ch.isspace() for ch in host):
+        raise LocalError(
+            f"refusing to bind parcel server to wildcard or invalid address {host!r}",
+            fix="bind 127.0.0.1 or a Tailscale IP",
+        )
     try:
         address = ipaddress.ip_address(host)
     except ValueError:
+        if any(ch in host for ch in ("[", "]", ":")):
+            raise LocalError(
+                f"refusing to bind parcel server to invalid or wildcard address {host!r}",
+                fix="bind 127.0.0.1 or a Tailscale IP",
+            ) from None
+        try:
+            packed = socket.inet_aton(host)
+        except OSError:
+            return
+        if ipaddress.IPv4Address(packed).is_unspecified:
+            raise LocalError(
+                f"refusing to bind parcel server to wildcard address {host!r}",
+                fix="bind 127.0.0.1 or a Tailscale IP",
+            ) from None
         return
     if address.is_unspecified:
         raise LocalError(

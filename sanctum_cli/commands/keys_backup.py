@@ -184,18 +184,26 @@ def _extract_in_memory_bundle(tar_gz_bytes: bytes) -> dict[str, bytes]:
                     console.print("[red]Bundle rejected:[/] invalid tar member name.")
                     raise typer.Exit(code=1)
                 clean = name.rstrip("/")
+                raw_parts = clean.split("/")
                 posix = PurePosixPath(clean)
-                if posix.is_absolute() or any(part in ("..", ".", "") for part in posix.parts):
+                canonical = posix.as_posix()
+                if (
+                    not clean
+                    or clean.startswith("/")
+                    or posix.is_absolute()
+                    or any(part in ("..", ".", "") for part in raw_parts)
+                    or clean != canonical
+                ):
                     console.print(
                         f"[red]Bundle rejected:[/] unsafe tar member path ({name!r})."
                     )
                     raise typer.Exit(code=1)
-                if clean in seen_names:
+                if canonical in seen_names:
                     console.print(
-                        f"[red]Bundle rejected:[/] duplicate tar member ({clean!r})."
+                        f"[red]Bundle rejected:[/] duplicate tar member ({canonical!r})."
                     )
                     raise typer.Exit(code=1)
-                seen_names.add(clean)
+                seen_names.add(canonical)
 
                 if member.isdir():
                     if posix.parts != ("sanctum-keys",):

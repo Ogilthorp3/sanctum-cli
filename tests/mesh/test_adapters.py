@@ -518,6 +518,13 @@ def test_vm_airgap_runner_raises_localerror_when_vm_down(
         "vm/path",
         "vm..bad",
         "user@a@b",
+        "fe80::1%$(id)",
+        "fe80::1%;id",
+        "fe80::1%eth0;id",
+        "fe80::1%`id`",
+        "fe80::1%-oProxyCommand=id",
+        "fe80::1%",
+        "fe80::1%en0..1",
     ],
 )
 def test_vm_airgap_runner_rejects_hostile_host_before_subprocess(
@@ -598,6 +605,25 @@ def test_vm_airgap_runner_uses_double_dash_absolute_src_and_shlex_quoted_ssh(
     assert ssh_argv[dash_idx + 1] == "user@vm-air"
     remote_cmd = ssh_argv[dash_idx + 2]
     assert shlex.split(remote_cmd)[:4] == ["unshare", "-n", "sanctum-mesh-probe", "--json"]
+
+
+def test_vm_airgap_runner_accepts_safe_ipv6_scope_id(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(argv: list[str], **_kw: object) -> subprocess.CompletedProcess[str]:
+        calls.append(list(argv))
+        return subprocess.CompletedProcess(
+            argv, 0, stdout='{"completed": true, "egress_attempted": false}', stderr=""
+        )
+
+    monkeypatch.setattr(adapters.subprocess, "run", fake_run)
+    probe = adapters.vm_airgap_runner(tmp_path / "adapter", host="fe80::1%en0")
+    assert probe.completed is True
+    rsync_argv, ssh_argv = calls
+    assert rsync_argv[rsync_argv.index("--") + 2] == "[fe80::1%en0]:/tmp/sanctum-mesh-sandbox/"
+    assert ssh_argv[ssh_argv.index("--") + 1] == "fe80::1%en0"
 
 
 def test_vm_airgap_runner_timeout_raises_localerror(

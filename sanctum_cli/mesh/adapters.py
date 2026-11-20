@@ -345,6 +345,7 @@ _DEFAULT_PROBE_PROMPTS: tuple[str, ...] = (
 )
 _SSH_USER_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 _SSH_HOST_LABEL_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$")
+_IPV6_SCOPE_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 _REMOTE_DIR_RE = re.compile(r"^/[A-Za-z0-9._/-]+$")
 
 
@@ -382,11 +383,23 @@ def _validate_ssh_host(host: str) -> tuple[str, str]:
                 f"invalid sandbox host {host!r}",
                 fix="set mesh.sandbox_host to a valid hostname or IP address",
             ) from exc
-        if addr.version != 6:
+        if not isinstance(addr, ipaddress.IPv6Address):
             raise LocalError(
                 f"invalid sandbox host {host!r}",
                 fix="set mesh.sandbox_host to a valid hostname or IP address",
             )
+        if addr.scope_id is not None or "%" in bare:
+            scope_id = addr.scope_id
+            if (
+                not scope_id
+                or scope_id.startswith("-")
+                or ".." in scope_id
+                or not _IPV6_SCOPE_ID_RE.fullmatch(scope_id)
+            ):
+                raise LocalError(
+                    f"invalid sandbox host {host!r}",
+                    fix="set mesh.sandbox_host to a valid hostname or IP address",
+                )
         ssh_host = f"{user}@{bare}" if user else bare
         rsync_host = f"{user}@[{bare}]" if user else f"[{bare}]"
         return ssh_host, rsync_host
