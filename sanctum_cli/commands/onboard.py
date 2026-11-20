@@ -608,7 +608,7 @@ def _preferred_name(fallback: str) -> str:
     """The name the user asked to be called by, for SANCTUM_USER_NAME.
 
     The identity gate writes it to ``notifications.owner_name`` in instance.yaml
-    ("Bert", not "Bertrand"); prefer that over the macOS login name. Falls back to
+    ("Alex", not "Alexander"); prefer that over the macOS login name. Falls back to
     the supplied login name when the gate was skipped (``--yes``, a non-family
     recipe, or already-configured).
     """
@@ -2321,7 +2321,7 @@ def _keychain_write(account: str, service: str, value: str) -> None:
 # real `op`/`sops` binary or 1Password account is touched in the gate.
 
 #: Default providers.yaml the daily drift-sync reads. The canonical daemon copy
-#: lives outside the OneDrive-synced repo (CLAUDE.md secrets §); env override lets
+#: lives outside the synced repo (CLAUDE.md secrets §); env override lets
 #: a haus point this at its real file. Onboarding only APPENDS the mapping — never
 #: the secret value — so even a world-readable providers.yaml leaks nothing.
 ENV_PROVIDERS_FILE = "SANCTUM_PROVIDERS_FILE"

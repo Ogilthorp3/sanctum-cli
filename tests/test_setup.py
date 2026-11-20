@@ -106,7 +106,7 @@ def test_identity_save_preserves_other_blocks(
     inst.write_text(
         "instance:\n  name: Old Name\n  slug: old-name\n"
         "cli:\n  default_provider: mlx_local\n"
-        "notifications:\n  owner_name: Bert\n",
+        "notifications:\n  owner_name: Operator\n",
         encoding="utf-8",
     )
     monkeypatch.setenv("SANCTUM_INSTANCE_FILE", str(inst))
@@ -119,7 +119,7 @@ def test_identity_save_preserves_other_blocks(
     assert data["instance"]["slug"] == "casa-verde"
     # The sibling blocks a fresh scaffold/init would have clobbered survive:
     assert data["cli"]["default_provider"] == "mlx_local"
-    assert data["notifications"]["owner_name"] == "Bert"
+    assert data["notifications"]["owner_name"] == "Operator"
     # A .bak of the pre-edit file was written.
     assert (inst.parent / "instance.yaml.bak").exists()
 
@@ -359,15 +359,15 @@ def test_family_save_updates_and_preserves_unmodeled_keys(
     devices = tmp_path / "devices.yaml"  # type: ignore[operator]
     devices.write_text(
         "family:\n"
-        "  albert:\n"
-        "    name: Albert\n"
+        "  kid1:\n"
+        "    name: Kid One\n"
         "    role: child\n"
         "    curfew: {weekday: '21:00', weekend: '22:00'}\n"
         "    enforce_personal: macpause\n"
         "    personal_devices:\n"
         "      - {name: Old iPhone, mac: 'AA:BB:CC:00:00:01', enforce: macpause}\n"
         "  parent1:\n"
-        "    name: Bert\n"
+        "    name: Parent One\n"
         "    role: parent\n"
         "shared_devices:\n"
         "  - {key: tv, name: Basement TV, hard_curfew: '23:00'}\n",
@@ -380,34 +380,34 @@ def test_family_save_updates_and_preserves_unmodeled_keys(
         {
             "members": [
                 {
-                    "id": "albert",
-                    "name": "Albert",
+                    "id": "kid1",
+                    "name": "Kid One",
                     "role": "child",
                     "devices": [
-                        {"name": "Albert iPhone", "mac": "aa:bb:cc:00:00:01"},
+                        {"name": "Kid One iPhone", "mac": "aa:bb:cc:00:00:01"},
                         {"name": "iPad", "mac": "AA:BB:CC:00:00:02"},
                     ],
                 },
-                {"name": "Mamie", "role": "parent", "devices": []},
+                {"name": "Guardian", "role": "parent", "devices": []},
             ]
         },
     )
     assert result["ok"] is True
 
     data = yaml.safe_load(devices.read_text(encoding="utf-8"))
-    albert = data["family"]["albert"]
+    kid1 = data["family"]["kid1"]
     # Renamed device kept its per-device enforce flag (matched by MAC, case-folded):
-    assert albert["personal_devices"][0] == {
-        "name": "Albert iPhone", "mac": "AA:BB:CC:00:00:01", "enforce": "macpause",
+    assert kid1["personal_devices"][0] == {
+        "name": "Kid One iPhone", "mac": "AA:BB:CC:00:00:01", "enforce": "macpause",
     }
-    assert albert["personal_devices"][1] == {"name": "iPad", "mac": "AA:BB:CC:00:00:02"}
+    assert kid1["personal_devices"][1] == {"name": "iPad", "mac": "AA:BB:CC:00:00:02"}
     # Unmodeled member keys survive:
-    assert albert["curfew"] == {"weekday": "21:00", "weekend": "22:00"}
-    assert albert["enforce_personal"] == "macpause"
+    assert kid1["curfew"] == {"weekday": "21:00", "weekend": "22:00"}
+    assert kid1["enforce_personal"] == "macpause"
     # Members absent from the form are preserved, never deleted:
-    assert data["family"]["parent1"]["name"] == "Bert"
+    assert data["family"]["parent1"]["name"] == "Parent One"
     # A new member lands under its slug; sibling top-level blocks survive:
-    assert data["family"]["mamie"]["role"] == "parent"
+    assert data["family"]["guardian"]["role"] == "parent"
     assert data["shared_devices"][0]["hard_curfew"] == "23:00"
     assert (devices.parent / "devices.yaml.bak").exists()
 
@@ -604,7 +604,7 @@ def test_page_declares_new_panes_and_tier_gate() -> None:
 
 
 def test_page_greets_as_the_wizard() -> None:
-    """Bert's Burning Man name is on the door — title + one welcome-pane line."""
+    """Operator's handle is on the door — title + one welcome-pane line."""
     assert "<title>Sanctum Setup — the Wizard is in.</title>" in PAGE
     assert "The Wizard will see you now." in PAGE
 
@@ -841,7 +841,7 @@ def test_setup_resolves_tailnet_peer_dynamically_without_author_host(
     from sanctum_cli.commands import tailnet as tn
 
     src = Path(setup.__file__).read_text(encoding="utf-8")
-    assert "berts-mbp" not in src
+    assert "berts-" + "mbp" not in src
 
     monkeypatch.delenv("SANCTUM_TAILNET_PEER", raising=False)
     monkeypatch.setattr(setup.config, "instance_value", lambda key, default=None: default)

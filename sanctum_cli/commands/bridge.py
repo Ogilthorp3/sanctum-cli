@@ -418,7 +418,7 @@ _STATUS_STYLES: dict[Status, str] = {
 }
 
 # Keychain entries we expect on a host that runs the bridge end-to-end.
-# (These exist on the manoir gateway; they are not all expected on a
+# (These exist on the primary gateway; they are not all expected on a
 # pure client host.)
 _KEYCHAIN_LOCAL = (
     "sanctum-bridge-cf-access-client-id",

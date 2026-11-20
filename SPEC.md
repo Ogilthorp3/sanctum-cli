@@ -166,7 +166,7 @@ cli:
       model: claude-opus-4-7
       keychain:
         service: anthropic-api-key
-        account: bert
+        account: sanctum
       timeout_s: 120
       max_retries: 2
     
@@ -175,7 +175,7 @@ cli:
       model: gemini-2.5-pro
       keychain:
         service: google-ai-api-key
-        account: bert
+        account: sanctum
       timeout_s: 120
       max_retries: 2
     
@@ -475,7 +475,7 @@ Every failure mode is enumerated, has a deterministic recovery path, and is exer
 - [ ] TUI dashboard (`sanctum dashboard`) — live tail of telemetry + LaunchAgent state
 - [ ] Routing rule live-edit (`sanctum config edit cli.routing`)
 - [ ] Provider cost budget alerts ("you've spent $X today")
-- [ ] Multi-host coordination via existing `sanctum-presence` (`sanctum --on manoir doctor`)
+- [ ] Multi-host coordination via existing `sanctum-presence` (`sanctum --on home doctor`)
 
 ### v1.0 — Hardening
 
@@ -521,7 +521,7 @@ Every PR runs the full suite. Wizard E2E is gated on a CI-only B2 account so con
 
 5. **The Rust crossover point** — when does Python pain exceed rewrite cost? Likely when cold-start hits >200 ms or when the dispatcher needs concurrency primitives Python can't give cleanly. Watch and decide; don't pre-optimize.
 
-6. **Sanctum the product** — if this ever ships beyond manoir, the wizard's pre-flight bundles must include `restic`/`rclone` install (probably via a static-binary downloader, not brew, for portability). Keep this in mind even in v0.1 — don't build a brew dependency into the core logic.
+6. **Sanctum the product** — if this ever ships beyond the primary host, the wizard's pre-flight bundles must include `restic`/`rclone` install (probably via a static-binary downloader, not brew, for portability). Keep this in mind even in v0.1 — don't build a brew dependency into the core logic.
 
 ---
 

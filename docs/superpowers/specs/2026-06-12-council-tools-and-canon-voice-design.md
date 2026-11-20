@@ -10,7 +10,7 @@ revision of 2026-05-31 (English movie-voice; franglais archived).
 ## Context
 
 `sanctum council` seats are chat-only: the Yoda persona literally says "you
-are a chat seat with NO tools", which is the message Bert hit when asking
+are a chat seat with NO tools", which is the message the operator hit when asking
 Yoda to fix something. Signal-Yoda (openclaw on the VM) has tools — openclaw
 exec on the VM plus the `jocasta` MCP — and speaks franglais, which turned
 out to be a *stale persona*: the canonical `IDENTITY.md` (2026-05-31) orders
@@ -28,7 +28,7 @@ blocks**. Before any code: one manual probe POST through the real chain with
 a trivial tool and a prompt that forces a call. Outcomes:
 
 - `tool_use` block returned → proceed.
-- Bridge strips/rejects `tools` → STOP; report to Bert; the design needs a
+- Bridge strips/rejects `tools` → STOP; report to the operator; the design needs a
   transport fix first (out of this spec's scope).
 - Primary modeled OK but fallbacks unknown → proceed; the runtime loop must
   degrade gracefully (below) since any given request may land on a
@@ -123,7 +123,7 @@ window) adds verbs one at a time, most-reversible first (`agent_restart`).
   `vm:~/.openclaw/workspace/IDENTITY.md`): inversion by default with the
   exact register rules; truth before style (First Rule unchanged); and the
   canon's machine-boundary line — *tool calls, JSON, structured output stay
-  plain English; Yoda-speak is for Bert's eyes, not parsers* — which is now
+  plain English; Yoda-speak is for the operator's eyes, not parsers* — which is now
   load-bearing, since he has tools whose inputs must parse.
 - Mon Mothma's persona text is unchanged; she gains the instruments clause
   via the helper.
@@ -201,7 +201,7 @@ window) adds verbs one at a time, most-reversible first (`agent_restart`).
   `translate.rs` **does** forward `tools` and return `tool_use`; tooling was
   verified end-to-end against `qwen36-plus`, `glm-51`, and `gemini-25-flash`.
   So the design's gate is met *through proxyd*, not through the Max bridge.
-- **Decision (Bert).** Fix the `:3456` bridge so Opus stays the one brain,
+- **Decision (Operator).** Fix the `:3456` bridge so Opus stays the one brain,
   rather than route CLI Yoda to a different tooling model. That bridge patch
   is a **separate spec/plan** (the established
   `patch-claude-max-proxy-content-flatten.sh` mechanism; upstream frozen at

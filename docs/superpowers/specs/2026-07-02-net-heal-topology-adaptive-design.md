@@ -7,7 +7,7 @@
 
 A Sanctum hub must stay reachable and serving across **any** network topology change — single-NAT,
 double-NAT fallback, hub swap, subnet renumber, roaming (Bell `192.168.2.x`, Orbi/FW `10.0.0.x`, an
-iPhone hotspot `172.20.10.x`). It didn't. Root cause (found via Bert's controlled experiment, both Mini
+iPhone hotspot `172.20.10.x`). It didn't. Root cause (found via a controlled experiment, both Mini
 and MBP on Bell): the **Mini was pinned to a STATIC IP `10.0.0.10` / gw `10.0.0.1`** during the
 single-NAT renumber. A static config can't adapt — on Bell it's the wrong subnet (the Mini reaches the
 Bell gateway `192.168.2.1` at **0% loss** — the RF was always fine — but its configured gateway

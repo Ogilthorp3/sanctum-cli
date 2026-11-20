@@ -92,7 +92,7 @@ def test_net_optimize_double_nat_prints_plan() -> None:
     ):
         result = runner.invoke(app, ["net", "optimize", "--yes", "--plan-only"])
     assert result.exit_code == 0, result.stdout
-    assert "20:6d:31:51:67:82" in result.stdout
+    assert "02:00:00:00:00:03" in result.stdout
     assert "Advanced DMZ" in result.stdout
 
 
@@ -239,12 +239,12 @@ class _HealFakeRunner:
 
 # A Manual/static Mini on a foreign LAN with the tailnet spine up — STATIC_DRIFT.
 _STATIC_DRIFT_BEFORE: dict[str, str] = {
-    "listallhardwareports": "Hardware Port: Wi-Fi\nDevice: en1\nEthernet Address: d0:11:e5:1c:88:59",
+    "listallhardwareports": "Hardware Port: Wi-Fi\nDevice: en1\nEthernet Address: 02:00:00:00:00:01",
     "getsummary en1": "  LinkStatusActive : TRUE\n  ConfigMethod : Manual\n",
     "route -n get default": "gateway: 10.0.0.1\ninterface: en1",
     "getifaddr en1": "10.0.0.10",
     "getoption en1 subnet_mask": "255.255.255.0",
-    "ifconfig": "utun3: flags=...\n\tinet 100.107.112.118 --> 100.107.112.118",
+    "ifconfig": "utun3: flags=...\n\tinet 100.64.0.18 --> 100.64.0.18",
     "ping": "3 packets transmitted, 3 packets received, 0.0% packet loss",
     "-getinfo": "IP address: 10.0.0.10\nSubnet mask: 255.255.255.0\nRouter: 10.0.0.1\n",
 }
@@ -266,12 +266,12 @@ _STATIC_DRIFT_STAYS_BROKEN: dict[str, str] = {
 # A double-NAT overlap (10.x LAN inside Bell's 0/1 DMZ WAN) + dead gateway +
 # spine up → risky DOUBLE_NAT_OVERLAP → alert-only, NEVER a mutation.
 _OVERLAP_RISKY: dict[str, str] = {
-    "listallhardwareports": "Hardware Port: Wi-Fi\nDevice: en1\nEthernet Address: d0:11:e5:1c:88:59",
+    "listallhardwareports": "Hardware Port: Wi-Fi\nDevice: en1\nEthernet Address: 02:00:00:00:00:01",
     "getsummary en1": "  LinkStatusActive : TRUE\n  ConfigMethod : DHCP\n",
     "route -n get default": "gateway: 10.0.0.1\ninterface: en1",
     "getifaddr en1": "10.0.0.10",
     "getoption en1 subnet_mask": "255.255.255.0",
-    "ifconfig": "utun3: flags=...\n\tinet 100.107.112.118 --> 100.107.112.118",
+    "ifconfig": "utun3: flags=...\n\tinet 100.64.0.18 --> 100.64.0.18",
     "ping": "3 packets transmitted, 0 packets received, 100.0% packet loss",
     "-getinfo": "IP address: 10.0.0.10\nSubnet mask: 255.255.255.0\nRouter: 10.0.0.1\n",
 }
@@ -559,8 +559,8 @@ def _stable_identity_diag():
     from sanctum_cli.net.link import IdentityDiagnosis, IdentityProbe
 
     probe = IdentityProbe(
-        iface="en1", ssid="Manoir", current_mac="d0:11:e5:1c:88:59",
-        hardware_mac="d0:11:e5:1c:88:59", security="WPA3", associated=True,
+        iface="en1", ssid="Home", current_mac="02:00:00:00:00:01",
+        hardware_mac="02:00:00:00:00:01", security="WPA3", associated=True,
         router_arp_verified=True, gateway_reachable=True,
     )
     return IdentityDiagnosis("IDENTITY_STABLE", "on hardware MAC", "ok", probe)
@@ -570,8 +570,8 @@ def _quarantined_identity_diag():
     from sanctum_cli.net.link import IdentityDiagnosis, IdentityProbe
 
     probe = IdentityProbe(
-        iface="en1", ssid="Manoir", current_mac="32:a6:f4:de:54:cf",
-        hardware_mac="d0:11:e5:1c:88:59", security="WPA3", associated=True,
+        iface="en1", ssid="Home", current_mac="02:00:00:00:00:02",
+        hardware_mac="02:00:00:00:00:01", security="WPA3", associated=True,
         router_arp_verified=False, gateway_reachable=False,
     )
     return IdentityDiagnosis("IDENTITY_QUARANTINED", "rotating, gw dead", "pin it", probe)
@@ -594,7 +594,7 @@ def _single_nat_topology():
     from sanctum_cli.net.types import Nat, TopologyReport
 
     return TopologyReport(
-        firewalla_present=True, firewalla_wan_mac="20:6d:31:51:67:82",
+        firewalla_present=True, firewalla_wan_mac="02:00:00:00:00:03",
         firewalla_wan_mtu=1500, nat=Nat.SINGLE, gateway_ip="192.168.2.1",
         isp="bell", public_ip="1.2.3.4", applicable=False, reason="optimal",
     )

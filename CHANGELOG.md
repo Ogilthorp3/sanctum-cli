@@ -1,12 +1,5 @@
 # Changelog
 
-## 0.15.4 — 2026-08-07
-
-### Added
-- **`sanctum service-user`** — greenfield hive service principal install (user `sanctum`,
-  wave-1 LaunchDaemons for proxyd / force-flow / memory-vault). Packaged plists;
-  no pre-synced sanctum-config required. Operator onboard gate + self-test + doctor.
-
 All notable changes to `sanctum-cli` are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
@@ -25,23 +18,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `sanctum mesh send` and `sanctum mesh receive` move one signed file across the tailnet. The receiver checks the signature and the sha256, saves the file, and does not run it.
 - `sanctum mesh join --tribe <key>` puts a friend's Mac on the trusted tribe tag. A haus node that already carries an admin, host, or mobile tag refuses the switch. Champion pull still goes through eval and the sandbox.
 
+## [0.15.4] - 2026-08-07
+
+### Added
+- **`sanctum service-user`** — greenfield hive service principal install (user `sanctum`,
+  wave-1 LaunchDaemons for proxyd / force-flow / memory-vault). Packaged plists;
+  no pre-synced sanctum-config required. Operator onboard gate + self-test + doctor.
+
 ## [0.15.3] - 2026-07-24
 
 ### Added
 
-- `sanctum upgrade` registry now tracks the manoir's `mlx-finetune/.venv` and `yoda-voice-agent/.tts-venv` (mlx-lm as the drift canary), so the daily sentinel catches MLX drift in the training and voice stacks instead of only the satellite brain venv.
+- `sanctum upgrade` registry now tracks the primary host's `mlx-finetune/.venv` and `yoda-voice-agent/.tts-venv` (mlx-lm as the drift canary), so the daily sentinel catches MLX drift in the training and voice stacks instead of only the satellite brain venv.
 
 ## [0.15.2] - 2026-07-24
 
 ### Removed
 
-- `gemini-cli` dropped from the `sanctum upgrade` registry — retired from the haus (Bert, 2026-07-24); the binary was uninstalled from all machines.
+- `gemini-cli` dropped from the `sanctum upgrade` registry — retired from the haus (2026-07-24); the binary was uninstalled from all machines.
 
 ## [0.15.1] - 2026-07-20
 
 ### Fixed
 
-- `sanctum upgrade` now invokes a venv's pip as `<venv>/bin/python -m pip` instead of the `bin/pip` console script, whose shebang bakes in the venv's original path — a relocated/renamed venv (e.g. the chalet mlx venv) has a working python but a broken pip binary, which made upgrade report the tool absent. Live-fire-verified on the chalet.
+- `sanctum upgrade` now invokes a venv's pip as `<venv>/bin/python -m pip` instead of the `bin/pip` console script, whose shebang bakes in the venv's original path — a relocated/renamed venv (e.g. a satellite mlx venv) has a working python but a broken pip binary, which made upgrade report the tool absent. Live-fire-verified on a satellite node.
 
 ## [0.15.0] - 2026-07-19
 

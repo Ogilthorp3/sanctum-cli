@@ -9,8 +9,8 @@
 
 ## 1. Context & Motivation
 
-The goal is to make Sanctum **stable enough to ship to a beta user** — someone who
-isn't Bert, installing on their own Mac. Sanctum is not one product; it is ~6
+The goal is to make Sanctum **stable enough to ship to a beta user** — someone
+installing on their own Mac. Sanctum is not one product; it is ~6
 independent subsystems (backup, monitoring, Yoda-on-Signal, screen-time, the
 cathedral, the bridge). Shipping all of them as separate installers would be four-
 plus times the install/secrets/onboarding/docs work and a miserable beta UX.
@@ -71,7 +71,7 @@ become a score.
 | first-run `onboard` | shipped (splash→recipe→cloud→canary) | `commands/onboard.py` |
 | clean `uninstall` (data-preserving, 30-day recoverable) | shipped | `commands/uninstall.py` |
 | `self-test` (tier-aware probe registry) | shipped | `commands/self_test.py` |
-| generic keychain (no Bert-specific values; default account `sanctum`) | shipped | `keychain.py` |
+| generic keychain (no operator-specific values; default account `sanctum`) | shipped | `keychain.py` |
 | strict config (pydantic v2) | shipped | `config.py` |
 
 Three of the six draft bar criteria — clean install/uninstall, beta-owned secrets,
@@ -120,7 +120,7 @@ secrets:                            # keychain entries the module needs
     service: holocron-signing-key
     required: true
     generate: hex64                 # how `module install` bootstraps it if absent
-                                    # (hex64 | none — never copies Bert's value)
+                                    # (hex64 | none — never copies existing host values)
 
 probes:                             # dotted paths to ProbeResult-returning callables
   - monitoring.sidecar_http
@@ -147,7 +147,7 @@ soak:
 
 Design notes:
 - `secrets[].generate` makes secrets-bootstrap **beta-owned by construction** — install
-  mints a fresh value or prompts; it never copies an existing Bert value.
+  mints a fresh value or prompts; it never copies an existing operator value.
 - `alerts.pager_conditions` is the allowlist of what may page. Everything else is
   ambient. This is the structural fix for the P0/P1-noise problem.
 - `services[].health_probe` ties every KeepAlive service to a probe — no service
@@ -161,7 +161,7 @@ Module verdict = worst gate. Exit 0 iff no red (amber allowed with `--allow-ambe
 | Gate | Checks | Green | Amber | Red |
 | --- | --- | --- | --- | --- |
 | **install/uninstall** | manifest has uninstall steps; dry-run them; data-preserve honored | reversible, data preserved | rename-only (no purge path) | no uninstall handler |
-| **secrets-bootstrap** | every `required` secret present; none equals a known Bert-default fingerprint | present + non-default | present, default-looking | missing |
+| **secrets-bootstrap** | every `required` secret present; none equals a known default fingerprint | present + non-default | present, default-looking | missing |
 | **self-heal** | each keepalive service has a probe + a heal action; the heal action exists and **exits cleanly when invoked dry** | heal proven in soak | heal exists, unproven | no heal, or heal crashes |
 | **alert-hygiene** | `alerts.sink` is **reachable right now**; `pager_conditions` are crucial-only; no probe is a false-green | live sink, minimal pager | live sink, broad pager | dead sink OR false-green probe |
 | **soak** | `soak.result_path` shows ≥ `min_days` continuous, no unhandled faults | clean ≥7d | partial / <7d | none or failed |
@@ -226,7 +226,7 @@ This is the closed-loop version of "it seemed fine."
 2. **Monitoring** — Holocron + sentinels + R2D2. This session's hardening feeds it; the
    alert-hygiene gate is most of its work. *Closing the launchd faults belongs here.*
 3. **Screen-time** — standalone repo already; make the Firewalla dependency optional.
-4. **Yoda-on-Signal** — most Bert-coupled and most fragile (this session's reboot saga
+4. **Yoda-on-Signal** — most operator-coupled and most fragile (this session's reboot saga
    + today's 11-hour VM flap prove it); last, once self-heal + secrets-bootstrap are
    battle-proven on the easier three.
 
@@ -255,9 +255,9 @@ preserve/rename/revoke logic, `onboard` orchestration shape.
 `doctor --ship` gate logic, `soak/harness.py`, the `PROBES` flat-list → module-keyed
 refactor, and `CliConfig.modules`.
 
-## 12. Open questions for Bert
+## 12. Open questions for the operator
 
-1. **`sanctum-admit` on manoir.** The capacity-doctrine daemon (:2189) is not running
+1. **`sanctum-admit` on the primary host.** The capacity-doctrine daemon (:2189) is not running
    here — memory says it went live *on the MBP*. Is admission control a per-host ship-
    bar requirement (it would have prevented today's swap saturation), or MBP-only? This
    affects the self-heal gate for the monitoring module.

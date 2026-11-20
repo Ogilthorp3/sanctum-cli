@@ -8,7 +8,7 @@
 
 A Sanctum node on Wi-Fi can be **fully associated at the radio layer yet unreachable on the
 LAN** — 100% loss to its own gateway while a trickle of NAT'd internet survives. Root cause
-(diagnosed live on the Mini `manoir`, 2026-07-01): macOS re-defaults **"Private Wi-Fi Address"
+(diagnosed live on the primary host, 2026-07-01): macOS re-defaults **"Private Wi-Fi Address"
 to Rotating** whenever a network is re-joined (after a router swap, subnet renumber, or reboot).
 The node then presents a *locally-administered, changing* MAC instead of its burned-in hardware
 MAC. Any router that keys trust/identity to a MAC — a DHCP **reservation**, a device

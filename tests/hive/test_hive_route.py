@@ -8,10 +8,10 @@ from sanctum_cli.hive.route import pick_node
 from sanctum_cli.hive.sot import peers_of, primary_node_name, validate_roster
 
 ROSTER = {
-    "manoir": {
+    "home": {
         "type": "hub",
         "tier": "primary",
-        "tailscale_name": "manoir",
+        "tailscale_name": "home",
         "capabilities": [
             "vault_authority",
             "inference",
@@ -19,12 +19,12 @@ ROSTER = {
             "ha_site",
         ],
     },
-    "chalet": {
+    "studio": {
         "type": "satellite",
         "tier": "edge",
-        "tailscale_name": "chalet",
+        "tailscale_name": "studio",
         "capabilities": ["local_inference", "satellite"],
-        "sync": {"hub": "manoir"},
+        "sync": {"hub": "home"},
     },
     "montreal": {
         "type": "hub",
@@ -36,7 +36,7 @@ ROSTER = {
         "type": "mobile",
         "tier": "edge",
         "tailscale_name": "mbp",
-        "aliases": ["berts-mbp"],
+        "aliases": ["alice-mbp"],
     },
 }
 
@@ -53,7 +53,7 @@ def test_capabilities_defaults_for_mobile() -> None:
 
 
 def test_primary_and_peers() -> None:
-    assert primary_node_name(ROSTER) == "manoir"
+    assert primary_node_name(ROSTER) == "home"
     assert peers_of(ROSTER) == ["montreal"]
     assert validate_roster(ROSTER) == []
 
@@ -67,20 +67,20 @@ def test_validate_double_primary() -> None:
     assert any("multiple primary" in p for p in problems)
 
 
-def test_pick_local_inference_on_chalet() -> None:
+def test_pick_local_inference_on_studio() -> None:
     r = pick_node(
         "local_inference",
         ROSTER,
         prefer="local",
-        local_name="chalet",
-        peer_ips={"chalet": {"online": True, "ips": ["100.1.1.1"]}},
+        local_name="studio",
+        peer_ips={"studio": {"online": True, "ips": ["100.64.0.11"]}},
     )
-    assert r["ok"] and r["node"] == "chalet"
+    assert r["ok"] and r["node"] == "studio"
 
 
 def test_pick_vault_primary() -> None:
     r = pick_node("vault", ROSTER, prefer="primary")
-    assert r["ok"] and r["node"] == "manoir"
+    assert r["ok"] and r["node"] == "home"
 
 
 def test_pick_heavy_forced_peer() -> None:
@@ -89,8 +89,8 @@ def test_pick_heavy_forced_peer() -> None:
         ROSTER,
         prefer="hub:montreal",
         peer_ips={
-            "manoir": {"online": True, "ips": ["100.0.0.1"]},
-            "montreal": {"online": True, "ips": ["100.0.0.2"]},
+            "home": {"online": True, "ips": ["100.64.0.1"]},
+            "montreal": {"online": True, "ips": ["100.64.0.2"]},
         },
     )
     assert r["ok"] and r["node"] == "montreal"
@@ -101,7 +101,7 @@ def test_pick_offline_forced_fails() -> None:
         "inference",
         ROSTER,
         prefer="hub:montreal",
-        peer_ips={"montreal": {"online": False, "ips": ["100.0.0.2"]}},
+        peer_ips={"montreal": {"online": False, "ips": ["100.64.0.2"]}},
     )
     assert r["ok"] is False
 
@@ -109,12 +109,12 @@ def test_pick_offline_forced_fails() -> None:
 def test_overlay_council_hosts() -> None:
     council = {
         "nodes": {
-            "satellite": {"host": "100.112.203.32", "agents": ["ahsoka"]},
+            "satellite": {"host": "100.64.0.32", "agents": ["ahsoka"]},
             "hub": {"host": "10.10.10.1", "agents": ["jocasta"]},
         }
     }
-    resolved = {"chalet": "100.68.189.17", "manoir": "100.107.112.118"}
+    resolved = {"studio": "100.64.0.17", "home": "100.64.0.18"}
     out = overlay_hosts(council, ROSTER, resolved)
-    assert out["nodes"]["satellite"]["host"] == "100.68.189.17"
-    assert out["nodes"]["satellite"]["_host_source"] == "hive-resolve:chalet"
-    assert out["nodes"]["hub"]["host"] == "100.107.112.118"
+    assert out["nodes"]["satellite"]["host"] == "100.64.0.17"
+    assert out["nodes"]["satellite"]["_host_source"] == "hive-resolve:studio"
+    assert out["nodes"]["hub"]["host"] == "100.64.0.18"

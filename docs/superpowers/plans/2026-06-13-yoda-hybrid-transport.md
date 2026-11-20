@@ -679,27 +679,27 @@ git commit -m "feat(council): arm Yoda + Mon Mothma with gemini-31-pro tool_mode
 
 Run:
 ```bash
-cd /Users/bert/Projects/sanctum-cli
+cd ~/Projects/sanctum-cli
 .venv/bin/ruff check sanctum_cli tests
 .venv/bin/mypy sanctum_cli
 /tmp/guarded_pytest.sh   # the 3GB-RSS-watchdog runner from the 2026-06-12 session
 ```
 Expected: ruff clean; mypy clean; full suite green; watchdog never trips. (If `/tmp/guarded_pytest.sh` is gone, recreate it: run `.venv/bin/python -m pytest -q` with a background process that kills the pytest tree if its RSS exceeds 3 GB.)
 
-- [ ] **Step 2: Confirm the billing assumption with Bert (BLOCKING for the live smoke only)**
+- [ ] **Step 2: Confirm the billing assumption with the operator (BLOCKING for the live smoke only)**
 
-Ask Bert to confirm the Google AI Studio Ultra sub covers `gemini-3.1-pro` API calls flat-rate (vs. metered billing on the `gemini-api-key`). Do NOT run the live smoke until confirmed — a metered key turns every tool turn into per-token spend.
+Ask the operator to confirm the Google AI Studio Ultra sub covers `gemini-3.1-pro` API calls flat-rate (vs. metered billing on the `gemini-api-key`). Do NOT run the live smoke until confirmed — a metered key turns every tool turn into per-token spend.
 
 - [ ] **Step 3: Live smoke (only after Step 2 confirms)**
 
 Run one real armed turn and capture Yoda's reply:
 ```bash
-cd /Users/bert/Projects/sanctum-cli
+cd ~/Projects/sanctum-cli
 printf '/yoda check the agents and tell me how the haus is\n/quit\n' | .venv/bin/sanctum council
 ```
 PASS = Gemini calls `agent_list` (an audit line appears in `~/.sanctum/logs/council-tools-audit.jsonl` with `seat=Yoda`), and Opus voices the result in canon English (inverted syntax). Quote the reply verbatim in the report. FAIL = report what came back; do not retry-loop more than twice.
 
-- [ ] **Step 4: Report to Bert**
+- [ ] **Step 4: Report to the operator**
 
 Summarize: commits, what works (two-stage gather/voice proven against fakes; degrade paths; back-compat), the live-smoke quote (or that it's pending billing confirm), and the documented follow-up (the optional tool-need gate to skip Gemini on obvious chat turns).
 

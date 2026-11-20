@@ -24,11 +24,11 @@ def test_classify_nat_double_when_hop2_private() -> None:
 
 
 def test_classify_nat_single_when_hop2_public() -> None:
-    assert detect.classify_nat(hop2="70.53.0.1", wan_ip="70.53.0.9") is Nat.SINGLE
+    assert detect.classify_nat(hop2="93.184.216.1", wan_ip="93.184.216.9") is Nat.SINGLE
 
 
 def test_classify_nat_cgnat_when_wan_in_carrier_range() -> None:
-    assert detect.classify_nat(hop2="100.64.0.1", wan_ip="100.96.0.5") is Nat.CGNAT
+    assert detect.classify_nat(hop2="100.64.0.1", wan_ip="100.64.0.5") is Nat.CGNAT
 
 
 def test_classify_nat_unknown_when_no_signal() -> None:
@@ -63,7 +63,7 @@ def test_detect_double_nat_bell() -> None:
     assert isinstance(rep, TopologyReport)
     assert rep.nat is Nat.DOUBLE
     assert rep.firewalla_present is True
-    assert rep.firewalla_wan_mac == "20:6d:31:51:67:82"
+    assert rep.firewalla_wan_mac == "02:00:00:00:00:03"
     assert rep.gateway_ip == "192.168.2.1"
     assert rep.isp == "bell"
     assert rep.applicable is True

@@ -83,7 +83,7 @@ def test_init_name_derives_safe_slug(tmp_path: Path, monkeypatch: pytest.MonkeyP
     target = tmp_path / "instance.yaml"
     monkeypatch.setenv("SANCTUM_INSTANCE_FILE", str(target))
 
-    result = runner.invoke(app, ["init", "--name", "Bert's Haus!! 2026"])
+    result = runner.invoke(app, ["init", "--name", "Alex's Haus!! 2026"])
 
     assert result.exit_code == 0, result.stdout + (result.stderr or "")
     cfg = config.load(target)

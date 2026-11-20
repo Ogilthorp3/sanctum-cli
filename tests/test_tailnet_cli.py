@@ -26,6 +26,8 @@ from sanctum_cli.net.tailnet import (
 if TYPE_CHECKING:
     from pathlib import Path
 
+    import pytest
+
 runner = CliRunner()
 
 _MOD = "sanctum_cli.commands.tailnet"
@@ -58,8 +60,9 @@ class _Api:
 
 def test_doctor_renders_degraded_pane_with_acl_gap() -> None:
     with (
-        patch(f"{_MOD}._probe_spine", return_value=SpineState(True, "tail1a2b.ts.net")),
-        patch(f"{_MOD}._probe_peer", return_value=PeerReach("berts-mbp", True, False)),
+        patch(f"{_MOD}._resolve_peer", return_value="alice-mbp"),
+        patch(f"{_MOD}._probe_spine", return_value=SpineState(True, "tailnet-abc.ts.net")),
+        patch(f"{_MOD}._probe_peer", return_value=PeerReach("alice-mbp", True, False)),
         patch(f"{_MOD}._probe_cred", return_value=CredState(401, "keychain api-key")),
         patch(f"{_MOD}._probe_drift", return_value=AclDrift(None, "no cred")),
         patch(f"{_MOD}._probe_trifecta", return_value=TrifectaState(False, None, False)),
@@ -72,8 +75,9 @@ def test_doctor_renders_degraded_pane_with_acl_gap() -> None:
 
 def test_doctor_json_all_green() -> None:
     with (
+        patch(f"{_MOD}._resolve_peer", return_value="alice-mbp"),
         patch(f"{_MOD}._probe_spine", return_value=SpineState(True, "")),
-        patch(f"{_MOD}._probe_peer", return_value=PeerReach("berts-mbp", True, True)),
+        patch(f"{_MOD}._probe_peer", return_value=PeerReach("alice-mbp", True, True)),
         patch(f"{_MOD}._probe_cred", return_value=CredState(200, "keychain oauth")),
         patch(f"{_MOD}._probe_drift", return_value=AclDrift(True, "matches")),
         patch(f"{_MOD}._probe_trifecta", return_value=TrifectaState(True, None, True)),
@@ -83,6 +87,37 @@ def test_doctor_json_all_green() -> None:
     data = json.loads(result.stdout)
     assert data["overall"] == "GREEN"
     assert len(data["rows"]) == 5
+
+
+def test_doctor_without_configured_peer_marks_peer_unknown() -> None:
+    with (
+        patch(f"{_MOD}._resolve_peer", return_value=None),
+        patch(f"{_MOD}._probe_spine", return_value=SpineState(True, "")),
+        patch(f"{_MOD}._probe_cred", return_value=CredState(200, "keychain oauth")),
+        patch(f"{_MOD}._probe_drift", return_value=AclDrift(True, "matches")),
+        patch(f"{_MOD}._probe_trifecta", return_value=TrifectaState(True, None, True)),
+    ):
+        result = runner.invoke(app, ["tailnet", "doctor", "--json"])
+    assert result.exit_code == 0, result.stdout
+    data = json.loads(result.stdout)
+    peer_row = next(r for r in data["rows"] if r["label"] == "Peer reach")
+    assert peer_row["status"] == "UNKNOWN"
+
+
+def test_ssh_defaults_user_to_current_os_user(monkeypatch: pytest.MonkeyPatch) -> None:
+    import getpass
+
+    monkeypatch.setattr(getpass, "getuser", lambda: "operator")
+    calls: list[tuple[str, str, list[str]]] = []
+
+    def fake_ts_ssh(host: str, user: str, remote: list[str]) -> int:
+        calls.append((host, user, remote))
+        return 0
+
+    with patch(f"{_MOD}._run_tailscale_ssh", fake_ts_ssh):
+        result = runner.invoke(app, ["tailnet", "ssh", "alice-mbp"])
+    assert result.exit_code == 0, result.stdout
+    assert calls == [("alice-mbp", "operator", [])]
 
 
 def test_doctor_never_crashes_when_every_probe_fails() -> None:

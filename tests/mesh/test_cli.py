@@ -247,7 +247,7 @@ def _install(
 
 @pytest.fixture(autouse=True)
 def _isolate_instance(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Point config at a tmp instance.yaml so tests never read/write Bert's real one."""
+    """Point config at a tmp instance.yaml so tests never read/write the operator's real one."""
     monkeypatch.setenv("SANCTUM_INSTANCE_FILE", str(tmp_path / "instance.yaml"))
 
 

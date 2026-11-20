@@ -142,7 +142,7 @@ class FakeRunner:
     double-NAT (private) WAN — a test scripts the right one.
     """
 
-    def __init__(self, wan_ip: str = "70.53.241.21") -> None:
+    def __init__(self, wan_ip: str = "93.184.216.34") -> None:
         self.calls: list[tuple[str, ...]] = []
         self.wan_ip = wan_ip
 

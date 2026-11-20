@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import getpass
 import json
 import os
 import shutil
@@ -76,7 +77,6 @@ _KC_OAUTH_SECRET = "tailscale-oauth-secret"
 _KC_API_KEY = "tailscale-api-key"
 
 _TS_APP = "/Applications/Tailscale.app/Contents/MacOS/Tailscale"
-_DEFAULT_PEER = "berts-mbp"
 _DEFAULT_ACL_PATH = Path("~/Projects/Claude_Code/tailnet/acl.hujson").expanduser()
 
 _HTTP_TIMEOUT_S = 20
@@ -391,14 +391,61 @@ def _report_json(report: StatusReport) -> None:
 # ── commands ────────────────────────────────────────────────────────────────
 
 
+def _resolve_peer() -> str | None:
+    """Resolve an optional tailnet peer hostname without hardcoding a personal host."""
+    env_peer = os.environ.get("SANCTUM_TAILNET_PEER", "").strip()
+    if env_peer:
+        return env_peer
+    cfg_peer = config.instance_value("tailnet.peer", default=None)
+    if isinstance(cfg_peer, str) and cfg_peer.strip():
+        return cfg_peer.strip()
+    ts_bin = _tailscale_bin()
+    if not ts_bin:
+        return None
+    try:
+        proc = subprocess.run(
+            [ts_bin, "status", "--json"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0 or not proc.stdout:
+        return None
+    try:
+        data = json.loads(proc.stdout)
+    except ValueError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    peers = data.get("Peer")
+    if not isinstance(peers, dict):
+        return None
+    self_node = data.get("Self")
+    self_id = self_node.get("ID") if isinstance(self_node, dict) else None
+    for peer_info in peers.values():
+        if not isinstance(peer_info, dict):
+            continue
+        if self_id and peer_info.get("ID") == self_id:
+            continue
+        raw_host = peer_info.get("HostName")
+        if peer_info.get("Online") and isinstance(raw_host, str):
+            host = raw_host.strip()
+            if host:
+                return host
+    return None
+
+
 @tailnet_app.command(
     "doctor",
     help="One-glance tailnet health: spine, peer reach, credential, ACL drift, custody (read-only).",
 )
 def tailnet_doctor(
     peer: Annotated[
-        str, typer.Option("--peer", help="Peer whose reachability to probe.")
-    ] = _DEFAULT_PEER,
+        str | None, typer.Option("--peer", help="Peer whose reachability to probe.")
+    ] = None,
     json_output: Annotated[
         bool, typer.Option("--json", help="Emit JSON instead of the panel.")
     ] = False,
@@ -409,9 +456,10 @@ def tailnet_doctor(
     own row to UNKNOWN — the pane always renders. Nothing here mutates or needs
     sudo. The peer row encodes the ACL-gap signal (disco ping OK + TCP :22 filtered
     ⇒ the policy, not the host, is the problem)."""
+    target_peer = peer or _resolve_peer()
     report = build_tailnet_report(
         spine=_safe_probe(_probe_spine),
-        peer=_safe_probe(lambda: _probe_peer(peer)),
+        peer=_safe_probe(lambda: _probe_peer(target_peer)) if target_peer else None,
         cred=_safe_probe(_probe_cred),
         drift=_safe_probe(_probe_drift),
         trifecta=_safe_probe(_probe_trifecta),
@@ -578,11 +626,13 @@ def tailnet_creds() -> None:
     help="SSH to a tailnet peer: tailscale ssh, falling back to direct ssh over MagicDNS.",
 )
 def tailnet_ssh(
-    host: Annotated[str, typer.Argument(help="Peer name (e.g. berts-mbp) or MagicDNS fqdn.")],
+    host: Annotated[str, typer.Argument(help="Peer name (e.g. mbp) or MagicDNS fqdn.")],
     command: Annotated[
         list[str] | None, typer.Argument(help="Optional remote command (default: interactive shell).")
     ] = None,
-    user: Annotated[str, typer.Option("--user", "-l", help="Remote user.")] = "bert",
+    user: Annotated[
+        str | None, typer.Option("--user", "-l", help="Remote user (default: current OS user).")
+    ] = None,
 ) -> None:
     """Connect robustly: try ``tailscale ssh`` (identity is the tailnet), and on
     failure fall back to a direct ``ssh`` over the MagicDNS name with accept-new host
@@ -590,10 +640,11 @@ def tailnet_ssh(
     can't flood Touch-ID prompts). Fail-soft: on total failure it points at the
     doctor rather than dumping a raw ssh error."""
     remote = command or []
-    if _run_tailscale_ssh(host, user, remote) == 0:
+    ssh_user = user or getpass.getuser()
+    if _run_tailscale_ssh(host, ssh_user, remote) == 0:
         raise typer.Exit(0)
     console.print("[dim]tailscale ssh unavailable/failed — falling back to direct ssh…[/]")
-    if _run_direct_ssh(host, user, remote) != 0:
+    if _run_direct_ssh(host, ssh_user, remote) != 0:
         _fail(
             NetworkError(
                 f"could not connect to {host}",

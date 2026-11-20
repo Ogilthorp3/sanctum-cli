@@ -17,7 +17,7 @@ Design:
   a non-blocking Keychain *existence* probe. It never opens a socket, so it can
   never hang, and it never reads a secret value into memory.
 
-* It must NOT break the command for an operator who HAS the haus (Bert). Every
+* It must NOT break the command for an operator who HAS the haus (a full haus). Every
   component has a present-signal that is true on a real haus and false on a bare
   beta box; an explicit env override (the same envs the commands already honour)
   also counts as present, so a staging/CI box that points the CLI at infra is

@@ -436,3 +436,191 @@ def test_e2e_real_boundary_gemini_starve_then_escalate(
     assert payload["diversity"]["achieved_families"] == [
         "claude", "codestral", "gemini", "grok", "heretic",
     ]
+
+
+# ───────────────────────── M-CLI-2: TLS fail-closed ─────────────────────────
+def _mint_brainstorm_ca_and_leaf(tmp_path: Path, cn: str = "sanctum-mlx") -> tuple[Path, Path, Path]:
+    import datetime
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import NameOID
+
+    now = datetime.datetime.now(datetime.UTC)
+    ca_key = ec.generate_private_key(ec.SECP256R1())
+    ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "sanctum-test-ca")])
+    ca = (
+        x509.CertificateBuilder()
+        .subject_name(ca_name)
+        .issuer_name(ca_name)
+        .public_key(ca_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(days=1))
+        .not_valid_after(now + datetime.timedelta(days=2))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .sign(ca_key, hashes.SHA256())
+    )
+    leaf_key = ec.generate_private_key(ec.SECP256R1())
+    leaf = (
+        x509.CertificateBuilder()
+        .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cn)]))
+        .issuer_name(ca_name)
+        .public_key(leaf_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(days=1))
+        .not_valid_after(now + datetime.timedelta(days=2))
+        .sign(ca_key, hashes.SHA256())
+    )
+    ca_pem = tmp_path / "ca.crt"
+    leaf_pem = tmp_path / "server.crt"
+    key_pem = tmp_path / "server.key"
+    ca_pem.write_bytes(ca.public_bytes(serialization.Encoding.PEM))
+    leaf_pem.write_bytes(leaf.public_bytes(serialization.Encoding.PEM))
+    key_pem.write_bytes(
+        leaf_key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+    )
+    return ca_pem, leaf_pem, key_pem
+
+
+def test_ssl_verify_missing_ca_fails_closed(tmp_path: Path) -> None:
+    from sanctum_cli.errors import LocalError
+
+    missing = tmp_path / "no-such-ca.crt"
+    with pytest.raises(LocalError, match="CA certificate not found"):
+        bs._ssl_verify(missing)
+
+
+def test_ssl_verify_directory_or_corrupt_pem_fails_closed(tmp_path: Path) -> None:
+    from sanctum_cli.errors import LocalError
+
+    with pytest.raises(LocalError, match="CA certificate not found"):
+        bs._ssl_verify(tmp_path)
+
+    bad_pem = tmp_path / "corrupt.crt"
+    bad_pem.write_text("NOT A PEM FILE\n", encoding="utf-8")
+    with pytest.raises(LocalError, match="invalid or unreadable CA certificate"):
+        bs._ssl_verify(bad_pem)
+
+
+def test_cli_missing_cacert_exits_local_error_without_network(
+    full_instance_yaml: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("SANCTUM_INSTANCE_FILE", str(full_instance_yaml))
+    missing = tmp_path / "missing-ca.crt"
+    with patch.object(bs, "_summon", side_effect=AssertionError("must not attempt network")):
+        result = runner.invoke(
+            app,
+            ["brainstorm", "--cacert", str(missing), "--url", "https://127.0.0.1:4040", "topic"],
+        )
+    assert result.exit_code == 4
+    combined = (result.stdout + (result.stderr or "")).lower()
+    assert "ca certificate not found" in combined
+
+
+def test_tls_handshake_accepts_trusted_ca_and_rejects_untrusted_ca(
+    full_instance_yaml: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import gc
+    import http.server
+    import socketserver
+    import ssl
+    import threading
+    import warnings
+
+    ca_pem, leaf_pem, key_pem = _mint_brainstorm_ca_and_leaf(tmp_path, cn="sanctum-mlx")
+    wrong_ca_dir = tmp_path / "other"
+    wrong_ca_dir.mkdir()
+    wrong_ca, _, _ = _mint_brainstorm_ca_and_leaf(wrong_ca_dir, cn="other-leaf")
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            body = json.dumps({"seats": {}}).encode("utf-8")
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_POST(self) -> None:
+            length = int(self.headers.get("content-length", "0"))
+            if length:
+                self.rfile.read(length)
+            body = json.dumps({
+                "model": "claude-sonnet",
+                "choices": [{"message": {"content": "trusted TLS reply"}, "finish_reason": "stop"}],
+            }).encode("utf-8")
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args: object) -> None:
+            return
+
+    class _TLSServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
+        daemon_threads = True
+        block_on_close = False
+
+        def get_request(self) -> tuple[object, object]:
+            sock, addr = super().get_request()
+            try:
+                if isinstance(sock, ssl.SSLSocket):
+                    sock.do_handshake()
+            except OSError:
+                try:
+                    sock.close()
+                finally:
+                    raise
+            return sock, addr
+
+        def handle_error(self, request: object, client_address: object) -> None:
+            return
+
+    httpd = _TLSServer(("127.0.0.1", 0), _Handler)
+    srv_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    srv_ctx.load_cert_chain(certfile=str(leaf_pem), keyfile=str(key_pem))
+    httpd.socket = srv_ctx.wrap_socket(httpd.socket, server_side=True, do_handshake_on_connect=False)
+    port = httpd.server_address[1]
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    url = f"https://127.0.0.1:{port}"
+    monkeypatch.setenv("SANCTUM_INSTANCE_FILE", str(full_instance_yaml))
+    try:
+        # Trusted CA succeeds even though leaf CN=sanctum-mlx != 127.0.0.1.
+        ctx = bs._ssl_verify(ca_pem)
+        assert ctx.verify_mode == ssl.CERT_REQUIRED
+        assert ctx.check_hostname is False
+        res = runner.invoke(
+            app,
+            ["brainstorm", "--json", "-s", "Yoda", "--cacert", str(ca_pem), "--url", url, "topic"],
+        )
+        assert res.exit_code == 0, res.stdout + (res.stderr or "")
+        payload = json.loads(res.stdout)
+        assert payload["seats"][0]["response"] == "trusted TLS reply"
+
+        # Unrelated CA is rejected at TLS verification boundary (never verify=False).
+        wrong_ctx = bs._ssl_verify(wrong_ca)
+        bad_results = bs._summon(url, wrong_ctx, ["Yoda"], "topic", 100, 10.0)
+        assert len(bad_results) == 1
+        assert bad_results[0].status is Status.ABSENT
+        assert bad_results[0].outcome == bs.Outcome.UNREACHABLE.value
+        assert "CERTIFICATE_VERIFY_FAILED" in (bad_results[0].error or "")
+
+        res_bad = runner.invoke(
+            app,
+            ["brainstorm", "-s", "Yoda", "--cacert", str(wrong_ca), "--url", url, "topic"],
+        )
+        assert res_bad.exit_code == 3
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=2)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", ResourceWarning)
+            gc.collect()

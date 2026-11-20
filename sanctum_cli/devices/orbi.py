@@ -115,7 +115,7 @@ def _make_client(creds: Creds) -> Any:
 # / kit) is a positive tell that costs one short-timeout GET and mutates nothing.
 #
 # NOTE (live-confirm — spec open item #2): ``currentsetting.htm`` + the ``Model=RB*``
-# markers are stable across NETGEAR firmware but are confirmed against Bert's live
+# markers are stable across NETGEAR firmware but are confirmed against a live
 # Orbi during the attended smoke. The SHAPE (injected ``http_get`` seam + marker
 # constants) is what this locks; a wrong constant is a one-line + fixture change.
 _FINGERPRINT_TIMEOUT_S = 2.0

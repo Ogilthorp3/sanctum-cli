@@ -294,7 +294,7 @@ def brainstorm_top(
         typer.Option(
             "--wait-load",
             min=0.0,
-            help="Dispatch (and re-poll) only when the Mini's load1 is below this.",
+            help="Dispatch (and re-poll) only when the host's load1 is below this.",
         ),
     ] = None,
     load_host: Annotated[

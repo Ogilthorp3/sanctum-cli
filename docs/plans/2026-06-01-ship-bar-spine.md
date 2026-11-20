@@ -137,7 +137,7 @@ class ServiceKind(str, Enum):
 
 class SecretGenerate(str, Enum):
     hex64 = "hex64"   # mint 64 hex chars on install if absent
-    none = "none"     # operator must supply (e.g. cloud keys); never copied from Bert
+    none = "none"     # operator must supply (e.g. cloud keys); never copied automatically
 
 
 class ServiceSpec(BaseModel):
@@ -577,7 +577,7 @@ def gate_secrets(
     defaulted = [s.service for s in m.secrets if is_default(s.account, s.service)]
     if defaulted:
         return GateResult("secrets-bootstrap", GateStatus.AMBER,
-                          f"secrets look like Bert-defaults: {defaulted}")
+                          f"secrets look like shipped defaults: {defaulted}")
     return GateResult("secrets-bootstrap", GateStatus.GREEN, "present + non-default")
 
 
@@ -682,7 +682,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 - Modify: `sanctum_cli/cli.py` (add `--ship NAME` option to the existing `doctor` command; if set, dispatch to ship evaluator)
 - Test: `tests/test_doctor_ship.py`
 
-Real adapters (live in `ship.py`): `keychain_has` → `keychain.exists`; `is_default` → compare a fingerprint of the value against a small set of known Bert-default fingerprints (start with: empty set → always False, with a TODO-free comment that the fingerprint list is intentionally conservative); `sink_live` → for `chitti`, GET `http://127.0.0.1:2188/health` with a 2s timeout; `probe_is_false_green` → start conservative: False for all (a later task can add the jsonl-only-failure heuristic); `docs_resolves` → HEAD the URL (2s) or accept local `docs/*.md` path existence; `demo_exits_zero` → run the demo command with a short timeout and check rc==0; `soak_days`/`soak_clean` → read the soak result file (Phase 6).
+Real adapters (live in `ship.py`): `keychain_has` → `keychain.exists`; `is_default` → compare a fingerprint of the value against a small set of known default fingerprints (start with: empty set → always False, with a TODO-free comment that the fingerprint list is intentionally conservative); `sink_live` → for `chitti`, GET `http://127.0.0.1:2188/health` with a 2s timeout; `probe_is_false_green` → start conservative: False for all (a later task can add the jsonl-only-failure heuristic); `docs_resolves` → HEAD the URL (2s) or accept local `docs/*.md` path existence; `demo_exits_zero` → run the demo command with a short timeout and check rc==0; `soak_days`/`soak_clean` → read the soak result file (Phase 6).
 
 - [ ] **Step 1: Write the failing test** (uses a fake registry + injected adapters via a thin `evaluate()` seam)
 
@@ -902,8 +902,8 @@ def test_module_status_unknown_errors():
 1. **Spec coverage:** manifest (Task 1), registry (Task 2), backup reference (Task 3), six gates (Task 4), `doctor --ship` (Task 5), soak harness (Task 6), `module` commands (Tasks 7–8), PROBES refactor (Task 9), config + e2e (Task 10) — every spec §4–§11 component maps to a task. The 6 faults in the spec's motivation map to gate tests (dead sink, false-green, missing secret, soak-dirty).
 2. **Placeholder scan:** code blocks are complete for models, gates, classifier, and tests; command-render tasks specify exact behavior, signatures, adapters, and smoke commands. No "TBD"/"handle errors"/"similar to Task N".
 3. **Type consistency:** `GateResult`/`GateStatus` used identically in Tasks 4–5; `ModuleManifest` field names match across manifest, registry, gates, backup yaml; `evaluate(module, registry, adapters)` and `default_adapters()` keys match the gate function signatures; `classify_soak` returns `(days, clean)` consumed by `gate_soak` adapters.
-4. **Deferred (explicit, not silent):** `probe_is_false_green` ships conservative (always False) with the jsonl-only-failure heuristic noted for a follow-up; the Bert-default fingerprint set starts empty. These are amber-safe defaults, documented in Task 5, not hidden gaps.
+4. **Deferred (explicit, not silent):** `probe_is_false_green` ships conservative (always False) with the jsonl-only-failure heuristic noted for a follow-up; the default-fingerprint set starts empty. These are amber-safe defaults, documented in Task 5, not hidden gaps.
 
 ## Execution
 
-Subagent-driven (the council): fresh subagent per task, two-stage review between tasks. Branch `feat/ship-bar-spine`. Nothing pushed until Bert reviews.
+Subagent-driven (the council): fresh subagent per task, two-stage review between tasks. Branch `feat/ship-bar-spine`. Nothing pushed until operator reviews.

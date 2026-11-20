@@ -70,7 +70,7 @@ honest-verify, zero new dependencies.
 
 ## The ONE attended check (spec open item #2)
 
-Run `sanctum onboard` on Bert's real haus and confirm the scan finds the **Bell hub**
+Run `sanctum onboard` on a real haus and confirm the scan finds the **Bell hub**
 (Sagemcom F5697) and the **Orbi** at their real IPs and pairs each with a real admin
 password. The fingerprint **shape** is locked (injected `http_post`/`http_get` seam +
 marker match); if the live markers differ, adjust the constants **and their fixtures

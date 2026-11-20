@@ -261,8 +261,8 @@ def test_parse_tailscale_node_matches_exact_hostname_column() -> None:
     from sanctum_cli.devices import ha_green as hg
 
     text = (
-        "100.64.0.1   bert-mbp        bert@   macOS   -\n"
-        "100.64.0.9   homeassistant   bert@   linux   active; direct\n"
+        "100.64.0.1   alice-mbp       operator@ macOS   -\n"
+        "100.64.0.9   homeassistant   operator@ linux   active; direct\n"
     )
     assert hg._parse_tailscale_node(text, "homeassistant") is True
     # Substring lookalikes must NOT match (exact column match only).
@@ -274,7 +274,7 @@ def test_tailscale_node_present_uses_status_seam(monkeypatch: pytest.MonkeyPatch
     from sanctum_cli.devices import ha_green as hg
 
     monkeypatch.setattr(
-        hg, "_tailscale_status_text", lambda: "100.64.0.9 homeassistant bert@ linux -"
+        hg, "_tailscale_status_text", lambda: "100.64.0.9 homeassistant operator@ linux -"
     )
     assert hg.tailscale_node_present() is True
     monkeypatch.setattr(hg, "_tailscale_status_text", lambda: "")  # no tailscale / not joined

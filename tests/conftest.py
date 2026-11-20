@@ -94,7 +94,7 @@ def _haus_present(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatc
 
     The real :func:`sanctum_cli.haus.is_present` is host-dependent (it checks the
     mTLS CA, devices.yaml, LaunchAgents) — so a haus-only command test would pass
-    on Bert's box and banner-out on CI. Default every test to "haus present" so
+    on an operator's box and banner-out on CI. Default every test to "haus present" so
     gated commands run their real bodies everywhere. Tests that exercise the gate
     itself opt out with ``@pytest.mark.no_haus_stub`` (e.g. tests/test_haus.py)
     and inject presence/absence themselves.
@@ -151,8 +151,8 @@ def full_instance_yaml(tmp_path: Path) -> Path:
     p.write_text(
         """\
 instance:
-  name: Manoir
-  slug: manoir
+  name: Home
+  slug: home
   timezone: America/New_York
 
 notifications:

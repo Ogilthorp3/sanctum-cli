@@ -101,9 +101,9 @@ def test_unsafe_name_is_refused(tmp_path) -> None:
 def test_tailscale_ipv4_ignores_other_addresses() -> None:
     def run(_argv: list[str]) -> str:
         # ip-allow: Tailscale CGNAT example, not a host address
-        return "192.168.1.9\n100.64.1.8\n"
+        return "192.168.1.9\n100.64.0.8\n"
 
-    assert tailscale_ipv4(run) == "100.64.1.8"
+    assert tailscale_ipv4(run) == "100.64.0.8"
     assert tailscale_ipv4(lambda _argv: "") is None
 
 

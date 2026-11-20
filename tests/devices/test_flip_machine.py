@@ -388,8 +388,8 @@ def test_box_op_retry_at_or_past_bound_gives_up_fail_closed() -> None:
 
 def test_evaluate_wan_poison_healthy_armored_is_committable() -> None:
     """The armored success state: a /32 WAN + a clean route table (no 0.0.0.0/1)."""
-    addr = "2: eth0    inet 24.150.33.7/32 brd 24.150.33.7 scope global eth0"
-    routes = "default via 10.0.0.1 dev eth0\n24.150.33.7 dev eth0 scope link"
+    addr = "2: eth0    inet 203.0.113.7/32 brd 203.0.113.7 scope global eth0"
+    routes = "default via 10.0.0.1 dev eth0\n203.0.113.7 dev eth0 scope link"
     v = flip.evaluate_wan_poison(addr, routes)
     assert v.committable is True
 
@@ -397,7 +397,7 @@ def test_evaluate_wan_poison_healthy_armored_is_committable() -> None:
 def test_evaluate_wan_poison_06_26_condition_refuses() -> None:
     """HOSTILE 06-26: a public IP with a /1 netmask AND a 0.0.0.0/1 poison route ->
     NOT committable; the reason names both the route and the /1."""
-    addr = "2: eth0    inet 24.150.33.7/1 brd 127.255.255.255 scope global eth0"
+    addr = "2: eth0    inet 203.0.113.7/1 brd 127.255.255.255 scope global eth0"
     routes = "default via 10.111.0.1 dev eth0\n0.0.0.0/1 via 10.111.0.1 dev eth0"
     v = flip.evaluate_wan_poison(addr, routes)
     assert v.committable is False
@@ -410,7 +410,7 @@ def test_evaluate_wan_poison_06_26_condition_refuses() -> None:
 def test_evaluate_wan_poison_armor_addr_but_poison_route_survived_refuses() -> None:
     """HOSTILE: WAN pinned to /32 but the 0.0.0.0/1 route survived (route-supersede
     failed) -> not committable (a half-holding armor must not commit)."""
-    addr = "2: eth0    inet 24.150.33.7/32 scope global eth0"
+    addr = "2: eth0    inet 203.0.113.7/32 scope global eth0"
     routes = "default via 10.0.0.1 dev eth0\n0.0.0.0/1 via 10.0.0.1 dev eth0"
     v = flip.evaluate_wan_poison(addr, routes)
     assert v.committable is False
@@ -419,7 +419,7 @@ def test_evaluate_wan_poison_armor_addr_but_poison_route_survived_refuses() -> N
 def test_evaluate_wan_poison_one_netmask_route_hidden_refuses() -> None:
     """HOSTILE: the address carries a /1 but the route table HIDES the 0.0.0.0/1 line
     (addr-only poison) -> still refuses on the /1 alone."""
-    addr = "2: eth0    inet 24.150.33.7/1 scope global eth0"
+    addr = "2: eth0    inet 203.0.113.7/1 scope global eth0"
     routes = "default via 10.0.0.1 dev eth0"
     v = flip.evaluate_wan_poison(addr, routes)
     assert v.committable is False
@@ -427,7 +427,7 @@ def test_evaluate_wan_poison_one_netmask_route_hidden_refuses() -> None:
 
 def test_evaluate_wan_poison_transient_both_prefixes_refuses() -> None:
     """HOSTILE: a transient where BOTH a /32 and a /1 are present -> any /1 fails."""
-    addr = "2: eth0    inet 24.150.33.7/32 scope global eth0\n    inet 24.150.33.7/1 scope global eth0"
+    addr = "2: eth0    inet 203.0.113.7/32 scope global eth0\n    inet 203.0.113.7/1 scope global eth0"
     routes = "default via 10.0.0.1 dev eth0"
     v = flip.evaluate_wan_poison(addr, routes)
     assert v.committable is False
@@ -453,8 +453,8 @@ def test_evaluate_wan_poison_non_bell_accepts_normal_public_prefix() -> None:
     """A normal public /24 lease (the typical non-Bell passthrough) is committable
     when the playbook does NOT require the /32 armor — the old /32-only gate would
     have (wrongly) rejected this perfectly healthy lease."""
-    addr = "2: eth0    inet 24.150.33.7/24 brd 24.150.33.255 scope global eth0"
-    routes = "default via 24.150.33.1 dev eth0"
+    addr = "2: eth0    inet 203.0.113.7/24 brd 203.0.113.255 scope global eth0"
+    routes = "default via 203.0.113.1 dev eth0"
     # The default (Bell) gate rejects a non-/32 lease …
     assert flip.evaluate_wan_poison(addr, routes).committable is False
     # … but with the per-playbook flag off, the same healthy public lease commits.
@@ -475,7 +475,7 @@ def test_evaluate_wan_poison_non_bell_accepts_any_prefix(prefix: int) -> None:
 def test_evaluate_wan_poison_non_bell_still_refuses_poison_route() -> None:
     """Even with the /32 requirement OFF, a surprise 0.0.0.0/1 poison route STILL
     refuses — the relaxed gate never opens the door to the Bell /1 collapse."""
-    addr = "2: eth0    inet 24.150.33.7/24 scope global eth0"
+    addr = "2: eth0    inet 203.0.113.7/24 scope global eth0"
     routes = "default via 10.111.0.1 dev eth0\n0.0.0.0/1 via 10.111.0.1 dev eth0"
     v = flip.evaluate_wan_poison(addr, routes, requires_slash32_armor=False)
     assert v.committable is False
@@ -485,7 +485,7 @@ def test_evaluate_wan_poison_non_bell_still_refuses_poison_route() -> None:
 def test_evaluate_wan_poison_non_bell_still_refuses_slash1_netmask() -> None:
     """A /1 netmask STILL refuses even with the requirement off — it is the poison
     itself, never a legitimate non-Bell lease."""
-    addr = "2: eth0    inet 24.150.33.7/1 scope global eth0"
+    addr = "2: eth0    inet 203.0.113.7/1 scope global eth0"
     v = flip.evaluate_wan_poison(addr, "default via 10.0.0.1 dev eth0",
                                  requires_slash32_armor=False)
     assert v.committable is False
@@ -494,7 +494,7 @@ def test_evaluate_wan_poison_non_bell_still_refuses_slash1_netmask() -> None:
 def test_evaluate_wan_poison_bell_default_unchanged_requires_slash32() -> None:
     """REGRESSION: the default (requires_slash32_armor=True) still demands /32 — a
     non-/32 Bell lease is refused exactly as before (the FIX-c behavior is intact)."""
-    addr = "2: eth0    inet 24.150.33.7/24 scope global eth0"
+    addr = "2: eth0    inet 203.0.113.7/24 scope global eth0"
     assert flip.evaluate_wan_poison(addr, "default via 10.0.0.1 dev eth0").committable is False
 
 

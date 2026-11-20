@@ -40,14 +40,14 @@
 # tests/net/test_link.py — append
 from sanctum_cli.net.link import IdentityProbe, probe_identity, _enc_from_security
 
-# The LITERAL ipconfig getsummary shape captured on the Mini during the incident.
-_MINI_GETSUMMARY = """  SSID : Nepveu-6G
+# The LITERAL ipconfig getsummary shape captured on the host during the incident.
+_MINI_GETSUMMARY = """  SSID : Sanctum-6G
   Security : WPA2_PSK
   LinkStatusActive : TRUE
   RouterARPVerified : FALSE
   RouterARPTimedOut : TRUE
 """
-_HEALTHY_GETSUMMARY = """  SSID : Nepveu-6G
+_HEALTHY_GETSUMMARY = """  SSID : Sanctum-6G
   Security : WPA3_SAE
   LinkStatusActive : TRUE
   RouterARPVerified : TRUE
@@ -64,18 +64,18 @@ def _fake_runner(mapping):
 
 def test_probe_identity_reads_quarantine_signature():
     run = _fake_runner({
-        "listallhardwareports": "Hardware Port: Wi-Fi\nDevice: en1\nEthernet Address: d0:11:e5:1c:88:59",
-        "ifconfig en1": "\tether 32:a6:f4:de:54:cf",
-        "getmacaddress en1": "Ethernet Address: d0:11:e5:1c:88:59",
+        "listallhardwareports": "Hardware Port: Wi-Fi\nDevice: en1\nEthernet Address: 02:00:00:00:00:01",
+        "ifconfig en1": "\tether 02:00:00:00:00:02",
+        "getmacaddress en1": "Ethernet Address: 02:00:00:00:00:01",
         "getsummary en1": _MINI_GETSUMMARY,
         "route -n get default": "gateway: 10.0.0.1\ninterface: en1",
         "ping": "0 packets received, 100.0% packet loss",
     })
     p = probe_identity(run=run)
     assert p.iface == "en1"
-    assert p.current_mac == "32:a6:f4:de:54:cf"
-    assert p.hardware_mac == "d0:11:e5:1c:88:59"
-    assert p.ssid == "Nepveu-6G"
+    assert p.current_mac == "02:00:00:00:00:02"
+    assert p.hardware_mac == "02:00:00:00:00:01"
+    assert p.ssid == "Sanctum-6G"
     assert p.security == "WPA2_PSK"
     assert p.associated is True
     assert p.router_arp_verified is False
@@ -199,19 +199,19 @@ def probe_identity(run: CommandRunner | None = None, *, ping_gateway: bool = Tru
 from sanctum_cli.net.link import IdentityDiagnosis, diagnose_identity
 
 def _probe(**kw):
-    base = dict(iface="en1", ssid="Nepveu-6G", current_mac="d0:11:e5:1c:88:59",
-                hardware_mac="d0:11:e5:1c:88:59", security="WPA2_PSK",
+    base = dict(iface="en1", ssid="Sanctum-6G", current_mac="02:00:00:00:00:01",
+                hardware_mac="02:00:00:00:00:01", security="WPA2_PSK",
                 associated=True, router_arp_verified=True, gateway_reachable=True)
     base.update(kw)
     return IdentityProbe(**base)
 
 def test_diagnose_quarantined_is_the_mini_signature():
-    d = diagnose_identity(_probe(current_mac="32:a6:f4:de:54:cf",
+    d = diagnose_identity(_probe(current_mac="02:00:00:00:00:02",
                                  router_arp_verified=False, gateway_reachable=False))
     assert d.verdict == "IDENTITY_QUARANTINED"
 
 def test_diagnose_rotating_when_random_mac_but_reachable():
-    d = diagnose_identity(_probe(current_mac="32:a6:f4:de:54:cf"))
+    d = diagnose_identity(_probe(current_mac="02:00:00:00:00:02"))
     assert d.verdict == "IDENTITY_ROTATING"
 
 def test_diagnose_stable_on_hardware_mac():
@@ -371,17 +371,17 @@ def classify_node(signals: NodeSignals) -> NodeClass:
 from sanctum_cli.net.link import QuarantineFinding, firewalla_quarantine_check
 
 def test_fw_check_none_when_no_transport():
-    assert firewalla_quarantine_check("32:a6:f4:de:54:cf") is None
+    assert firewalla_quarantine_check("02:00:00:00:00:02") is None
 
 def test_fw_check_none_when_empty_response():
-    assert firewalla_quarantine_check("32:a6", transport=lambda mac: "") is None
+    assert firewalla_quarantine_check("02:00", transport=lambda mac: "") is None
 
 def test_fw_check_reports_quarantine_tag():
-    f = firewalla_quarantine_check("32:a6", transport=lambda mac: '["18"]')
+    f = firewalla_quarantine_check("02:00", transport=lambda mac: '["18"]')
     assert f is not None and f.quarantined is True and f.tag == "18"
 
 def test_fw_check_reports_untagged():
-    f = firewalla_quarantine_check("d0:11", transport=lambda mac: "[]")
+    f = firewalla_quarantine_check("02:01", transport=lambda mac: "[]")
     assert f is not None and f.quarantined is False
 ```
 
@@ -440,8 +440,8 @@ def test_status_shows_identity_verdict(tmp_path):
     log = tmp_path / "wifi.log"
     log.write_text("2026-07-01T10:00:00 ssid=X rtt=2/3/4/1 loss=0.0% load=[1] ok\n")
     quarantined = linkmod.IdentityProbe(
-        iface="en1", ssid="Nepveu-6G", current_mac="32:a6:f4:de:54:cf",
-        hardware_mac="d0:11:e5:1c:88:59", security="WPA2_PSK",
+        iface="en1", ssid="Sanctum-6G", current_mac="02:00:00:00:00:02",
+        hardware_mac="02:00:00:00:00:01", security="WPA2_PSK",
         associated=True, router_arp_verified=False, gateway_reachable=False)
     with patch.object(linkmod, "probe_identity", return_value=quarantined):
         r = runner.invoke(link_app, ["status", "--log", str(log)])
@@ -489,15 +489,15 @@ This extends the existing `link_optimize`. Behavior:
 
 ```python
 def _mk_probe(**kw):
-    base = dict(iface="en1", ssid="Nepveu-6G", current_mac="32:a6:f4:de:54:cf",
-                hardware_mac="d0:11:e5:1c:88:59", security="WPA2_PSK",
+    base = dict(iface="en1", ssid="Sanctum-6G", current_mac="02:00:00:00:00:02",
+                hardware_mac="02:00:00:00:00:01", security="WPA2_PSK",
                 associated=True, router_arp_verified=False, gateway_reachable=False)
     base.update(kw); return linkmod.IdentityProbe(**base)
 
 def test_optimize_apply_enrolls_server(tmp_path):
     out = tmp_path / "p.mobileconfig"
     with patch.object(linkmod, "probe_identity", return_value=_mk_probe()), \
-         patch.object(linkmod, "probe_wifi", return_value=linkmod.WifiProbe("en1","32:a6:f4:de:54:cf","d0:11:e5:1c:88:59","Nepveu-6G")), \
+         patch.object(linkmod, "probe_wifi", return_value=linkmod.WifiProbe("en1","02:00:00:00:00:02","02:00:00:00:00:01","Sanctum-6G")), \
          patch("sanctum_cli.commands.link._node_signals",
                return_value=linkmod.NodeSignals(30.0,"Manual",True,1,False)):
         r = runner.invoke(link_app, ["optimize", "--apply", "--profile-out", str(out)])
@@ -517,7 +517,7 @@ def test_optimize_apply_roamer_nudges_no_write(tmp_path):
 
 def test_optimize_verify_honest_pass_and_fail():
     with patch.object(linkmod, "probe_identity",
-                      return_value=_mk_probe(current_mac="d0:11:e5:1c:88:59",
+                      return_value=_mk_probe(current_mac="02:00:00:00:00:01",
                                              router_arp_verified=True, gateway_reachable=True)):
         r = runner.invoke(link_app, ["optimize", "--verify"])
     assert r.exit_code == 0 and "✓" in r.stdout
@@ -549,18 +549,18 @@ def test_optimize_verify_honest_pass_and_fail():
 from sanctum_cli.net.link import parse_identity, identity_is_drift
 
 def test_parse_identity_reads_id_token():
-    line = "2026-07-01T10:00:00 ssid=X rtt=2/3/4/1 loss=0.0% load=[1] id=cur=32:a6:f4:de:54:cf,hw=d0:11:e5:1c:88:59,arp=FALSE DEGRADED"
+    line = "2026-07-01T10:00:00 ssid=X rtt=2/3/4/1 loss=0.0% load=[1] id=cur=02:00:00:00:00:02,hw=02:00:00:00:00:01,arp=FALSE DEGRADED"
     ids = parse_identity(line)
     assert ids is not None
-    assert ids["cur"] == "32:a6:f4:de:54:cf" and ids["hw"] == "d0:11:e5:1c:88:59" and ids["arp"] == "FALSE"
+    assert ids["cur"] == "02:00:00:00:00:02" and ids["hw"] == "02:00:00:00:00:01" and ids["arp"] == "FALSE"
 
 def test_identity_drift_true_on_random_mac_and_arp_false():
     assert identity_is_drift(parse_identity(
-        "x rtt=NA loss=100.0% load=[1] id=cur=32:a6:f4:de:54:cf,hw=d0:11:e5:1c:88:59,arp=FALSE DEGRADED")) is True
+        "x rtt=NA loss=100.0% load=[1] id=cur=02:00:00:00:00:02,hw=02:00:00:00:00:01,arp=FALSE DEGRADED")) is True
 
 def test_identity_drift_false_on_hardware_mac():
     assert identity_is_drift(parse_identity(
-        "x rtt=2/3/4/1 loss=0.0% load=[1] id=cur=d0:11:e5:1c:88:59,hw=d0:11:e5:1c:88:59,arp=TRUE ok")) is False
+        "x rtt=2/3/4/1 loss=0.0% load=[1] id=cur=02:00:00:00:00:01,hw=02:00:00:00:00:01,arp=TRUE ok")) is False
 
 def test_existing_parse_log_still_reads_degraded_with_id_token():
     # regression guard: the trailing flag + rtt/loss/load parse survive the id= insert

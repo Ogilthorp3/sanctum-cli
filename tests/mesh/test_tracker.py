@@ -91,7 +91,7 @@ def _mint() -> tuple[Ed25519Signer, str, str]:
 
 
 def _mint_identity(
-    label: str = "manoir", created: str = "2026-07-05T00:00:00Z"
+    label: str = "home", created: str = "2026-07-05T00:00:00Z"
 ) -> tuple[_FakeSigningIdentity, MeshIdentity, Ed25519Signer, str]:
     signer, public, private = _mint()
     signing = _FakeSigningIdentity(public, private, signer)
@@ -100,7 +100,7 @@ def _mint_identity(
 
 
 def _identity() -> MeshIdentity:
-    return MeshIdentity(pubkey="ed25519:PUB", label="manoir", created="2026-07-05T00:00:00Z")
+    return MeshIdentity(pubkey="ed25519:PUB", label="home", created="2026-07-05T00:00:00Z")
 
 
 def _sign_challenge(signer: Ed25519Signer, private: str, public: str, ts: str) -> str:
@@ -257,15 +257,15 @@ def transport_factory() -> Iterator[Callable[..., HttpTrackerTransport]]:
 
 def test_registry_register_acks_and_adds_peer() -> None:
     reg = TrackerRegistry()
-    assert reg.register("pk", "manoir", "2026-07-05", "100.64.0.1") is True
+    assert reg.register("pk", "home", "2026-07-05", "100.64.0.1") is True
     assert reg.list_peers() == ["100.64.0.1"]
 
 
 def test_registry_register_dedups_addr() -> None:
     reg = TrackerRegistry()
-    reg.register("pk", "manoir", "t", "100.64.0.1")
-    reg.register("pk", "manoir", "t", "100.64.0.1")
-    reg.register("pk", "manoir", "t", "100.64.0.2")
+    reg.register("pk", "home", "t", "100.64.0.1")
+    reg.register("pk", "home", "t", "100.64.0.1")
+    reg.register("pk", "home", "t", "100.64.0.2")
     assert reg.list_peers() == ["100.64.0.1", "100.64.0.2"]
 
 

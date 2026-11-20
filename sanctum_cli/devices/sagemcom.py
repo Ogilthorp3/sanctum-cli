@@ -342,7 +342,7 @@ async def _reboot_raw(client: Any) -> Any:
 # that costs one short-timeout POST and mutates nothing.
 #
 # NOTE (live-confirm — spec open item #2): the exact URL path (``/cgi/json-req``)
-# and the marker are confirmed against Bert's live Bell F5697 during the attended
+# and the marker are confirmed against a live Bell F5697 during the attended
 # smoke. The SHAPE (injected ``http_post`` seam + marker constant) is what this
 # locks; a wrong constant is a one-line + fixture change, not a redesign.
 _FINGERPRINT_TIMEOUT_S = 2.0

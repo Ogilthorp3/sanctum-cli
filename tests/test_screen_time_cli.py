@@ -218,7 +218,7 @@ def test_coverage_renders_user_strings_literally(
             "kidA": {
                 "role": "child",
                 "personal_devices": [
-                    {"name": "[red]Pwn[/] phone", "mac": "7A:87:AC:CD:8E:A2"}
+                    {"name": "[red]Pwn[/] phone", "mac": "02:00:AC:CD:8E:01"}
                 ],
             }
         }

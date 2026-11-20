@@ -25,8 +25,10 @@ exercise the rails without a runner.
 from __future__ import annotations
 
 import contextlib
+import getpass
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from sanctum_cli import config
@@ -39,7 +41,6 @@ from sanctum_cli.net.types import Verdict
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
-    from pathlib import Path
 
     from sanctum_cli.devices.base import DeviceProvider
     from sanctum_cli.net.detect import Runner
@@ -303,14 +304,16 @@ _BOX_OP_POLL_INTERVAL_S = 15.0
 # (``paths.armor_kit_dir`` → this default), so a fresh operator whose checkout lives
 # elsewhere points the deploy at their own path. This constant is the shipped
 # fallback only.
-_DEFAULT_ARMOR_KIT_DIR = "/Users/bert/Documents/Claude_Code/sanctum-singlenat-armor"
+_DEFAULT_ARMOR_KIT_DIR = str(
+    Path.home() / "Documents" / "Claude_Code" / "sanctum-singlenat-armor"
+)
 # The SHIPPED LAN defaults — the general-purpose tool is unchanged for other users.
-# Bert's haus pins the tailnet transport in ~/.sanctum/instance.yaml (FIX-b); these
-# defaults are NEVER his personal tailnet IPs, only the LAN coordinates the kit
+# An operator's haus pins the tailnet transport in ~/.sanctum/instance.yaml (FIX-b);
+# these defaults are NEVER personal tailnet IPs, only the LAN coordinates the kit
 # README documents.
 _DEFAULT_ARMOR_FIREWALLA_HOST = "10.0.0.1"  # ip-allow: shipped LAN default for the armor deploy target (Firewalla); overridden config-first via devices.firewalla.host
 _DEFAULT_ARMOR_FIREWALLA_USER = "pi"
-_DEFAULT_ARMOR_MINI_HOST = "bert@10.0.0.10"  # ip-allow: shipped LAN default for the armor Mini jump host; overridden config-first via devices.mini.host
+_DEFAULT_ARMOR_MINI_HOST = f"{getpass.getuser()}@10.0.0.10"  # ip-allow: shipped LAN default for the armor jump host; overridden config-first via devices.mini.host
 
 
 def _armor_firewalla_host() -> str:
@@ -330,10 +333,10 @@ def _armor_firewalla_user() -> str:
 
 
 def _armor_mini_host() -> str:
-    """The Mini ``user@host`` the armor scp/ssh targets — ``devices.mini.host``, else LAN.
+    """The jump-host ``user@host`` the armor scp/ssh targets — ``devices.mini.host``, else LAN.
 
-    The tailnet pin (a ``bert@<tailnet-ip>`` host) lets the kit deploy reach the
-    Mini over Tailscale when the operator is off the ``10/8`` LAN.
+    The tailnet pin (a ``user@<tailnet-ip>`` host) lets the kit deploy reach the
+    host over Tailscale when the operator is off the ``10/8`` LAN.
     """
     return str(config.instance_value("devices.mini.host", _DEFAULT_ARMOR_MINI_HOST))
 
@@ -346,8 +349,8 @@ def _armor_kit_dir() -> str:
     unchanged on a fresh box. This is the ONE resolver shared by both
     :func:`_default_armor_installer` (the un-injected intents fallback) and the CLI's
     ``net._build_armor_installer``, so the two never drift on the checkout path — a
-    fresh operator whose ``sanctum-singlenat-armor`` lives outside Bert's OneDrive
-    tree points BOTH deploy seams at their own checkout with one config key.
+    fresh operator whose ``sanctum-singlenat-armor`` lives elsewhere
+    points BOTH deploy seams at their own checkout with one config key.
     """
     return str(config.instance_value("paths.armor_kit_dir", _DEFAULT_ARMOR_KIT_DIR))
 

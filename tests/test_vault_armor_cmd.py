@@ -29,7 +29,7 @@ def _write_fake_armor_bin(tmp_path: Path) -> Path:
         "elif cmd == 'status':\n"
         "    probes = [{'index': 1, 'label': 'lan', 'reachable_and_dleq_valid': True}] if '--probe-witnesses' in sys.argv else []\n"
         "    print(json.dumps({\n"
-        "        'vault_id': 'manoir-vault',\n"
+        "        'vault_id': 'home-vault',\n"
         "        'mode': 'phase1-shadow-canary',\n"
         "        'threshold': '2-of-3',\n"
         "        'post_quantum': 'ML-KEM-768 + Ed25519-TOPRF-DLEQ + AES-256-GCM',\n"

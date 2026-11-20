@@ -13,12 +13,12 @@
     <string>haus.sanctum.endocrine-gland-reaper</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/bert/.sanctum/scripts/endocrine-tick-reaper.sh</string>
+        <string>@OPERATOR_HOME@/.sanctum/scripts/endocrine-tick-reaper.sh</string>
     </array>
     <key>EnvironmentVariables</key>
     <dict>
         <key>HOME</key>
-        <string>/Users/bert</string>
+        <string>@OPERATOR_HOME@</string>
         <key>PATH</key>
         <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     </dict>
@@ -27,8 +27,8 @@
     <key>StartInterval</key>
     <integer>10</integer>
     <key>StandardOutPath</key>
-    <string>/Users/bert/.sanctum/logs/endocrine-gland-reaper.log</string>
+    <string>@OPERATOR_HOME@/.sanctum/logs/endocrine-gland-reaper.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/bert/.sanctum/logs/endocrine-gland-reaper.log</string>
+    <string>@OPERATOR_HOME@/.sanctum/logs/endocrine-gland-reaper.log</string>
 </dict>
 </plist>

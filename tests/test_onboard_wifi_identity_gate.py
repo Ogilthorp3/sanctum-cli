@@ -74,8 +74,8 @@ def _probe(
             associated=False, router_arp_verified=None, gateway_reachable=None,
         )
     # Rotating MAC (locally-administered) ≠ hardware; LAN dead ⇒ QUARANTINED.
-    rotating_mac = "7a:11:22:33:44:55"  # locally-administered bit set
-    hardware = "20:f8:3b:02:3a:c8"
+    rotating_mac = "02:00:00:00:00:02"  # locally-administered bit set
+    hardware = "00:00:5e:00:53:01"
     if verdict_shape == "STABLE":
         current = hardware
         lan_dead = False
@@ -180,7 +180,7 @@ def test_server_quarantined_generates_profile(monkeypatch: pytest.MonkeyPatch) -
     )
     assert onboard._run_wifi_identity(yes=False) is True
     assert captured["ssid"] == "haus-5G"
-    assert captured["mac"] == "20:f8:3b:02:3a:c8"
+    assert captured["mac"] == "00:00:5e:00:53:01"
 
 
 def test_server_rotating_generates_profile(monkeypatch: pytest.MonkeyPatch) -> None:

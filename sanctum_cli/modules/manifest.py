@@ -31,7 +31,7 @@ class ServiceKind(StrEnum):
 
 class SecretGenerate(StrEnum):
     hex64 = "hex64"   # mint 64 hex chars on install if absent
-    none = "none"     # operator must supply (e.g. cloud keys); never copied from Bert
+    none = "none"     # operator must supply (e.g. cloud keys); never copied automatically
 
 
 class ServiceSpec(BaseModel):

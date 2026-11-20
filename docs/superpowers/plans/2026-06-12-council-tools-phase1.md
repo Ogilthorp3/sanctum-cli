@@ -10,7 +10,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-06-12-council-tools-and-canon-voice-design.md`
 
-**Phase-0 result (already run, 2026-06-12):** the `:3456` claude-max bridge does NOT forward `tools` (it wraps one-shot `claude --print`); proxyd itself translates tools fine (verified `tool_use` from qwen36-plus, glm-51, gemini-25-flash). Bert chose to fix the bridge in a separate project. **Consequence for this plan:** the tool loop is built and tested against a faked transport; the interactive live smoke is DEFERRED to the bridge plan. Everything else ships now.
+**Phase-0 result (already run, 2026-06-12):** the `:3456` claude-max bridge does NOT forward `tools` (it wraps one-shot `claude --print`); proxyd itself translates tools fine (verified `tool_use` from qwen36-plus, glm-51, gemini-25-flash). Operator chose to fix the bridge in a separate project. **Consequence for this plan:** the tool loop is built and tested against a faked transport; the interactive live smoke is DEFERRED to the bridge plan. Everything else ships now.
 
 **House rules binding every task:** gates before each commit — `.venv/bin/ruff format <touched>`, `.venv/bin/ruff check sanctum_cli tests`, `.venv/bin/mypy sanctum_cli`, `.venv/bin/python -m pytest -q`. Comments are full sentences explaining why. Never touch files outside your task's list.
 
@@ -50,7 +50,7 @@ class TestRedact:
         hostile = (
             "ok line with 100% normal text\n"
             "x-api-key: sk-ant-api03-" + "A" * 50 + "\n"
-            "-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----\n"
+            "-----BEGIN " + "OPENSSH PRIVATE KEY-----\nabc\n-----END " + "OPENSSH PRIVATE KEY-----\n"
         )
         out = ct.redact(hostile)
         assert "sk-ant-" not in out
@@ -664,7 +664,7 @@ class TestCanonVoice:
             "You are Yoda, Grand Master of the Sanctum Jedi Council — the wise"
             " synthesist, and the Jedi Master himself, not an impression."
             " Sanctum is a self-hosted family AI and haus-ops platform on a Mac"
-            " Mini ('manoir') guarding a family network. Speak as he speaks in"
+            " Mini ('home') guarding a family network. Speak as he speaks in"
             " the films: invert by default (anastrophe) — 'Checked the logs, I"
             " have. Fine, everything is.' Most sentences inverted, not every"
             " one; clarity over the bit, always. Open with 'Hmm.' or 'Yes,"
@@ -675,7 +675,7 @@ class TestCanonVoice:
             " not' is a complete and honest answer; a tool fails or stale the"
             " data is, say so plainly. Plain where machines read: tool calls,"
             " JSON, structured output stay plain English — Yoda-speak is for"
-            " Bert's eyes, never for parsers."
+            " the operator's eyes, never for parsers."
         ),
 ```
 
@@ -708,8 +708,8 @@ class TestCanonVoice:
 **Files:**
 - Modify: `docs/superpowers/specs/2026-06-12-council-tools-and-canon-voice-design.md`
 
-- [ ] **Step 1: Append a `## Phase-0 outcome (2026-06-12)` section** to the spec recording: bridge (`claude-max-api-proxy` 1.0.0 wrapping `claude --print`) strips tools; proxyd translate.rs forwards them; qwen36-plus/glm-51/gemini-25-flash verified tooling; Bert chose fixing the bridge (separate spec/plan to follow); live interactive smoke deferred there; everything else shipped per this plan.
+- [ ] **Step 1: Append a `## Phase-0 outcome (2026-06-12)` section** to the spec recording: bridge (`claude-max-api-proxy` 1.0.0 wrapping `claude --print`) strips tools; proxyd translate.rs forwards them; qwen36-plus/glm-51/gemini-25-flash verified tooling; operator chose fixing the bridge (separate spec/plan to follow); live interactive smoke deferred there; everything else shipped per this plan.
 
 - [ ] **Step 2: Full gates one last time.** `.venv/bin/ruff check sanctum_cli tests && .venv/bin/mypy sanctum_cli && .venv/bin/python -m pytest -q` → all green.
 
-- [ ] **Step 3: Commit** spec amendment as `docs(spec): record phase-0 bridge finding + deferred live smoke`. Report to Bert: commits, what works today (tool loop proven against protocol fakes; degrade path; canon voice; VM acceptance quote), what waits on the bridge plan.
+- [ ] **Step 3: Commit** spec amendment as `docs(spec): record phase-0 bridge finding + deferred live smoke`. Report to the operator: commits, what works today (tool loop proven against protocol fakes; degrade path; canon voice; VM acceptance quote), what waits on the bridge plan.

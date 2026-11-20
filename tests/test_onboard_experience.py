@@ -464,7 +464,7 @@ def test_first_hello_absent_script_is_a_silent_skip(
     monkeypatch.setenv("HOME", str(tmp_path))  # a home with no ~/.sanctum/bin script
     monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)  # env-independent home
     with patch("sanctum_cli.commands.onboard.console") as mock_console:
-        onboard._run_first_hello("Bert")  # must not raise
+        onboard._run_first_hello("Alex")  # must not raise
     # Nothing printed — a haus with no First Hello installed just stays quiet.
     assert not mock_console.print.called
 
@@ -485,10 +485,10 @@ def test_first_hello_runs_script_and_passes_the_name(
     with patch("subprocess.run") as mock_run, patch(
         "sanctum_cli.commands.onboard.console"
     ) as mock_console:
-        onboard._run_first_hello("Bert")
+        onboard._run_first_hello("Alex")
     assert mock_run.called, "First Hello must invoke the installed script"
     env = mock_run.call_args.kwargs.get("env", {})
-    assert env.get("SANCTUM_USER_NAME") == "Bert"
+    assert env.get("SANCTUM_USER_NAME") == "Alex"
     assert mock_console.print.called  # the "haus wants to say hello" beat
 
 
@@ -505,4 +505,4 @@ def test_first_hello_never_breaks_onboarding_when_script_raises(
         "subprocess.run",
         side_effect=OSError("no audio device"),
     ), patch("sanctum_cli.commands.onboard.console"):
-        onboard._run_first_hello("Bert")  # must swallow the error, not raise
+        onboard._run_first_hello("Alex")  # must swallow the error, not raise

@@ -6,7 +6,7 @@
 use tools like Signal-Yoda). Supersedes the deferred "fix the :3456 bridge" plan:
 the Claude Max bridge wraps `claude --print` and **strips the `tools` array**, and
 the Max subscription has no raw Messages-API access, so Opus cannot drive the
-client-executes-tools protocol. Bert's call (2026-06-13): keep Opus as the brain
+client-executes-tools protocol. Operator's call (2026-06-13): keep Opus as the brain
 on flat-rate Max, and hand the tool-calling to Gemini 3.1 Pro on the flat-rate
 Google AI Studio Ultra sub — both subscriptions, zero marginal token cost.
 
@@ -41,7 +41,7 @@ An armed seat that has a `tool_model` runs each turn in two phases:
 When Gemini calls no tools (a pure-chat turn), phase 1 is a fast no-op with empty
 findings and phase 2 is just Opus answering directly — i.e. **"Opus when you
 don't need tools."** When tools are needed, **"Gemini when you need tool
-calling,"** and Opus always does the talking. Gemini never speaks to Bert, so the
+calling,"** and Opus always does the talking. Gemini never speaks to the operator, so the
 canon voice is always Opus — the persona-on-a-foreign-model concern disappears.
 
 ## Components
@@ -159,7 +159,7 @@ user ─▶ _say_turn(armed seat, tool_model set)
   path falls back to Opus chat.
 - **Billing assumption** — the design assumes the Google AI Studio Ultra sub
   covers `gemini-3.1-pro` API calls flat-rate. If the proxyd `gemini-api-key` is
-  metered AI-Studio billing instead, tool turns incur per-token cost. **Bert to
+  metered AI-Studio billing instead, tool turns incur per-token cost. **Operator to
   confirm before the live smoke;** not a code risk.
 - **Findings flattening loses structure** — Opus sees prose, not typed results.
   Acceptable: Opus is voicing a summary for a human, not machine-parsing. The

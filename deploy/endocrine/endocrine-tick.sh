@@ -93,19 +93,19 @@ if [[ -n "${SANCTUM_ENDOCRINE_TICK_PREHOOK:-}" ]]; then
 fi
 
 SANCTUM_BIN_SET="${SANCTUM_BIN:+1}"
-SANCTUM="${SANCTUM_BIN:-/Users/bert/.local/bin/sanctum}"
-if [[ ! -x "$SANCTUM" ]]; then
-  echo "endocrine-tick: sanctum not executable: $SANCTUM" >&2
-  finish 78
-fi
+SANCTUM="${SANCTUM_BIN:-${HOME}/.local/bin/sanctum}"
 
 # Fast-path: when SANCTUM_BIN is not overridden, run the stdlib-only
 # gland_daemon module directly (~60ms) instead of importing the full
 # Typer + Rich CLI tree (~390ms+, >25s under disk contention).
-SANCTUM_PY="${SANCTUM_PYTHON:-/Users/bert/.local/share/uv/tools/sanctum-cli/bin/python}"
+SANCTUM_PY="${SANCTUM_PYTHON:-${HOME}/.local/share/uv/tools/sanctum-cli/bin/python}"
 if [[ -z "$SANCTUM_BIN_SET" && -x "$SANCTUM_PY" ]]; then
   "$SANCTUM_PY" -m sanctum_cli.endocrine.gland_daemon --once --compact "$@" &
 else
+  if [[ ! -x "$SANCTUM" ]]; then
+    echo "endocrine-tick: sanctum not executable: $SANCTUM" >&2
+    finish 78
+  fi
   "$SANCTUM" endocrine tick "$@" &
 fi
 tick_pid=$!

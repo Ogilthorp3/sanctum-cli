@@ -454,7 +454,7 @@ def is_locally_administered(mac: str) -> bool:
 
 
 # The identity tuple the sentinel now appends to each sample line, e.g.
-# ``id=cur=32:a6:f4:de:54:cf,hw=d0:11:e5:1c:88:59,arp=FALSE`` — with an OPTIONAL
+# ``id=cur=02:00:00:00:00:02,hw=00:00:5e:00:53:01,arp=FALSE`` — with an OPTIONAL
 # trailing ``,drift=1`` the sampler stamps when it has itself detected the drift
 # signature (rotating MAC + arp=FALSE). Parsed INDEPENDENTLY of the rtt/loss/load
 # fields so a drift-only pass never needs the radio metrics — and vice versa (a

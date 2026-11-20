@@ -52,7 +52,7 @@ DEFAULT_FORCE_FLOW = "http://127.0.0.1:4077"
 
 # ── on-disk bloodstream (the listener-free query surface) ──
 # Daemon-side state lives under ~/.sanctum per the secret-rotator pattern (NOT
-# the OneDrive-synced repo). Overridable for tests via env.
+# the synced repo). Overridable for tests via env.
 STATE_DIR_ENV = "SANCTUM_ENDOCRINE_DIR"
 _DEFAULT_STATE_DIR = Path("~/.sanctum/state/endocrine").expanduser()
 PANEL_FILENAME = "panel.json"

@@ -8,7 +8,7 @@ from sanctum_cli.net.types import Nat, TopologyReport
 def _report(**kw: object) -> TopologyReport:
     base = dict(
         firewalla_present=True,
-        firewalla_wan_mac="20:6d:31:51:67:82",
+        firewalla_wan_mac="02:00:00:00:00:03",
         firewalla_wan_mtu=1500,
         nat=Nat.DOUBLE,
         gateway_ip="192.168.2.1",
@@ -23,7 +23,7 @@ def _report(**kw: object) -> TopologyReport:
 
 def test_render_substitutes_real_values() -> None:
     text = render.render_plan(_report(), BUILTINS["bell"])
-    assert "20:6d:31:51:67:82" in text
+    assert "02:00:00:00:00:03" in text
     assert "http://192.168.2.1" in text
     assert "Advanced DMZ" in text
 

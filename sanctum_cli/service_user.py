@@ -573,7 +573,7 @@ def _install_plists(op_home: Path) -> None:
         _run(["launchctl", "enable", f"system/{label}"], check=False)
         _run(["launchctl", "kickstart", "-k", f"system/{label}"], check=False)
 
-    # disable bert-side agents that would double-run
+    # disable operator-side agents that would double-run
     agents = op_home / "Library" / "LaunchAgents"
     for label in ("haus.sanctum.force-flow", "haus.sanctum.memory-vault"):
         agent = agents / f"{label}.plist"

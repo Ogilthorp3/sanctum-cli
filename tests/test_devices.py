@@ -27,10 +27,10 @@ runner = CliRunner()
 def _real_schema_config() -> dict:
     return {
         "family": {
-            "albert": {
+            "kid1": {
                 "role": "child",
                 "personal_devices": [
-                    {"name": "Albert iPhone", "mac": "7A:87:AC:CD:8E:A2"},
+                    {"name": "Kid One iPhone", "mac": "02:00:AC:CD:8E:01"},
                 ],
             },
         },
@@ -50,7 +50,7 @@ def test_devices_renders_real_schema(
     result = runner.invoke(app, ["devices"])
 
     assert result.exit_code == 0, result.stdout
-    assert "Albert iPhone" in result.stdout  # family personal_devices rendered
+    assert "Kid One iPhone" in result.stdout  # family personal_devices rendered
     assert "Xbox" in result.stdout  # shared_devices dict rendered, not crashed
     assert "💿" not in result.stdout  # MAC octets not emoji-mangled
-    assert "7A:87:AC:CD:8E:A2" in result.stdout
+    assert "02:00:AC:CD:8E:01" in result.stdout

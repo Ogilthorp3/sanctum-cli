@@ -7,10 +7,10 @@ resolve for named hive nodes, killing drift-prone hard-coded 100.x literals.
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, Any
+from collections.abc import Mapping
+from typing import Any
 
-if TYPE_CHECKING:
-    from collections.abc import Mapping
+from sanctum_cli.hive.sot import primary_node_name
 
 
 def overlay_hosts(
@@ -23,15 +23,20 @@ def overlay_hosts(
     """Return a deep-copied council nodes doc with hosts overlaid.
 
     ``mapping`` maps council node id → hive roster name, e.g.
-    ``{"satellite": "chalet", "mobile": "mbp"}``.
-    Default mapping uses same name when both sides share a key, plus
-    satellite→chalet and mobile→mbp conventions.
+    ``{"satellite": "studio", "mobile": "mbp"}``.
+    Default mapping resolves ``hub`` from the primary hub node and the first
+    ``satellite`` / ``mobile`` nodes present in ``hive_nodes``.
     """
-    default_map = {
-        "satellite": "chalet",
-        "mobile": "mbp",
-        "hub": "manoir",
-    }
+    default_map: dict[str, str] = {}
+    primary = primary_node_name(hive_nodes)
+    if primary:
+        default_map["hub"] = primary
+    for name, node in hive_nodes.items():
+        if not isinstance(node, Mapping):
+            continue
+        ntype = str(node.get("type") or "").strip().lower()
+        if ntype in {"satellite", "mobile"} and ntype not in default_map:
+            default_map[ntype] = name
     m = dict(default_map)
     if mapping:
         m.update(mapping)

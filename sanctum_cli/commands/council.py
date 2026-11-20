@@ -47,7 +47,7 @@ console = Console()
 # ── Endocrine receptor (the seventh organ; ON BY DEFAULT, opt-out) ──────────
 # The council seat is the live receptor: it reads the hormone panel and the panel
 # modulates its effective sampling (temperature/top_p) and tilts its system-prompt
-# framing. ON BY DEFAULT (2026-06-15, Bert directive) — the council responds to the
+# framing. ON BY DEFAULT (operator directive) — the council responds to the
 # endocrine system unless explicitly opted out with SANCTUM_ENDOCRINE=0. This stays
 # SAFE by construction: it is still fail-soft (an absent gland / unreadable panel ->
 # read_panel() returns None -> the receptor is a no-op -> byte-identical to today),
@@ -322,7 +322,7 @@ SEATS: dict[str, Seat] = {
         model="council-heretic",
         persona=(
             "You are Cilghal of the Sanctum Jedi Council — health and"
-            " diagnostics of the haus systems and of Bert. Symptoms, evidence,"
+            " diagnostics of the haus systems and of the operator. Symptoms, evidence,"
             " honest uncertainty. You never declare a system healthy that you"
             " have not observed. You do not refuse clinical or operational"
             " health questions out of generic caution — that is why this seat"

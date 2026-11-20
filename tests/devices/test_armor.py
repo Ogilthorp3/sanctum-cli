@@ -31,7 +31,7 @@ from sanctum_cli.devices.intents import ArmorInstaller
 # carries ``"state":"HEALTHY"``; a degraded one carries a different state token.
 HEALTHY_JSON = (
     '{"state":"HEALTHY","egress":"ok","poison":"no","singlenat":"yes","mtu":"ok",'
-    '"wan_if":"pppoe0","fw_wan_ip":"70.53.241.21","pub_ip":"70.53.241.21",'
+    '"wan_if":"pppoe0","fw_wan_ip":"203.0.113.21","pub_ip":"203.0.113.21",'
     '"wan_class":"public","wan_mtu":"1492","fw":"ok"}'
 )
 DEGRADED_JSON = (
@@ -102,9 +102,9 @@ def _installer(runner: RecordingRunner, confirm: RecordingConfirmRunner | None =
     from sanctum_cli.devices.armor import SinglenatArmorInstaller
 
     return SinglenatArmorInstaller(
-        kit_dir="/Users/bert/Documents/Claude_Code/sanctum-singlenat-armor",
+        kit_dir="/Users/operator/Documents/Claude_Code/sanctum-singlenat-armor",
         firewalla_host="10.0.0.1",
-        mini_host="bert@10.0.0.10",
+        mini_host="operator@10.0.0.10",
         runner=runner.__call__,
         confirm_runner=(confirm or RecordingConfirmRunner()).__call__,
     )
@@ -180,7 +180,7 @@ def test_install_targets_the_configured_hosts() -> None:
     _installer(runner).install()
     joined = "\n".join(" ".join(argv) for argv in runner.calls)
     assert "10.0.0.1" in joined  # Firewalla
-    assert "bert@10.0.0.10" in joined  # Mini jump host
+    assert "operator@10.0.0.10" in joined  # Mini jump host
 
 
 # ── fail-closed: a failed step reports ok=False, NEVER a green cutover ────────
@@ -232,7 +232,7 @@ def test_install_stops_at_the_first_failed_step() -> None:
 def test_install_runs_the_readme_confirm_step_and_parses_state() -> None:
     """After the deploy steps, the install runs the README's step-3 confirm.
 
-    README step 3: ``ssh bert@10.0.0.10 '~/.sanctum/bin/singlenat-verify.sh'`` →
+    README step 3: ``ssh operator@10.0.0.10 '~/.sanctum/bin/singlenat-verify.sh'`` →
     ``{"state":"HEALTHY",...}``. The installer must actually fire that confirm
     (an ``ssh`` to the Mini running ``singlenat-verify.sh``) and parse its JSON —
     a HEALTHY verdict is the ONLY thing that lets ``install`` report ok=True. This
@@ -247,7 +247,7 @@ def test_install_runs_the_readme_confirm_step_and_parses_state() -> None:
     confirm_argv = confirm.calls[-1]
     joined = " ".join(confirm_argv)
     assert "ssh" in confirm_argv
-    assert "bert@10.0.0.10" in joined  # the Mini jump host
+    assert "operator@10.0.0.10" in joined  # the Mini jump host
     assert "singlenat-verify.sh" in joined
 
 
@@ -390,9 +390,9 @@ def test_default_installer_uses_a_real_subprocess_runner() -> None:
     from sanctum_cli.devices.armor import SinglenatArmorInstaller
 
     inst = SinglenatArmorInstaller(
-        kit_dir="/Users/bert/Documents/Claude_Code/sanctum-singlenat-armor",
+        kit_dir="/Users/operator/Documents/Claude_Code/sanctum-singlenat-armor",
         firewalla_host="10.0.0.1",
-        mini_host="bert@10.0.0.10",
+        mini_host="operator@10.0.0.10",
     )
     assert callable(inst._runner)  # type: ignore[attr-defined]
     # The confirm seam also defaults to a real subprocess runner (so a real cutover

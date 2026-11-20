@@ -33,29 +33,33 @@ class _RecordingProbe:
 # ── exit-code mapping: 0 == live, everything else == not-live (fail-closed) ───
 
 
-def test_oob_live_true_only_on_exit_zero() -> None:
+def test_oob_live_true_only_on_exit_zero(monkeypatch: pytest.MonkeyPatch) -> None:
     """A root-SSH round-trip returning exit 0 means the channel is genuinely live."""
+    monkeypatch.setenv("SANCTUM_FIREWALLA_TS_ADDR", "100.64.0.16")
     probe = _RecordingProbe(0)
     assert interlock.tailscale_oob_live(probe=probe) is True
     # It probed the Tailscale-on-box node, not a LAN host.
-    assert probe.addrs == [interlock.TS_FIREWALLA_ADDR]
+    assert probe.addrs == ["100.64.0.16"]
 
 
 @pytest.mark.parametrize("code", [255, 124, 1, 127])
-def test_oob_live_false_on_any_nonzero_exit(code: int) -> None:
+def test_oob_live_false_on_any_nonzero_exit(
+    code: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """ssh-fail (255), timeout (124), and any other non-zero exit read as NOT-live.
 
     A non-zero outcome is the ABSENCE of proof the recovery channel is usable —
     fail-closed, never the fail-open that re-creates the 06-26 blindness.
     """
+    monkeypatch.setenv("SANCTUM_FIREWALLA_TS_ADDR", "100.64.0.16")
     assert interlock.tailscale_oob_live(probe=_RecordingProbe(code)) is False
 
 
 def test_oob_live_probes_a_caller_supplied_addr() -> None:
     """The probed address is overridable (the real CLI uses the resolved default)."""
     probe = _RecordingProbe(0)
-    interlock.tailscale_oob_live(addr="100.68.0.9", probe=probe)
-    assert probe.addrs == ["100.68.0.9"]
+    interlock.tailscale_oob_live(addr="100.64.0.9", probe=probe)
+    assert probe.addrs == ["100.64.0.9"]
 
 
 # ── FIX-d1: the tailnet recovery address is config-first, not hardcoded ────────
@@ -69,20 +73,26 @@ def test_firewalla_ts_addr_reads_instance_yaml(
     A haus pins its OWN Tailscale-on-box node — the recovery channel is per-haus, so
     the address must come from config, never a baked-in constant.
     """
+    monkeypatch.delenv("SANCTUM_FIREWALLA_TS_ADDR", raising=False)
     cfg = tmp_path / "instance.yaml"  # type: ignore[operator]
     cfg.write_text(
-        "devices:\n  firewalla:\n    ts_addr: 100.99.1.2\n", encoding="utf-8"
+        "devices:\n  firewalla:\n    ts_addr: 100.64.0.12\n", encoding="utf-8"
     )
     monkeypatch.setenv("SANCTUM_INSTANCE_FILE", str(cfg))
-    assert interlock.firewalla_ts_addr() == "100.99.1.2"
+    assert interlock.firewalla_ts_addr() == "100.64.0.12"
 
 
-def test_firewalla_ts_addr_falls_back_to_shipped_default(
+def test_firewalla_ts_addr_fails_closed_when_unconfigured(
     tmp_path: object, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """No config → the shipped :data:`TS_FIREWALLA_ADDR` default (tool unchanged)."""
+    """No config and no env → None (fail closed, no hardcoded personal IP)."""
+    monkeypatch.delenv("SANCTUM_FIREWALLA_TS_ADDR", raising=False)
     monkeypatch.setenv("SANCTUM_INSTANCE_FILE", str(tmp_path / "absent.yaml"))  # type: ignore[operator]
-    assert interlock.firewalla_ts_addr() == interlock.TS_FIREWALLA_ADDR
+    assert interlock.TS_FIREWALLA_ADDR is None
+    assert interlock.firewalla_ts_addr() is None
+    probe = _RecordingProbe(0)
+    assert interlock.tailscale_oob_live(probe=probe) is False
+    assert probe.addrs == []
 
 
 def test_oob_live_probes_the_config_resolved_addr(
@@ -91,16 +101,17 @@ def test_oob_live_probes_the_config_resolved_addr(
     """With no explicit ``addr``, the probe targets the CONFIG-resolved tailnet node.
 
     Proves the OOB probe threads the config-first address (``devices.firewalla.ts_addr``)
-    through to the real round-trip target, not the module constant.
+    through to the real round-trip target, not a module constant.
     """
+    monkeypatch.delenv("SANCTUM_FIREWALLA_TS_ADDR", raising=False)
     cfg = tmp_path / "instance.yaml"  # type: ignore[operator]
     cfg.write_text(
-        "devices:\n  firewalla:\n    ts_addr: 100.99.7.7\n", encoding="utf-8"
+        "devices:\n  firewalla:\n    ts_addr: 100.64.0.7\n", encoding="utf-8"
     )
     monkeypatch.setenv("SANCTUM_INSTANCE_FILE", str(cfg))
     probe = _RecordingProbe(0)
     assert interlock.tailscale_oob_live(probe=probe) is True
-    assert probe.addrs == ["100.99.7.7"]
+    assert probe.addrs == ["100.64.0.7"]
 
 
 # ── the SSH argv envelope: key-only, root-over-tailnet, hostile-safe ──────────
@@ -115,13 +126,14 @@ def test_ts_ssh_argv_is_key_only_pi_over_tailnet() -> None:
     behavior, not the producer's old ``root@`` assumption (which the prod code + this test
     once shared — CLAUDE.md "don't share assumptions between test and production").
     """
-    argv = interlock._ts_ssh_argv(interlock.TS_FIREWALLA_ADDR, "true")
+    addr = "100.64.0.16"
+    argv = interlock._ts_ssh_argv(addr, "true")
     assert argv[0] == "ssh"
     assert "BatchMode=yes" in argv
     assert "PreferredAuthentications=publickey" in argv
     assert "StrictHostKeyChecking=accept-new" in argv
-    assert f"pi@{interlock.TS_FIREWALLA_ADDR}" in argv
-    assert f"root@{interlock.TS_FIREWALLA_ADDR}" not in argv  # root is denied on the box
+    assert f"pi@{addr}" in argv
+    assert f"root@{addr}" not in argv  # root is denied on the box
     assert argv[-1] == "true"  # the round-trip command
 
 
@@ -133,7 +145,7 @@ def test_ts_ssh_argv_hostile_addr_stays_one_argv_element() -> None:
     token and the injected command never executes (CLAUDE.md: own the boundary,
     test the hostile input).
     """
-    hostile = "100.68.36.16 ; rm -rf / # café %20"
+    hostile = "100.64.0.16 ; rm -rf / # café %20"
     argv = interlock._ts_ssh_argv(hostile, "true")
     assert f"pi@{hostile}" in argv  # the whole hostile value is exactly one element
     assert argv.count(f"pi@{hostile}") == 1

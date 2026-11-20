@@ -1034,9 +1034,9 @@ class PoisonedPublicRunner:
     def __call__(self, tag: tuple[str, ...]) -> str:
         self.calls.append(tag)
         if tag and tag[0] in ("fw_wan_ip", "lease_observe"):
-            return "24.150.33.7"  # a real public IP → classify "public"
+            return "203.0.113.7"  # a real public IP → classify "public"
         if tag == ("wan_addr_cidr",):
-            return "2: eth0    inet 24.150.33.7/1 brd 127.255.255.255 scope global eth0"
+            return "2: eth0    inet 203.0.113.7/1 brd 127.255.255.255 scope global eth0"
         if tag == ("wan_routes",):
             return "default via 10.111.0.1 dev eth0\n0.0.0.0/1 via 10.111.0.1 dev eth0"
         return ""
@@ -1055,9 +1055,9 @@ class ArmoredPublicRunner:
     def __call__(self, tag: tuple[str, ...]) -> str:
         self.calls.append(tag)
         if tag and tag[0] in ("fw_wan_ip", "lease_observe"):
-            return "24.150.33.7"
+            return "203.0.113.7"
         if tag == ("wan_addr_cidr",):
-            return "2: eth0    inet 24.150.33.7/32 brd 24.150.33.7 scope global eth0"
+            return "2: eth0    inet 203.0.113.7/32 brd 203.0.113.7 scope global eth0"
         if tag == ("wan_routes",):
             return "default via 10.111.0.1 dev eth0"
         return ""
@@ -1340,7 +1340,7 @@ def test_ride_dark_window_rides_transport_failures_then_succeeds() -> None:
     def box_op() -> str:
         calls["n"] += 1
         if calls["n"] <= 3:  # the box is unreachable for the first 3 ticks of the window
-            msg = "ssh: connect to host 100.68.36.16 port 22: Operation timed out"
+            msg = "ssh: connect to host 100.64.0.16 port 22: Operation timed out"
             raise RuntimeError(msg)
         return ""  # the box came back from the hub reboot
 
@@ -1361,7 +1361,7 @@ def test_ride_dark_window_box_never_returns_fails_closed_at_bound() -> None:
     from sanctum_cli.devices import intents
 
     def box_op() -> str:
-        msg = "ssh: connect to host 100.68.36.16 port 22: Operation timed out"
+        msg = "ssh: connect to host 100.64.0.16 port 22: Operation timed out"
         raise RuntimeError(msg)
 
     clock = _FakeClock([0.0, 200.0, 400.0, 600.0])  # crosses the 480 s bound on tick 3
@@ -1517,11 +1517,11 @@ class NormalPublicRunner:
     def __call__(self, tag: tuple[str, ...]) -> str:
         self.calls.append(tag)
         if tag and tag[0] in ("fw_wan_ip", "lease_observe"):
-            return "24.150.33.7"
+            return "203.0.113.7"
         if tag == ("wan_addr_cidr",):
-            return "2: eth0    inet 24.150.33.7/24 brd 24.150.33.255 scope global eth0"
+            return "2: eth0    inet 203.0.113.7/24 brd 203.0.113.255 scope global eth0"
         if tag == ("wan_routes",):
-            return "default via 24.150.33.1 dev eth0"
+            return "default via 203.0.113.1 dev eth0"
         return ""
 
 

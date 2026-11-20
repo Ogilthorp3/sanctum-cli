@@ -524,7 +524,7 @@ const WIRE = {
     const draw=()=>{
       $('#members').innerHTML=local.family.map((m,i)=>`<div class="card" data-i="${i}">
         <div class="row">
-          <div class="grow"><label>Name</label><input type="text" class="fname" value="${esc(m.name||'')}" placeholder="e.g. Albert"/></div>
+          <div class="grow"><label>Name</label><input type="text" class="fname" value="${esc(m.name||'')}" placeholder="e.g. Alex"/></div>
           <div style="width:130px"><label>Role</label><select class="frole">
             <option value="child" ${m.role!=='parent'?'selected':''}>child</option>
             <option value="parent" ${m.role==='parent'?'selected':''}>parent</option></select></div>

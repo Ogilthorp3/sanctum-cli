@@ -11,7 +11,7 @@ from sanctum_cli.commands import wizard
 def test_wizard_runs_and_closes_with_the_line() -> None:
     result = CliRunner().invoke(app, ["wizard"])
     assert result.exit_code == 0
-    assert "You're a wizard, Bert." in result.output
+    assert "You're a wizard." in result.output
     assert "sanctum " in result.output  # the one honest status line rode along
 
 

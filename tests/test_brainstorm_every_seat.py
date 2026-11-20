@@ -289,7 +289,7 @@ def test_local_lane_timeout_is_not_retried(
 def test_disconnect_waits_for_health_then_retries_once(
     full_instance_yaml: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # The MBP watchdog kickstarts the tunnel: the in-flight request dies, /health is
+    # The client watchdog kickstarts the tunnel: the in-flight request dies, /health is
     # refused for a while, then comes back. The seat must answer on the retry.
     clock = Clock()
     # the tunnel goes down at the moment of the drop: the next 2 health probes are refused
@@ -623,17 +623,17 @@ def test_concurrency_one_is_fully_serial(
     assert proxy.max_total_inflight == 1
 
 
-# ───────────────────────── Mini load gate ─────────────────────────
+# ───────────────────────── Host load gate ─────────────────────────
 def test_parse_loadavg() -> None:
     assert bs._parse_loadavg("{ 6.44 7.77 11.97 }\n") == 6.44
     assert bs._parse_loadavg("") is None
 
 
-def test_wait_for_load_blocks_until_the_mini_is_calm() -> None:
+def test_wait_for_load_blocks_until_the_host_is_calm() -> None:
     clock = Clock()
     loads = iter([35.0, None, 25.0, 12.0])
     with patch.object(bs, "time", clock), patch.object(bs, "_sleep", clock.sleep):
-        got = bs._wait_for_load("manoir", 20.0, 3600.0, probe=lambda _h: next(loads))
+        got = bs._wait_for_load("council-host", 20.0, 3600.0, probe=lambda _h: next(loads))
     assert got == 12.0
     assert clock.t == 1000.0 + 3 * bs.LOAD_POLL_S
 
@@ -642,7 +642,7 @@ def test_wait_for_load_gives_up_after_wait_max() -> None:
     clock = Clock()
     with patch.object(bs, "time", clock), patch.object(bs, "_sleep", clock.sleep), \
             pytest.raises(ProviderError, match="load gate never opened"):
-        bs._wait_for_load("manoir", 20.0, 300.0, probe=lambda _h: 50.0)
+        bs._wait_for_load("council-host", 20.0, 300.0, probe=lambda _h: 50.0)
 
 
 def test_wait_load_needs_a_host(full_instance_yaml: Path, monkeypatch: pytest.MonkeyPatch) -> None:

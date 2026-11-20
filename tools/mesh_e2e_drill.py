@@ -56,7 +56,7 @@ from sanctum_cli.mesh.verify import EvalGate, Sandbox, SandboxResult, adopt
 _HOST = "127.0.0.1"
 _PORT = 8791  # off the default 8765 so a running tracker doesn't collide
 _PORT2 = 8792  # a second tracker (community-configured) for the community leg
-_ADDR = "100.99.99.99"  # ip-allow: synthetic CGNAT tailnet example for single-box drill
+_ADDR = "100.64.0.99"  # ip-allow: synthetic CGNAT tailnet example for single-box drill
 _BASELINE = 0.881
 _COMMUNITY_INVITE = "https://signal.group/#sanctum-mesh-drill"
 

@@ -289,7 +289,7 @@ def npm_latest(run: Runner, package: str) -> str:
 def venv_pip(venv: str) -> list[str]:
     """Invoke pip as ``<venv>/bin/python -m pip`` — the pip console script's
     shebang bakes in the venv's creation path, so a renamed/relocated venv
-    has a working python but a broken pip binary (found live on the chalet)."""
+    has a working python but a broken pip binary (found live on a satellite node)."""
     return [str(Path(venv).expanduser() / "bin" / "python"), "-m", "pip"]
 
 

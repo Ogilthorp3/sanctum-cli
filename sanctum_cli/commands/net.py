@@ -1200,7 +1200,7 @@ def _firewalla_recovery_host() -> str | None:
     resolves that box via :func:`_firewalla_host` (``devices.firewalla.host`` override
     → detected default gateway). The gate MUST probe the SAME host so "the recovery
     re-lease can reach its box" is what it actually verifies — so it shares
-    :func:`_firewalla_host`. When Bert pins the tailnet box, the gate probes the
+    :func:`_firewalla_host`. When the operator pins the tailnet box, the gate probes the
     tailnet box; on a default install it probes the LAN gateway. Returns ``None`` when
     neither resolves (no recovery host → no recovery path).
     """
@@ -1213,7 +1213,7 @@ def _out_of_band_host() -> str:
     The recovery-path gate (:func:`_out_of_band_reachable`) checks the Mini is
     reachable before authorizing the cutover. Reads ``devices.mini.host`` from
     instance.yaml at CALL TIME and STRIPS any ``user@`` prefix (the gate does a bare
-    TCP connect, not an SSH login — ``bert@<tailnet-ip>`` → ``<tailnet-ip>``),
+    TCP connect, not an SSH login — ``user@<tailnet-ip>`` → ``<tailnet-ip>``),
     falling back to the shipped LAN default ``_OUT_OF_BAND_HOST`` so the
     general-purpose tool is unchanged. It shares the SAME ``devices.mini.host`` key
     the armor Mini deploy uses (:func:`intents._armor_mini_host`), so the gate and the

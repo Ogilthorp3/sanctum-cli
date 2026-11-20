@@ -156,8 +156,8 @@ def test_no_gateway_line_is_excluded_not_false_radio() -> None:
 
 # The reference incident's two MACs: the live randomized address the AP saw
 # (rotation churn) and the burned-in hardware MAC that fixed the link.
-RANDOMIZED_MAC = "de:48:45:83:ae:0a"
-HARDWARE_MAC = "84:2f:57:02:be:ee"
+RANDOMIZED_MAC = "02:00:00:00:00:02"
+HARDWARE_MAC = "00:00:5e:00:53:01"
 
 
 def test_analyze_mac_randomized_when_current_differs_from_hardware() -> None:
@@ -181,9 +181,9 @@ def test_analyze_mac_equality_is_case_insensitive() -> None:
 
 
 def test_is_locally_administered_bit() -> None:
-    # 0xde = 1101 1110 → LAA bit (bit 1) set → randomized/private.
+    # 0x02 = 0000 0010 → LAA bit (bit 1) set → randomized/private.
     assert is_locally_administered(RANDOMIZED_MAC) is True
-    # 0x84 = 1000 0100 → LAA bit clear → universally-administered hardware MAC.
+    # 0x00 = 0000 0000 → LAA bit clear → universally-administered hardware MAC.
     assert is_locally_administered(HARDWARE_MAC) is False
     # Malformed first octet cannot be proven locally-administered.
     assert is_locally_administered("") is False
@@ -229,7 +229,7 @@ def test_probe_wifi_with_fake_runner() -> None:
     outputs: dict[tuple[str, ...], str] = {
         ("networksetup", "-listallhardwareports"): (
             "Hardware Port: Ethernet\nDevice: en4\nEthernet Address: 00:11:22:33:44:55\n\n"
-            "Hardware Port: Wi-Fi\nDevice: en0\nEthernet Address: 84:2f:57:02:be:ee\n"
+            "Hardware Port: Wi-Fi\nDevice: en0\nEthernet Address: 00:00:5e:00:53:01\n"
         ),
         ("ifconfig", "en0"): f"\tether {RANDOMIZED_MAC}\n",
         ("networksetup", "-getmacaddress", "en0"): (
@@ -278,13 +278,13 @@ def test_render_profile_carries_encryption_type() -> None:
 
 # ─── Link Identity Guard — Task 1: IdentityProbe + probe_identity ─────────────
 # The LITERAL ipconfig getsummary shape captured on the Mini during the incident.
-_MINI_GETSUMMARY = """  SSID : Nepveu-6G
+_MINI_GETSUMMARY = """  SSID : Sanctum-6G
   Security : WPA2_PSK
   LinkStatusActive : TRUE
   RouterARPVerified : FALSE
   RouterARPTimedOut : TRUE
 """
-_HEALTHY_GETSUMMARY = """  SSID : Nepveu-6G
+_HEALTHY_GETSUMMARY = """  SSID : Sanctum-6G
   Security : WPA3_SAE
   LinkStatusActive : TRUE
   RouterARPVerified : TRUE
@@ -303,18 +303,18 @@ def _fake_runner(mapping):
 
 def test_probe_identity_reads_quarantine_signature():
     run = _fake_runner({
-        "listallhardwareports": "Hardware Port: Wi-Fi\nDevice: en1\nEthernet Address: d0:11:e5:1c:88:59",
-        "ifconfig en1": "\tether 32:a6:f4:de:54:cf",
-        "getmacaddress en1": "Ethernet Address: d0:11:e5:1c:88:59",
+        "listallhardwareports": "Hardware Port: Wi-Fi\nDevice: en1\nEthernet Address: 00:00:5e:00:53:01",
+        "ifconfig en1": "\tether 02:00:00:00:00:02",
+        "getmacaddress en1": "Ethernet Address: 00:00:5e:00:53:01",
         "getsummary en1": _MINI_GETSUMMARY,
         "route -n get default": "gateway: 10.0.0.1\ninterface: en1",
         "ping": "0 packets received, 100.0% packet loss",
     })
     p = probe_identity(run=run)
     assert p.iface == "en1"
-    assert p.current_mac == "32:a6:f4:de:54:cf"
-    assert p.hardware_mac == "d0:11:e5:1c:88:59"
-    assert p.ssid == "Nepveu-6G"
+    assert p.current_mac == "02:00:00:00:00:02"
+    assert p.hardware_mac == "00:00:5e:00:53:01"
+    assert p.ssid == "Sanctum-6G"
     assert p.security == "WPA2_PSK"
     assert p.associated is True
     assert p.router_arp_verified is False
@@ -339,21 +339,21 @@ def test_enc_from_security_maps_wpa3_and_defaults_wpa2():
 
 
 def _probe(**kw):
-    base = dict(iface="en1", ssid="Nepveu-6G", current_mac="d0:11:e5:1c:88:59",
-                hardware_mac="d0:11:e5:1c:88:59", security="WPA2_PSK",
+    base = dict(iface="en1", ssid="Sanctum-6G", current_mac="00:00:5e:00:53:01",
+                hardware_mac="00:00:5e:00:53:01", security="WPA2_PSK",
                 associated=True, router_arp_verified=True, gateway_reachable=True)
     base.update(kw)
     return IdentityProbe(**base)
 
 
 def test_diagnose_quarantined_is_the_mini_signature():
-    d = diagnose_identity(_probe(current_mac="32:a6:f4:de:54:cf",
+    d = diagnose_identity(_probe(current_mac="02:00:00:00:00:02",
                                  router_arp_verified=False, gateway_reachable=False))
     assert d.verdict == "IDENTITY_QUARANTINED"
 
 
 def test_diagnose_rotating_when_random_mac_but_reachable():
-    d = diagnose_identity(_probe(current_mac="32:a6:f4:de:54:cf"))
+    d = diagnose_identity(_probe(current_mac="02:00:00:00:00:02"))
     assert d.verdict == "IDENTITY_ROTATING"
 
 
@@ -398,38 +398,38 @@ def test_classify_unknown_is_conservative():
 
 
 def test_fw_check_none_when_no_transport():
-    assert firewalla_quarantine_check("32:a6:f4:de:54:cf") is None
+    assert firewalla_quarantine_check("02:00:00:00:00:02") is None
 
 
 def test_fw_check_none_when_empty_response():
-    assert firewalla_quarantine_check("32:a6", transport=lambda mac: "") is None
+    assert firewalla_quarantine_check("02:00", transport=lambda mac: "") is None
 
 
 def test_fw_check_reports_quarantine_tag():
-    f = firewalla_quarantine_check("32:a6", transport=lambda mac: '["18"]')
+    f = firewalla_quarantine_check("02:00", transport=lambda mac: '["18"]')
     assert f is not None and f.quarantined is True and f.tag == "18"
 
 
 def test_fw_check_reports_untagged():
-    f = firewalla_quarantine_check("d0:11", transport=lambda mac: "[]")
+    f = firewalla_quarantine_check("02:01", transport=lambda mac: "[]")
     assert f is not None and f.quarantined is False
 
 
 def test_parse_identity_reads_id_token():
-    line = "2026-07-01T10:00:00 ssid=X rtt=2/3/4/1 loss=0.0% load=[1] id=cur=32:a6:f4:de:54:cf,hw=d0:11:e5:1c:88:59,arp=FALSE DEGRADED"
+    line = "2026-07-01T10:00:00 ssid=X rtt=2/3/4/1 loss=0.0% load=[1] id=cur=02:00:00:00:00:02,hw=00:00:5e:00:53:01,arp=FALSE DEGRADED"
     ids = parse_identity(line)
     assert ids is not None
-    assert ids["cur"] == "32:a6:f4:de:54:cf" and ids["hw"] == "d0:11:e5:1c:88:59" and ids["arp"] == "FALSE"
+    assert ids["cur"] == "02:00:00:00:00:02" and ids["hw"] == "00:00:5e:00:53:01" and ids["arp"] == "FALSE"
 
 
 def test_identity_drift_true_on_random_mac_and_arp_false():
     assert identity_is_drift(parse_identity(
-        "x rtt=NA loss=100.0% load=[1] id=cur=32:a6:f4:de:54:cf,hw=d0:11:e5:1c:88:59,arp=FALSE DEGRADED")) is True
+        "x rtt=NA loss=100.0% load=[1] id=cur=02:00:00:00:00:02,hw=00:00:5e:00:53:01,arp=FALSE DEGRADED")) is True
 
 
 def test_identity_drift_false_on_hardware_mac():
     assert identity_is_drift(parse_identity(
-        "x rtt=2/3/4/1 loss=0.0% load=[1] id=cur=d0:11:e5:1c:88:59,hw=d0:11:e5:1c:88:59,arp=TRUE ok")) is False
+        "x rtt=2/3/4/1 loss=0.0% load=[1] id=cur=00:00:5e:00:53:01,hw=00:00:5e:00:53:01,arp=TRUE ok")) is False
 
 
 def test_existing_parse_log_still_reads_degraded_with_id_token():
@@ -470,7 +470,7 @@ def _run_sentinel_emit(*, curmac: str, hwmac: str, arp: str, rtt: str, loss: str
     bash = shutil.which("bash") or "/bin/bash"
     script = (
         f'CURMAC={curmac!r}; HWMAC={hwmac!r}; ARP={arp!r}\n'
-        f'RTT={rtt!r}; LOSS={loss!r}; LOAD="1.5 1.4 1.3"; SSID="Nepveu-6G"; FLAG={flag!r}\n'
+        f'RTT={rtt!r}; LOSS={loss!r}; LOAD="1.5 1.4 1.3"; SSID="Sanctum-6G"; FLAG={flag!r}\n'
         f"{producer}\n"
     )
     out = subprocess.run(
@@ -483,8 +483,8 @@ def test_sentinel_producer_stamps_drift_and_detector_reads_it():
     # Rotating MAC (cur != hw) + arp=FALSE → the producer stamps ,drift=1, and the
     # pure detectors read it back as drift.
     line = _run_sentinel_emit(
-        curmac="32:a6:f4:de:54:cf",
-        hwmac="d0:11:e5:1c:88:59",
+        curmac="02:00:00:00:00:02",
+        hwmac="00:00:5e:00:53:01",
         arp="FALSE",
         rtt="NA",
         loss="100.0",
@@ -500,8 +500,8 @@ def test_sentinel_producer_no_drift_on_hardware_mac_and_line_parses_healthy():
     # Stable hardware MAC + arp=TRUE → NO drift marker; and the emitted line still
     # parses via parse_log with degraded/rtt/loss/load intact (trailing flag last).
     line = _run_sentinel_emit(
-        curmac="d0:11:e5:1c:88:59",
-        hwmac="d0:11:e5:1c:88:59",
+        curmac="00:00:5e:00:53:01",
+        hwmac="00:00:5e:00:53:01",
         arp="TRUE",
         rtt="2.0/3.0/4.0/1.0",
         loss="0.0",
@@ -522,8 +522,8 @@ def test_sentinel_producer_degraded_line_with_drift_still_ends_in_degraded():
     # A drifting AND radio-degraded window: the id= token carries ,drift=1 but the
     # trailing FLAG stays last, so parse_log's endswith("DEGRADED") still fires.
     line = _run_sentinel_emit(
-        curmac="32:a6:f4:de:54:cf",
-        hwmac="d0:11:e5:1c:88:59",
+        curmac="02:00:00:00:00:02",
+        hwmac="00:00:5e:00:53:01",
         arp="FALSE",
         rtt="4.0/30.0/120.0/40.0",
         loss="0.0",

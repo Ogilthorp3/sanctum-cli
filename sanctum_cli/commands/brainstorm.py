@@ -74,7 +74,7 @@ every Yoda attempt and most Cilghal attempts died to the CLIENT's own clock):
     budget it lost, and never re-asks a seat proxyd /health reports unhealthy
     (it would only be substituted again).
   - A transport drop is retried ONCE, and only when ``/health`` shows the tunnel
-    actually went down and came back (the MBP tunnel watchdog restarting the ssh
+    actually went down and came back (a client tunnel watchdog restarting the ssh
     tunnel). A drop while ``/health`` answers at once is proxyd closing the
     response itself — a server-side abort, not re-sent.
   - The heretic seat is STREAMED by default: proxyd's council-heretic entry has no
@@ -250,7 +250,7 @@ SEATS: dict[str, dict[str, str]] = {
         "model": os.environ.get("CILGHAL_MODEL", "council-heretic"),
         "lens": (
             "You are Cilghal, architect and healer. Focus on system invariants, correctness, and "
-            "long-term health — of the haus and of Bert. What breaks the contracts or the design "
+            "long-term health — of the haus and of its operator. What breaks the contracts or the design "
             "over time? Symptoms, evidence, honest uncertainty."
         ),
     },
@@ -362,7 +362,7 @@ STREAM_MODELS = frozenset(
 
 # Per-lane seat budget (seconds): sized to what PROXYD will itself spend on the
 # seat before giving up, plus a margin, so the client is never the first to quit
-# on a request that is still being worked (Mini proxyd config.yaml, read 2026-09-19):
+# on a request that is still being worked (host proxyd config.yaml, read 2026-09-19):
 #   bridge     620  council-max-thinking / council-brain ttfb 600, read 900. The
 #                   bridge's own 300 s kill (manager.js DEFAULT_TIMEOUT) starts only
 #                   AFTER a subprocess slot frees (FIFO, CLAUDE_MAX_SUBPROCESS_
@@ -428,7 +428,7 @@ WRITE_TIMEOUT_S = 30.0
 POOL_TIMEOUT_S = 10.0
 HEALTH_PROBE_TIMEOUT_S = 10.0
 HEALTH_POLL_S = 5.0
-# How long to wait for /health after a transport drop. The MBP tunnel watchdog
+# How long to wait for /health after a transport drop. The client tunnel watchdog
 # brings the ssh tunnel back in ~60-80 s (proxy-tunnel-watchdog.log).
 DROP_HEALTH_WAIT_S = float(os.environ.get("COUNCIL_DROP_HEALTH_WAIT_S", "120"))
 MIN_RETRY_S = 30.0          # never start a retry / fallback with less budget than this
@@ -547,15 +547,24 @@ class RunOptions:
 
 
 # ─── low-level helpers (unit-testable, patchable) ───
-def _ssl_verify(cacert: Path) -> ssl.SSLContext | bool:
+def _ssl_verify(cacert: Path) -> ssl.SSLContext:
     """Verify proxyd's chain against the Sanctum CA, skipping hostname binding
-    (cert CN=sanctum-mlx != access host). Falls back to no verification only when
-    the CA file is absent."""
-    if cacert.exists():
+    (cert CN=sanctum-mlx != access host). Fails closed when the CA file is absent
+    or invalid."""
+    if not cacert.is_file():
+        raise LocalError(
+            f"CA certificate not found: {cacert}",
+            fix="point --cacert or SANCTUM_COUNCIL_CACERT at a valid CA PEM file (e.g. ~/.sanctum/certs/ca.crt)",
+        )
+    try:
         ctx = ssl.create_default_context(cafile=str(cacert))
-        ctx.check_hostname = False
-        return ctx
-    return False
+    except (OSError, ssl.SSLError) as exc:
+        raise LocalError(
+            f"invalid or unreadable CA certificate {cacert}: {exc}",
+            fix="check file permissions and PEM contents of --cacert",
+        ) from exc
+    ctx.check_hostname = False
+    return ctx
 
 
 def _reasoning_tokens(data: dict[str, Any]) -> int:
@@ -1072,7 +1081,7 @@ def _ask(
                         "(the tunnel was up): a server-side abort, not a tunnel drop; not re-sent"))
             kind = Outcome.UNREACHABLE if never_connected else Outcome.DROPPED
             return _Attempt(kind, error=(
-                f"{msg} — connection to proxyd severed, not a seat verdict (the MBP "
+                f"{msg} — connection to proxyd severed, not a seat verdict (the client "
                 f"proxy-tunnel-watchdog restarting the ssh tunnel does this); "
                 f"{drops} retry(ies) after /health"))
 
@@ -1386,11 +1395,11 @@ def _failure_fix(results: list[SeatResult]) -> str:
     hints = []
     if Outcome.TIMEOUT in outcomes:
         hints.append("a seat outlived the CLIENT's budget — raise it (--seat-timeout N, --timeout 0, "
-                     "SANCTUM_COUNCIL_TIMEOUT_<LANE>), wait for a calmer Mini (--wait-load), "
+                     "SANCTUM_COUNCIL_TIMEOUT_<LANE>), wait for a calmer host (--wait-load), "
                      "or re-ask just the absent seats (--repoll N)")
     if outcomes & {Outcome.DROPPED, Outcome.UNREACHABLE}:
-        hints.append("the connection to proxyd dropped (MBP proxy-tunnel-watchdog restart?) — "
-                     "check `curl -k https://127.0.0.1:4040/health`, then --repoll N")
+        hints.append("the connection to proxyd dropped (proxy-tunnel-watchdog restart?) — "
+                     "check `curl --cacert ~/.sanctum/certs/ca.crt https://127.0.0.1:4040/health`, then --repoll N")
     if Outcome.TRUNCATED in outcomes:
         hints.append("answers were cut at the token cap — raise --max-tokens")
     if outcomes & {Outcome.DIVERTED, Outcome.FALLBACK}:
@@ -1539,7 +1548,7 @@ def _summon(
         ) from exc
 
 
-# ─── Mini load gate (optional) ───
+# ─── Host load gate (optional) ───
 def _parse_loadavg(text: str) -> float | None:
     toks = text.replace("{", " ").replace("}", " ").split()
     try:
@@ -1653,11 +1662,11 @@ def brainstorm_command(
     ] = 30,
     wait_load: Annotated[
         float | None, typer.Option("--wait-load", min=0.0,
-                                   help="Dispatch (and re-poll) only when the Mini's load1 < this.")
+                                   help="Dispatch (and re-poll) only when the host's load1 < this.")
     ] = None,
     load_host: Annotated[
         str | None, typer.Option("--load-host", envvar="SANCTUM_COUNCIL_LOAD_HOST",
-                                 help="ssh host (a NAME, e.g. manoir's MagicDNS) whose load1 --wait-load reads.")
+                                 help="ssh host (a NAME, e.g. the hub's MagicDNS name) whose load1 --wait-load reads.")
     ] = None,
     wait_max: Annotated[
         int, typer.Option("--wait-max", min=0, help="Give up on --wait-load after N seconds.")
@@ -1676,15 +1685,9 @@ def brainstorm_command(
     chosen = _select_seats(seats)
     if wait_load is not None and not load_host:
         raise UserError("--wait-load needs --load-host (or SANCTUM_COUNCIL_LOAD_HOST)",
-                        fix="pass the Mini by NAME, e.g. --load-host bert@manoir.<tailnet>.ts.net")
+                        fix="pass the host by NAME, e.g. --load-host user@hub.<tailnet>.ts.net")
 
-    verify = _ssl_verify(cacert)
-    is_loopback = url.startswith(("https://127.0.0.1", "https://localhost", "http://127.0.0.1", "http://localhost"))
-    if verify is False and not is_loopback:
-        err_console.print(
-            f"[yellow]warning:[/] CA {cacert} not found — TLS verification disabled for {url}. "
-            "Point --cacert at the Sanctum CA to verify the chain."
-        )
+    verify: ssl.SSLContext | bool = True if url.lower().startswith("http://") else _ssl_verify(cacert)
 
     run = RunOptions(stream=stream, concurrency=concurrency,
                      seat_timeout=float(seat_timeout) if seat_timeout else None,

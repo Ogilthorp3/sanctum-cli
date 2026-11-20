@@ -22,8 +22,8 @@ if TYPE_CHECKING:
 runner = CliRunner()
 
 # The reference incident's two MACs (randomized live address vs hardware MAC).
-RANDOMIZED_MAC = "de:48:45:83:ae:0a"
-HARDWARE_MAC = "84:2f:57:02:be:ee"
+RANDOMIZED_MAC = "02:00:00:00:00:02"
+HARDWARE_MAC = "00:00:5e:00:53:01"
 
 
 def _randomized_probe() -> link.WifiProbe:
@@ -64,9 +64,9 @@ def _quarantined_probe() -> link.IdentityProbe:
     """
     return link.IdentityProbe(
         iface="en1",
-        ssid="Nepveu-6G",
-        current_mac="32:a6:f4:de:54:cf",
-        hardware_mac="d0:11:e5:1c:88:59",
+        ssid="Sanctum-6G",
+        current_mac="02:00:00:00:00:02",
+        hardware_mac="00:00:5e:00:53:01",
         security="WPA2_PSK",
         associated=True,
         router_arp_verified=False,
@@ -304,9 +304,9 @@ def test_status_shows_identity_verdict(tmp_path: Path) -> None:
     log.write_text("2026-07-01T10:00:00 ssid=X rtt=2/3/4/1 loss=0.0% load=[1] ok\n")
     quarantined = linkmod.IdentityProbe(
         iface="en1",
-        ssid="Nepveu-6G",
-        current_mac="32:a6:f4:de:54:cf",
-        hardware_mac="d0:11:e5:1c:88:59",
+        ssid="Sanctum-6G",
+        current_mac="02:00:00:00:00:02",
+        hardware_mac="00:00:5e:00:53:01",
         security="WPA2_PSK",
         associated=True,
         router_arp_verified=False,
@@ -325,9 +325,9 @@ def test_status_shows_identity_verdict(tmp_path: Path) -> None:
 def _mk_probe(**kw: object) -> link.IdentityProbe:
     base: dict[str, object] = dict(
         iface="en1",
-        ssid="Nepveu-6G",
-        current_mac="32:a6:f4:de:54:cf",
-        hardware_mac="d0:11:e5:1c:88:59",
+        ssid="Sanctum-6G",
+        current_mac="02:00:00:00:00:02",
+        hardware_mac="00:00:5e:00:53:01",
         security="WPA2_PSK",
         associated=True,
         router_arp_verified=False,
@@ -344,7 +344,7 @@ def test_optimize_apply_enrolls_server(tmp_path: Path) -> None:
         linkmod,
         "probe_wifi",
         return_value=linkmod.WifiProbe(
-            "en1", "32:a6:f4:de:54:cf", "d0:11:e5:1c:88:59", "Nepveu-6G"
+            "en1", "02:00:00:00:00:02", "00:00:5e:00:53:01", "Sanctum-6G"
         ),
     ), patch(
         "sanctum_cli.commands.link._node_signals",
@@ -375,7 +375,7 @@ def test_optimize_verify_honest_pass_and_fail() -> None:
         linkmod,
         "probe_identity",
         return_value=_mk_probe(
-            current_mac="d0:11:e5:1c:88:59",
+            current_mac="00:00:5e:00:53:01",
             router_arp_verified=True,
             gateway_reachable=True,
         ),

@@ -9,7 +9,7 @@ Keychain at connect time — credentials never flow through the CLI layer).
 
 These tests drive ``config.instance_value`` through a monkeypatch so no real
 instance.yaml / Keychain is touched, and the per-kind defaults are asserted
-explicitly (Bert is dyslexic — the old→new tuple is stated, never eyeballed).
+explicitly (the old→new tuple is stated, never eyeballed).
 """
 
 from __future__ import annotations

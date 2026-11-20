@@ -1,7 +1,7 @@
 # Watchdog catalog entry for the endocrine gland (the seventh organ).
 #
 # STAGED — append to ~/.sanctum/services/ as endocrine-gland.yaml (or merge into
-# the catalog) when Bert turns the organ on. Liveness/startup use the `command`
+# the catalog) when the operator turns the organ on (@OPERATOR_HOME@ expanded at install). Liveness/startup use the `command`
 # check type — the only freshness-capable primitive service-graph.py supports
 # (its enum is command|http|port|process|interface; there is NO file-fresh
 # primitive). The Living Force (sanctum-watchdog) then monitors the gland; the
@@ -28,13 +28,13 @@ health:
   startup:
     type: command
     command: >-
-      /usr/bin/python3 /Users/bert/.sanctum/sentinels/endocrine-gland-sentinel.py --check
+      /usr/bin/python3 @OPERATOR_HOME@/.sanctum/sentinels/endocrine-gland-sentinel.py --check
       | grep -qv '"state": "GLAND_DOWN"'
     timeout: 15
   liveness:
     type: command
     command: >-
-      /usr/bin/python3 /Users/bert/.sanctum/sentinels/endocrine-gland-sentinel.py --check
+      /usr/bin/python3 @OPERATOR_HOME@/.sanctum/sentinels/endocrine-gland-sentinel.py --check
       | grep -qv '"state": "GLAND_DOWN"'
     timeout: 15
 remediation:
@@ -42,10 +42,10 @@ remediation:
   escalation_level: 1
   max_restarts: 3
   cooldown: 120
-  restart_cmd: /Users/bert/Documents/Claude_Code/tools/heal_launchagent.sh com.sanctum.endocrine-gland /Users/bert/Library/LaunchAgents/com.sanctum.endocrine-gland.plist
+  restart_cmd: @OPERATOR_HOME@/.sanctum/tools/heal_launchagent.sh com.sanctum.endocrine-gland @OPERATOR_HOME@/Library/LaunchAgents/com.sanctum.endocrine-gland.plist
   actions:
   - name: heal-launchagent
-    cmd: /Users/bert/Documents/Claude_Code/tools/heal_launchagent.sh com.sanctum.endocrine-gland /Users/bert/Library/LaunchAgents/com.sanctum.endocrine-gland.plist
+    cmd: @OPERATOR_HOME@/.sanctum/tools/heal_launchagent.sh com.sanctum.endocrine-gland @OPERATOR_HOME@/Library/LaunchAgents/com.sanctum.endocrine-gland.plist
 metadata:
   generated_from: deploy/endocrine (sanctum-cli feat/endocrine-system)
   organ: endocrine

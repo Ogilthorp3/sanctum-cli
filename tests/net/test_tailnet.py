@@ -109,8 +109,8 @@ def test_report_all_none_is_green_and_all_unknown() -> None:
 
 def test_report_down_row_makes_it_degraded() -> None:
     report = build_tailnet_report(
-        spine=SpineState(on_tailnet=True, suffix="tail1a2b.ts.net"),
-        peer=PeerReach(peer="berts-mbp", ping_ok=True, tcp22_open=False),  # ACL gap → DOWN
+        spine=SpineState(on_tailnet=True, suffix="tailnet-abc.ts.net"),
+        peer=PeerReach(peer="alice-mbp", ping_ok=True, tcp22_open=False),  # ACL gap → DOWN
         cred=CredState(http_code=200, source="keychain oauth"),
         drift=AclDrift(in_sync=True, summary="matches"),
         trifecta=TrifectaState(keychain=True, onepassword=None, providers_row=True),
@@ -121,7 +121,7 @@ def test_report_down_row_makes_it_degraded() -> None:
 def test_report_attention_only_is_attention() -> None:
     report = build_tailnet_report(
         spine=SpineState(on_tailnet=True, suffix=""),
-        peer=PeerReach(peer="berts-mbp", ping_ok=True, tcp22_open=True),  # OK
+        peer=PeerReach(peer="alice-mbp", ping_ok=True, tcp22_open=True),  # OK
         cred=CredState(http_code=200, source="keychain oauth"),
         drift=AclDrift(in_sync=False, summary="drifted"),  # ATTENTION
         trifecta=TrifectaState(keychain=True, onepassword=None, providers_row=True),

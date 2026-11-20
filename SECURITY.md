@@ -61,5 +61,5 @@ before reporting.
 
 | Version | Supported |
 |---|---|
-| 0.10.x | ✅ |
-| < 0.10 | ❌ (upgrade) |
+| 0.15.x | ✅ |
+| < 0.15 | ❌ (upgrade) |

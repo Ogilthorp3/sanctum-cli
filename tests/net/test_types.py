@@ -28,12 +28,12 @@ def test_enums_have_expected_values() -> None:
 def test_topology_report_is_frozen() -> None:
     r = TopologyReport(
         firewalla_present=True,
-        firewalla_wan_mac="20:6d:31:51:67:82",
+        firewalla_wan_mac="02:00:00:00:00:03",
         firewalla_wan_mtu=1500,
         nat=Nat.DOUBLE,
         gateway_ip="192.168.2.1",
         isp="bell",
-        public_ip="70.0.0.1",
+        public_ip="93.184.216.1",
         applicable=True,
         reason="double-NAT behind Bell gateway",
     )

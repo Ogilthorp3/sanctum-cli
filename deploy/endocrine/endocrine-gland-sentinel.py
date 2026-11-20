@@ -43,9 +43,9 @@ Modes:
   --self-test  run the detector against synthetic fixtures + report whether the
                matching launchd label is LOADED, never touch state
 
-Run by com.sanctum.endocrine-gland-sentinel.plist every 300s. LOADED on manoir
-as of 2026-06-15 (the endocrine organ is live); on a host where it is not yet
-bootstrapped, `--self-test` says so plainly.
+Run by com.sanctum.endocrine-gland-sentinel.plist every 300s (when loaded on
+the primary host); on a host where it is not yet bootstrapped, `--self-test`
+says so plainly.
 
 This file is the deploy copy; the canonical source is in the sanctum-cli repo
 under deploy/endocrine/. It depends ONLY on the stdlib + alert-confirm.sh, so it
@@ -59,7 +59,7 @@ import subprocess
 import sys
 import time
 
-HOME = os.environ.get("HOME", "/Users/bert")
+HOME = os.path.expanduser("~")
 PANEL_FILE = os.environ.get(
     "ENDOCRINE_PANEL_FILE", os.path.join(HOME, ".sanctum/state/endocrine/panel.json")
 )

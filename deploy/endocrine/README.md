@@ -2,7 +2,7 @@
 
 These are the **daemon-side** artifacts for the endocrine system.
 
-**Status: LIVE on manoir as of 2026-06-15.** The gland LaunchAgent ticks every
+**Status: LIVE on the primary host as of 2026-06-15.** The gland LaunchAgent ticks every
 120 s and publishes a live panel; the CLI council reads the endocrine system
 **ON BY DEFAULT** (opt out per-shell with `SANCTUM_ENDOCRINE=0`, or durably with
 `sanctum endocrine off`). A **fresh install with no gland running is still a
@@ -13,7 +13,7 @@ LaunchAgents `com.sanctum.endocrine-gland` + `com.sanctum.endocrine-gland-sentin
 
 Source-of-truth is the `sanctum_cli.endocrine` package (ships with the CLI and
 rides its test harness). These deploy copies live at `~/.sanctum` per the
-secret-rotator pattern (the OneDrive-synced repo tree is not launchd-readable).
+secret-rotator pattern (a cloud-synced repo tree is not launchd-readable).
 
 ## What's here
 
@@ -27,7 +27,7 @@ secret-rotator pattern (the OneDrive-synced repo tree is not launchd-readable).
 | `haus.sanctum.endocrine-gland-sentinel.plist` | `~/Library/LaunchAgents/` | Runs the sentinel every 300 s. |
 | `watchdog-catalog-entry.yaml` | `~/.sanctum/services/endocrine-gland.yaml` | Living-Force monitoring entry. Liveness/startup use the `command` check type (the only freshness-capable primitive service-graph.py supports — enum is command\|http\|port\|process\|interface; there is no `file-fresh`), exiting 0 iff the gland sentinel reports a fresh, non-DOWN panel. |
 
-## Turn-on (Bert runs these — the build does NOT)
+## Turn-on (Operator runs these — the build does NOT)
 
 ```bash
 SRC=~/Projects/sanctum-cli/deploy/endocrine
@@ -37,10 +37,10 @@ cp "$SRC/endocrine-tick.sh"                          ~/.sanctum/scripts/
 cp "$SRC/endocrine-tick-reaper.sh"                   ~/.sanctum/scripts/
 chmod +x ~/.sanctum/scripts/endocrine-tick.sh ~/.sanctum/scripts/endocrine-tick-reaper.sh
 cp "$SRC/endocrine-gland-sentinel.py"                 ~/.sanctum/sentinels/
-cp "$SRC/watchdog-catalog-entry.yaml"                 ~/.sanctum/services/endocrine-gland.yaml
-cp "$SRC/haus.sanctum.endocrine-gland.plist"           ~/Library/LaunchAgents/
-cp "$SRC/haus.sanctum.endocrine-gland-sentinel.plist"  ~/Library/LaunchAgents/
-cp "$SRC/haus.sanctum.endocrine-gland-reaper.plist"    ~/Library/LaunchAgents/
+sed "s|@OPERATOR_HOME@|$HOME|g" "$SRC/watchdog-catalog-entry.yaml"                 > ~/.sanctum/services/endocrine-gland.yaml
+sed "s|@OPERATOR_HOME@|$HOME|g" "$SRC/haus.sanctum.endocrine-gland.plist"           > ~/Library/LaunchAgents/haus.sanctum.endocrine-gland.plist
+sed "s|@OPERATOR_HOME@|$HOME|g" "$SRC/haus.sanctum.endocrine-gland-sentinel.plist"  > ~/Library/LaunchAgents/haus.sanctum.endocrine-gland-sentinel.plist
+sed "s|@OPERATOR_HOME@|$HOME|g" "$SRC/haus.sanctum.endocrine-gland-reaper.plist"    > ~/Library/LaunchAgents/haus.sanctum.endocrine-gland-reaper.plist
 
 # 2. dry-verify BEFORE loading (reads real signals, broadcasts nothing)
 sanctum endocrine tick --dry-run
@@ -91,9 +91,9 @@ So subscription-first is **design intent, not a live guarantee** today — the
 wired receptor effects are temperature + divergent framing on chat/voice turns,
 which never change *which* seats run.
 
-## What's left for Bert
+## What's left for the operator
 
-- [x] Turn the organ on — gland + sentinel bootstrapped and healthy on manoir
+- [x] Turn the organ on — gland + sentinel bootstrapped and healthy on the primary host
       (2026-06-15); the gland publishes a live panel every 120s.
 - [x] CLI council reads the endocrine system BY DEFAULT (opt out with
       `SANCTUM_ENDOCRINE=0`); tune thresholds on live signals as you go.

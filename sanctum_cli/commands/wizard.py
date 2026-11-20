@@ -1,10 +1,9 @@
-"""``sanctum wizard`` — the haus greets its human cast member.
+"""``sanctum wizard`` — the haus greets its operator.
 
-Bert's Burning Man name is Wizard, so the CLI keeps a robe on a hook. One
-small, PG, zero-network easter egg in the ``matrix`` tradition: an ASCII
+One small, PG, zero-network easter egg in the ``matrix`` tradition: an ASCII
 wizard, one honest line of cheap local status (version + tier — the same
-never-raising seams the Setup Assistant's preflight uses), and the only
-closing line that scans. Pure stdlib ``print`` — no probes, instant exit.
+never-raising seams the Setup Assistant's preflight uses), and the closing
+line. Pure stdlib ``print`` — no probes, instant exit.
 """
 
 from __future__ import annotations
@@ -25,7 +24,7 @@ ART = r"""
        (_______)
 """
 
-CLOSING = "You're a wizard, Bert."
+CLOSING = "You're a wizard."
 
 
 def _cheap_status() -> str:

@@ -615,7 +615,7 @@ Validate: `plutil -lint "~/Library/Application Support/iTerm2/DynamicProfiles/sa
 
 - [ ] **Step 4: Verify with the user**
 
-Bert opens iTerm2 → Profiles → "Sanctum Matrix" → new window → `sanctum matrix`. If glyphs render in Monaco, the PostScript name is wrong — re-run Step 2 and fix the JSON.
+Operator opens iTerm2 → Profiles → "Sanctum Matrix" → new window → `sanctum matrix`. If glyphs render in Monaco, the PostScript name is wrong — re-run Step 2 and fix the JSON.
 
 **Rollback:** `rm ~/Library/Fonts/Glass_TTY_VT220.ttf "~/Library/Application Support/iTerm2/DynamicProfiles/sanctum-matrix.json"` — nothing else was touched.
 
@@ -635,4 +635,4 @@ Expected: all green, ~435 tests.
   --from claude-2a65c127 --note "council thinking-dots + matrix SHIPPED | released"
 ```
 
-- [ ] **Step 3: Report to Bert** — commits list, what to try (`sanctum council` for the dots, `sanctum matrix` for the rain, the new iTerm2 profile), and whether to push.
+- [ ] **Step 3: Report to the operator** — commits list, what to try (`sanctum council` for the dots, `sanctum matrix` for the rain, the new iTerm2 profile), and whether to push.

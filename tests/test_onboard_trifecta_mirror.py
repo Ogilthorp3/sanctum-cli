@@ -293,7 +293,7 @@ def test_append_sync_mirror_merges_with_existing_entries(tmp_path: Path) -> None
     pf.write_text(
         "sync_mirrors:\n"
         "  anthropic_api_key:\n"
-        "    op: Manoir - Anthropic API Key\n"
+        "    op: Home - Anthropic API Key\n"
         "    sops: anthropic_api_key\n"
         "    kc: anthropic-api-key\n",
         encoding="utf-8",
@@ -309,7 +309,7 @@ def test_append_sync_mirror_merges_with_existing_entries(tmp_path: Path) -> None
 
     data = yaml.safe_load(pf.read_text(encoding="utf-8"))
     # Existing entry untouched.
-    assert data["sync_mirrors"]["anthropic_api_key"]["op"] == "Manoir - Anthropic API Key"
+    assert data["sync_mirrors"]["anthropic_api_key"]["op"] == "Home - Anthropic API Key"
     # New entry present.
     assert data["sync_mirrors"]["orbi_admin_password"]["kc"] == "orbi-admin"
 

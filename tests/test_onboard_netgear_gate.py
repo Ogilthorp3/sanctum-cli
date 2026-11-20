@@ -191,7 +191,7 @@ def test_device_creds_falls_back_to_per_kind_default_when_unset(
 ) -> None:
     """With NOTHING configured, the per-kind default tuple resolves (no regression).
 
-    Stated old→new explicitly (Bert is dyslexic): unset hub → (bell-hub-admin,
+    Stated old→new explicitly: unset hub → (bell-hub-admin,
     admin); unset orbi → (orbi-admin, admin).
     """
     _stub_instance(monkeypatch, {})

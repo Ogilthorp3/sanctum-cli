@@ -76,9 +76,9 @@ def _stable_identity():
 
     probe = IdentityProbe(
         iface="en1",
-        ssid="Manoir",
-        current_mac="d0:11:e5:1c:88:59",
-        hardware_mac="d0:11:e5:1c:88:59",
+        ssid="Home",
+        current_mac="02:00:00:00:00:01",
+        hardware_mac="02:00:00:00:00:01",
         security="WPA3",
         associated=True,
         router_arp_verified=True,
@@ -94,9 +94,9 @@ def _quarantined_identity():
 
     probe = IdentityProbe(
         iface="en1",
-        ssid="Manoir",
-        current_mac="32:a6:f4:de:54:cf",
-        hardware_mac="d0:11:e5:1c:88:59",
+        ssid="Home",
+        current_mac="02:00:00:00:00:02",
+        hardware_mac="02:00:00:00:00:01",
         security="WPA3",
         associated=True,
         router_arp_verified=False,
@@ -112,7 +112,7 @@ def _topology_single():
 
     return TopologyReport(
         firewalla_present=True,
-        firewalla_wan_mac="20:6d:31:51:67:82",
+        firewalla_wan_mac="02:00:00:00:00:03",
         firewalla_wan_mtu=1500,
         nat=Nat.SINGLE,
         gateway_ip="192.168.2.1",
@@ -224,8 +224,8 @@ def test_identity_rotating_is_attention_not_degraded() -> None:
     from sanctum_cli.net.link import IdentityDiagnosis, IdentityProbe
 
     probe = IdentityProbe(
-        iface="en1", ssid="Manoir", current_mac="32:a6:f4:de:54:cf",
-        hardware_mac="d0:11:e5:1c:88:59", security="WPA3", associated=True,
+        iface="en1", ssid="Home", current_mac="02:00:00:00:00:02",
+        hardware_mac="02:00:00:00:00:01", security="WPA3", associated=True,
         router_arp_verified=True, gateway_reachable=True,
     )
     inp = _all_green_inputs()

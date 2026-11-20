@@ -5,8 +5,8 @@ Product rule (Steve Jobs test):
 
 Layers (no metaphor bleed — see sanctum-docs operations/naming):
 
-  place   manoir, chalet, montreal     physical site / haus
-  brain   manoir, chalet               site Mini (roster key == .node_id == MagicDNS)
+  place   home, studio, lab            physical site / haus
+  brain   home, studio                 site host (roster key == .node_id == MagicDNS)
   mobile  mbp                          road machines (not a site)
   infra   {site}-fw, {site}-ha         Firewalla / HA Green on the tailnet
   agent   yoda, windu, ahsoka          Jedi seats (never a Tailscale host name)
@@ -15,12 +15,12 @@ Layers (no metaphor bleed — see sanctum-docs operations/naming):
 Patterns
 --------
   site brain:   ^[a-z][a-z0-9]{1,15}$          (place name, short)
-  mobile:       ^[a-z][a-z0-9]{1,15}$          (mbp, not berts-mbp)
+  mobile:       ^[a-z][a-z0-9]{1,15}$          (mbp, not alice-mbp)
   site infra:   ^{site}-(fw|ha|orbi)$
 
 Forbidden as addresses
 ----------------------
-  * owner prefixes (berts-mbp)
+  * owner prefixes (alice-mbp)
   * memory-size codenames (MM64, MBP128)
   * bare LAN IPs for cross-site
   * dual identity (roster key ≠ preferred MagicDNS without an aliases: entry)
@@ -36,21 +36,20 @@ if TYPE_CHECKING:
 
 # Preferred roster keys for known gear roles (not exhaustive — convention).
 INFRA_SUFFIXES = frozenset({"fw", "ha", "orbi"})
-# Legacy Tailscale machine names → preferred hive name (transition table).
-LEGACY_ALIASES: dict[str, str] = {
-    "berts-mbp": "mbp",
-    "berts-macbook-pro-m4-max-128gb": "mbp",
-    "manoir-firewalla": "manoir-fw",
-    "chalet-firewalla": "chalet-fw",
-    "ts-firewalla": "manoir-fw",  # historical Gold Pro label
-    "homeassistant": "manoir-ha",
-    "manoir-ha": "manoir-ha",
-}
+# Optional legacy Tailscale machine names → preferred hive name (transition table;
+# roster-specific aliases live in instance.yaml ``aliases:``).
+LEGACY_ALIASES: dict[str, str] = {}
 
 _SITE_OR_MOBILE = re.compile(r"^[a-z][a-z0-9]{1,15}$")
 _INFRA = re.compile(r"^([a-z][a-z0-9]{1,15})-(fw|ha|orbi)$")
+_INFRA_LONG = re.compile(
+    r"^([a-z][a-z0-9]{1,15})-(firewalla|firewall|homeassistant|home-assistant)$"
+)
 _MEMORY_CODE = re.compile(r"^(mm|mbp)\d+$", re.I)
-_OWNER_PREFIX = re.compile(r"^(berts?|neo|admin)[-_]", re.I)
+_OWNER_PREFIX = re.compile(
+    r"^(?:(?:alice|bob|owner|user|neo|admin)[-_]|[a-z]+s?[-_](?:mbp|macbook|imac|iphone|ipad|laptop|mini)\b)",
+    re.I,
+)
 
 
 def is_valid_hive_name(name: str) -> bool:
@@ -97,6 +96,11 @@ def preferred_name(raw: str, nodes: Mapping[str, Mapping[str, Any]] | None = Non
                     return key
     if n in LEGACY_ALIASES:
         return LEGACY_ALIASES[n]
+    m_long = _INFRA_LONG.match(n)
+    if m_long:
+        site, role = m_long.groups()
+        suffix = "fw" if role in {"firewalla", "firewall"} else "ha"
+        return f"{site}-{suffix}"
     return n
 
 
@@ -121,8 +125,8 @@ def validate_node_naming(name: str, node: Mapping[str, Any]) -> list[str]:
     key = (name or "").strip()
     if not is_valid_hive_name(key):
         problems.append(
-            f"{key!r}: invalid hive name — use short place (manoir), mobile (mbp), "
-            f"or site-infra (manoir-fw); no owner prefixes or MM64-style codes"
+            f"{key!r}: invalid hive name — use short place (home), mobile (mbp), "
+            f"or site-infra (home-fw); no owner prefixes or MM64-style codes"
         )
         return problems
     ts = str(node.get("tailscale_name") or "").strip()
@@ -174,7 +178,7 @@ def validate_roster_naming(nodes: Mapping[str, Mapping[str, Any]]) -> list[str]:
 
 
 def suggest_infra_name(site: str, role: str) -> str:
-    """``manoir`` + ``fw`` → ``manoir-fw``."""
+    """``home`` + ``fw`` → ``home-fw``."""
     s = (site or "").strip().lower()
     r = (role or "").strip().lower()
     if r in {"firewalla", "firewall", "purple", "gold"}:

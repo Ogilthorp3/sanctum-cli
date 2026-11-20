@@ -2,8 +2,8 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
   STAGED — NOT LOADED. This is the gland daemon (the seventh organ).
-  Bert turns it on:
-      cp haus.sanctum.endocrine-gland.plist ~/Library/LaunchAgents/
+  Operator turns it on (@OPERATOR_HOME@ expanded at install):
+      sed "s|@OPERATOR_HOME@|$HOME|g" haus.sanctum.endocrine-gland.plist > ~/Library/LaunchAgents/haus.sanctum.endocrine-gland.plist
       launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/haus.sanctum.endocrine-gland.plist
 
   Runs one gland tick every 120s (StartInterval) via endocrine-tick.sh.
@@ -27,12 +27,12 @@
     <string>haus.sanctum.endocrine-gland</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/bert/.sanctum/scripts/endocrine-tick.sh</string>
+        <string>@OPERATOR_HOME@/.sanctum/scripts/endocrine-tick.sh</string>
     </array>
     <key>EnvironmentVariables</key>
     <dict>
         <key>HOME</key>
-        <string>/Users/bert</string>
+        <string>@OPERATOR_HOME@</string>
         <key>PATH</key>
         <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     </dict>
@@ -43,8 +43,8 @@
     <key>ProcessType</key>
     <string>Standard</string>
     <key>StandardOutPath</key>
-    <string>/Users/bert/.sanctum/logs/endocrine-gland.log</string>
+    <string>@OPERATOR_HOME@/.sanctum/logs/endocrine-gland.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/bert/.sanctum/logs/endocrine-gland.log</string>
+    <string>@OPERATOR_HOME@/.sanctum/logs/endocrine-gland.log</string>
 </dict>
 </plist>

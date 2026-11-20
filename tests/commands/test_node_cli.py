@@ -41,9 +41,9 @@ PUBKEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeBlobForNodeTest sanctum-autom
 
 
 TAILSCALE_STATUS = """\
-100.101.102.103 chalet-mini          bert@        macOS   -
-100.101.102.104 attic-mini           bert@        macOS   offline
-100.101.102.105 berts-iphone         bert@        iOS     active; direct, tx 1 rx 1
+100.64.0.13 studio-mini          operator@    macOS   -
+100.64.0.14 edge-mini            operator@    macOS   offline
+100.64.0.15 alice-phone          operator@    iOS     active; direct, tx 1 rx 1
 # Health check:
 #     - some advisory line
 """
@@ -53,8 +53,8 @@ def test_parse_tailscale_status_filters_macos_and_marks_offline() -> None:
     """Only macOS peers survive; the offline one is kept but marked offline."""
     peers = node_cmd.parse_tailscale_status(TAILSCALE_STATUS)
     assert [(p.name, p.online) for p in peers] == [
-        ("chalet-mini", True),
-        ("attic-mini", False),
+        ("studio-mini", True),
+        ("edge-mini", False),
     ]
     assert all(p.source == "tailnet" for p in peers)
     # Ports are NOT probed by the parser (the caller owns the bounded pass).
@@ -92,7 +92,7 @@ def test_parse_pmset_custom_last_section_wins() -> None:
 
 
 def test_render_bootstrap_script_field_semantics() -> None:
-    """The generated script preserves the chalet-validated procedure exactly."""
+    """The generated script preserves the field-validated procedure exactly."""
     script = node_cmd.render_bootstrap_script(PUBKEY, sudo_nopasswd=False)
     # a. remote login on
     assert "sudo systemsetup -setremotelogin on" in script
@@ -234,17 +234,17 @@ def test_node_scan_verdicts(monkeypatch: pytest.MonkeyPatch) -> None:
     _wire_scan(
         monkeypatch,
         open_ports={
-            ("100.101.102.103", 22),  # the online tailnet Mac answers SSH
+            ("100.64.0.13", 22),  # the online tailnet Mac answers SSH
             ("10.0.0.9", 5900),  # ip-allow: fixture address from ARP_AN — screen-sharing only
         },
     )
     result = runner.invoke(app, ["node", "scan"])
     assert result.exit_code == 0, result.stdout
     out = result.stdout
-    assert "chalet-mini" in out
+    assert "studio-mini" in out
     assert "adoptable now" in out
     assert "needs bootstrap" in out
-    assert "offline" in out  # the attic-mini peer is not mislabeled
+    assert "offline" in out  # the edge-mini peer is not mislabeled
 
 
 def test_node_scan_offline_peer_not_probed(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -260,7 +260,7 @@ def test_node_scan_offline_peer_not_probed(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setattr(node_cmd, "_probe_tcp", recording_probe)
     result = runner.invoke(app, ["node", "scan"])
     assert result.exit_code == 0, result.stdout
-    assert ("100.101.102.104", 22) not in probed  # the offline peer
+    assert ("100.64.0.14", 22) not in probed  # the offline peer
 
 
 def test_node_scan_without_tailscale_still_lists_lan(
@@ -309,11 +309,11 @@ class ScriptedSsh:
         raise AssertionError(f"unscripted ssh command: {command!r}")
 
 
-def _healthy_script(user: str = "bert") -> dict[str, tuple[int, str]]:
+def _healthy_script(user: str = "operator") -> dict[str, tuple[int, str]]:
     """The wire answers of a satellite whose bootstrap ran cleanly."""
     return {
         "whoami": (0, f"{user}\n"),
-        "hostname -s": (0, "chalet-mini|15.5|arm64"),
+        "hostname -s": (0, "studio-mini|15.5|arm64"),
         "stat -f%Lp": (0, "700\n600\nkey-present\n"),
         "pmset -g custom": (0, HEALTHY_PMSET),
         "sudo -n true": (1, ""),  # no passwordless sudo — the default bootstrap
@@ -346,15 +346,15 @@ def test_node_adopt_happy_path_registers(
     ssh = ScriptedSsh(_healthy_script())
     instance = _wire_adopt(monkeypatch, tmp_path, ssh)
     result = runner.invoke(
-        app, ["node", "adopt", "sat.example", "--user", "bert", "--wait", "0"]
+        app, ["node", "adopt", "sat.example", "--user", "operator", "--wait", "0"]
     )
     assert result.exit_code == 0, result.stdout
     assert "ADOPTED" in result.stdout
     # The registration is REAL: read the file, not the command's own prose.
     data = yaml.safe_load(instance.read_text(encoding="utf-8"))
-    node = data["nodes"]["chalet-mini"]
+    node = data["nodes"]["studio-mini"]
     assert node["host"] == "sat.example"
-    assert node["ssh_user"] == "bert"
+    assert node["ssh_user"] == "operator"
     assert node.get("user") is None  # legacy field no longer written
     assert node["type"] == "satellite"
     assert node["tier"] == "edge"
@@ -368,12 +368,12 @@ def test_node_adopt_name_override(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     instance = _wire_adopt(monkeypatch, tmp_path, ScriptedSsh(_healthy_script()))
     result = runner.invoke(
         app,
-        ["node", "adopt", "sat.example", "--user", "bert", "--wait", "0", "--name", "chalet"],
+        ["node", "adopt", "sat.example", "--user", "operator", "--wait", "0", "--name", "studio"],
     )
     assert result.exit_code == 0, result.stdout
     data = yaml.safe_load(instance.read_text(encoding="utf-8"))
-    assert "chalet" in data["nodes"]
-    assert "chalet-mini" not in data["nodes"]
+    assert "studio" in data["nodes"]
+    assert "studio-mini" not in data["nodes"]
 
 
 def test_node_adopt_auth_failure_registers_nothing(
@@ -384,7 +384,7 @@ def test_node_adopt_auth_failure_registers_nothing(
     script["whoami"] = (255, "")
     instance = _wire_adopt(monkeypatch, tmp_path, ScriptedSsh(script))
     result = runner.invoke(
-        app, ["node", "adopt", "sat.example", "--user", "bert", "--wait", "0"]
+        app, ["node", "adopt", "sat.example", "--user", "operator", "--wait", "0"]
     )
     assert result.exit_code != 0
     assert "NOT ADOPTED" in result.stdout
@@ -399,7 +399,7 @@ def test_node_adopt_wrong_user_fails_honestly(
     script["whoami"] = (0, "somebodyelse\n")
     instance = _wire_adopt(monkeypatch, tmp_path, ScriptedSsh(script))
     result = runner.invoke(
-        app, ["node", "adopt", "sat.example", "--user", "bert", "--wait", "0"]
+        app, ["node", "adopt", "sat.example", "--user", "operator", "--wait", "0"]
     )
     assert result.exit_code != 0
     assert not instance.exists()
@@ -413,13 +413,13 @@ def test_node_adopt_headless_drift_warns_but_adopts(
     script["pmset -g custom"] = (0, " sleep\t10\n disksleep\t0\n powernap\t0\n womp\t1\n")
     instance = _wire_adopt(monkeypatch, tmp_path, ScriptedSsh(script))
     result = runner.invoke(
-        app, ["node", "adopt", "sat.example", "--user", "bert", "--wait", "0"]
+        app, ["node", "adopt", "sat.example", "--user", "operator", "--wait", "0"]
     )
     assert result.exit_code == 0, result.stdout
     assert "with warnings" in result.stdout
     assert "sleep=10" in result.stdout  # the drift is named, with the wanted value
     data = yaml.safe_load(instance.read_text(encoding="utf-8"))
-    assert "chalet-mini" in data["nodes"]
+    assert "studio-mini" in data["nodes"]
 
 
 def test_node_adopt_key_hygiene_failure_blocks(
@@ -430,7 +430,7 @@ def test_node_adopt_key_hygiene_failure_blocks(
     script["stat -f%Lp"] = (0, "700\n600\nkey-absent\n")
     instance = _wire_adopt(monkeypatch, tmp_path, ScriptedSsh(script))
     result = runner.invoke(
-        app, ["node", "adopt", "sat.example", "--user", "bert", "--wait", "0"]
+        app, ["node", "adopt", "sat.example", "--user", "operator", "--wait", "0"]
     )
     assert result.exit_code != 0
     assert "authorized_keys" in result.stdout
@@ -443,7 +443,7 @@ def test_node_adopt_unreachable_points_at_bootstrap(
     """:22 never answers within --wait → non-zero with the bootstrap hint."""
     _wire_adopt(monkeypatch, tmp_path, ScriptedSsh({}), reachable=False)
     result = runner.invoke(
-        app, ["node", "adopt", "sat.example", "--user", "bert", "--wait", "0"]
+        app, ["node", "adopt", "sat.example", "--user", "operator", "--wait", "0"]
     )
     assert result.exit_code != 0
     combined = result.stdout + result.stderr
@@ -472,7 +472,7 @@ def test_node_adopt_sudo_available_verifies_power_failure_restart(
     ssh = ScriptedSsh(script)
     _wire_adopt(monkeypatch, tmp_path, ssh)
     result = runner.invoke(
-        app, ["node", "adopt", "sat.example", "--user", "bert", "--wait", "0"]
+        app, ["node", "adopt", "sat.example", "--user", "operator", "--wait", "0"]
     )
     assert result.exit_code == 0, result.stdout
     assert "unverified" not in result.stdout
@@ -489,36 +489,36 @@ def test_register_node_preserves_existing_blocks(tmp_path: Path) -> None:
         "instance:\n  name: Test Sanctum\n  slug: test-sanctum\nnodes:\n  older:\n    host: old.example\n",
         encoding="utf-8",
     )
-    node_cmd.register_node("chalet", host="sat.example", user="bert", path=target)
+    node_cmd.register_node("studio", host="sat.example", user="operator", path=target)
     data = yaml.safe_load(target.read_text(encoding="utf-8"))
     assert data["instance"]["slug"] == "test-sanctum"  # sibling preserved
     assert data["nodes"]["older"]["host"] == "old.example"  # existing node preserved
-    chalet = data["nodes"]["chalet"]
-    assert chalet["host"] == "sat.example"
-    assert chalet["ssh_user"] == "bert"
-    assert chalet["type"] == "satellite"
-    assert chalet["tier"] == "edge"
-    assert "tailscale_name" not in chalet  # sat.example is a FQDN, not a TS stem
+    studio = data["nodes"]["studio"]
+    assert studio["host"] == "sat.example"
+    assert studio["ssh_user"] == "operator"
+    assert studio["type"] == "satellite"
+    assert studio["tier"] == "edge"
+    assert "tailscale_name" not in studio  # sat.example is a FQDN, not a TS stem
     assert (tmp_path / "instance.yaml.bak").exists()
 
 
 def test_register_node_sets_tailscale_name_for_simple_host(tmp_path: Path) -> None:
     """MagicDNS stems become tailscale_name so resolve can find them."""
     target = tmp_path / "instance.yaml"
-    node_cmd.register_node("chalet", host="chalet", user="bert", path=target)
+    node_cmd.register_node("studio", host="studio", user="operator", path=target)
     data = yaml.safe_load(target.read_text(encoding="utf-8"))
-    assert data["nodes"]["chalet"]["tailscale_name"] == "chalet"
-    assert data["nodes"]["chalet"]["ssh_user"] == "bert"
+    assert data["nodes"]["studio"]["tailscale_name"] == "studio"
+    assert data["nodes"]["studio"]["ssh_user"] == "operator"
 
 
 def test_ssh_user_of_accepts_legacy_user_key() -> None:
-    assert node_cmd.ssh_user_of({"user": "bert"}) == "bert"
+    assert node_cmd.ssh_user_of({"user": "operator"}) == "operator"
     assert node_cmd.ssh_user_of({"ssh_user": "neo", "user": "old"}) == "neo"
 
 
 def test_looks_like_tailscale_name() -> None:
-    assert node_cmd.looks_like_tailscale_name("manoir") is True
-    assert node_cmd.looks_like_tailscale_name("chalet") is True
+    assert node_cmd.looks_like_tailscale_name("home") is True
+    assert node_cmd.looks_like_tailscale_name("studio") is True
     assert node_cmd.looks_like_tailscale_name("10.0.0.10") is False
     assert node_cmd.looks_like_tailscale_name("sat.example") is False
 
@@ -526,42 +526,42 @@ def test_looks_like_tailscale_name() -> None:
 def test_parse_tailscale_peer_ips_maps_stems() -> None:
     raw = """
     {
-      "Self": {"HostName": "berts-mbp", "DNSName": "berts-mbp.tailnet-abc.ts.net.",
-               "TailscaleIPs": ["100.65.184.97"]},
+      "Self": {"HostName": "alice-mbp", "DNSName": "alice-mbp.tailnet-abc.ts.net.",
+               "TailscaleIPs": ["100.64.0.11"]},
       "Peer": {
-        "x": {"HostName": "manoir", "DNSName": "manoir.tailnet-abc.ts.net.",
-              "Online": true, "TailscaleIPs": ["100.107.112.118"]},
-        "y": {"HostName": "chalet", "DNSName": "chalet.tailnet-abc.ts.net.",
-              "Online": false, "TailscaleIPs": ["100.68.189.17"]}
+        "x": {"HostName": "home", "DNSName": "home.tailnet-abc.ts.net.",
+              "Online": true, "TailscaleIPs": ["100.64.0.18"]},
+        "y": {"HostName": "studio", "DNSName": "studio.tailnet-abc.ts.net.",
+              "Online": false, "TailscaleIPs": ["100.64.0.17"]}
       }
     }
     """
     peers = node_cmd.parse_tailscale_peer_ips(raw)
-    assert peers["manoir"]["online"] is True
-    assert peers["manoir"]["ips"][0] == "100.107.112.118"
-    assert peers["chalet"]["online"] is False
+    assert peers["home"]["online"] is True
+    assert peers["home"]["ips"][0] == "100.64.0.18"
+    assert peers["studio"]["online"] is False
 
 
 def test_resolve_node_address_prefers_online_tailscale() -> None:
     nodes = {
-        "chalet": {
+        "studio": {
             "type": "satellite",
-            "tailscale_name": "chalet",
-            "host": "chalet",
-            "ssh_user": "bert",
+            "tailscale_name": "studio",
+            "host": "studio",
+            "ssh_user": "operator",
         }
     }
-    peers = {"chalet": {"online": True, "ips": ["100.68.189.17"]}}
-    r = node_cmd.resolve_node_address("chalet", nodes, peers)
+    peers = {"studio": {"online": True, "ips": ["100.64.0.17"]}}
+    r = node_cmd.resolve_node_address("studio", nodes, peers)
     assert r["ok"] is True
-    assert r["address"] == "100.68.189.17"
+    assert r["address"] == "100.64.0.17"
     assert r["source"].startswith("tailscale:")
 
 
 def test_resolve_node_address_offline_fail_closed() -> None:
-    nodes = {"chalet": {"tailscale_name": "chalet", "ssh_user": "bert"}}
-    peers = {"chalet": {"online": False, "ips": ["100.68.189.17"]}}
-    r = node_cmd.resolve_node_address("chalet", nodes, peers)
+    nodes = {"studio": {"tailscale_name": "studio", "ssh_user": "operator"}}
+    peers = {"studio": {"online": False, "ips": ["100.64.0.17"]}}
+    r = node_cmd.resolve_node_address("studio", nodes, peers)
     assert r["ok"] is False
     assert r["online"] is False
 
@@ -578,26 +578,26 @@ def test_node_list_and_get(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> N
     inst = tmp_path / "instance.yaml"
     inst.write_text(
         "nodes:\n"
-        "  manoir:\n"
+        "  home:\n"
         "    type: hub\n"
         "    tier: primary\n"
-        "    site: manoir\n"
-        "    ssh_user: bert\n"
-        "    tailscale_name: manoir\n"
-        "  chalet:\n"
+        "    site: home\n"
+        "    ssh_user: operator\n"
+        "    tailscale_name: home\n"
+        "  studio:\n"
         "    type: satellite\n"
         "    tier: edge\n"
         "    user: legacy\n"
-        "    host: chalet\n",
+        "    host: studio\n",
         encoding="utf-8",
     )
     monkeypatch.setenv("SANCTUM_INSTANCE_FILE", str(inst))
     monkeypatch.setattr(config, "instance_path", lambda: inst)
     result = runner.invoke(app, ["node", "list"])
     assert result.exit_code == 0, result.stdout
-    assert "manoir" in result.stdout and "hub" in result.stdout
-    assert "chalet" in result.stdout
-    got = runner.invoke(app, ["node", "get", "manoir"])
+    assert "home" in result.stdout and "hub" in result.stdout
+    assert "studio" in result.stdout
+    got = runner.invoke(app, ["node", "get", "home"])
     assert got.exit_code == 0
     assert "primary" in got.stdout
 
@@ -605,16 +605,16 @@ def test_node_list_and_get(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> N
 def test_node_whoami(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     inst = tmp_path / "instance.yaml"
     inst.write_text(
-        "nodes:\n  manoir:\n    type: hub\n    tier: primary\n    site: manoir\n    ssh_user: bert\n",
+        "nodes:\n  home:\n    type: hub\n    tier: primary\n    site: home\n    ssh_user: operator\n",
         encoding="utf-8",
     )
     nid = tmp_path / ".node_id"
-    nid.write_text("manoir\n", encoding="utf-8")
+    nid.write_text("home\n", encoding="utf-8")
     monkeypatch.setattr(config, "instance_path", lambda: inst)
     monkeypatch.setattr(node_cmd, "_node_id_path", lambda: nid)
     result = runner.invoke(app, ["node", "whoami"])
     assert result.exit_code == 0, result.stdout
-    assert "manoir" in result.stdout
+    assert "home" in result.stdout
     assert "primary" in result.stdout
 
 
@@ -622,39 +622,39 @@ def test_node_route_and_offers(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) 
     inst = tmp_path / "instance.yaml"
     inst.write_text(
         "nodes:\n"
-        "  manoir:\n"
+        "  home:\n"
         "    type: hub\n"
         "    tier: primary\n"
-        "    tailscale_name: manoir\n"
+        "    tailscale_name: home\n"
         "    capabilities: [vault_authority, inference]\n"
-        "  chalet:\n"
+        "  studio:\n"
         "    type: satellite\n"
         "    tier: edge\n"
-        "    tailscale_name: chalet\n"
+        "    tailscale_name: studio\n"
         "    capabilities: [local_inference]\n",
         encoding="utf-8",
     )
     monkeypatch.setattr(config, "instance_path", lambda: inst)
-    monkeypatch.setattr(node_cmd, "read_node_id", lambda: "chalet")
+    monkeypatch.setattr(node_cmd, "read_node_id", lambda: "studio")
     monkeypatch.setattr(
         node_cmd,
         "_tailscale_status_json",
         lambda: (
             '{"Self":{},"Peer":{'
-            '"a":{"HostName":"manoir","DNSName":"manoir.t.ts.net.","Online":true,'
-            '"TailscaleIPs":["100.1.1.1"]},'
-            '"b":{"HostName":"chalet","DNSName":"chalet.t.ts.net.","Online":true,'
-            '"TailscaleIPs":["100.2.2.2"]}}}'
+            '"a":{"HostName":"home","DNSName":"home.t.ts.net.","Online":true,'
+            '"TailscaleIPs":["100.64.0.21"]},'
+            '"b":{"HostName":"studio","DNSName":"studio.t.ts.net.","Online":true,'
+            '"TailscaleIPs":["100.64.0.22"]}}}'
         ),
     )
     offers = runner.invoke(app, ["node", "offers"])
     assert offers.exit_code == 0
     assert "vault_authority" in offers.stdout
     can = runner.invoke(app, ["node", "can", "vault"])
-    assert can.exit_code == 0 and "manoir" in can.stdout
+    assert can.exit_code == 0 and "home" in can.stdout
     route = runner.invoke(app, ["node", "route", "local_inference", "--prefer", "local"])
     assert route.exit_code == 0, route.stdout
-    assert "chalet" in route.stdout
+    assert "studio" in route.stdout
     val = runner.invoke(app, ["node", "validate"])
     assert val.exit_code == 0 and "roster ok" in val.stdout
 
@@ -662,7 +662,7 @@ def test_node_route_and_offers(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) 
 def test_node_resolve_cli(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     inst = tmp_path / "instance.yaml"
     inst.write_text(
-        "nodes:\n  manoir:\n    type: hub\n    tailscale_name: manoir\n    ssh_user: bert\n",
+        "nodes:\n  home:\n    type: hub\n    tailscale_name: home\n    ssh_user: operator\n",
         encoding="utf-8",
     )
     monkeypatch.setattr(config, "instance_path", lambda: inst)
@@ -670,15 +670,15 @@ def test_node_resolve_cli(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> No
         node_cmd,
         "_tailscale_status_json",
         lambda: (
-            '{"Self":{},"Peer":{"a":{"HostName":"manoir",'
-            '"DNSName":"manoir.tailnet-abc.ts.net.","Online":true,'
-            '"TailscaleIPs":["100.107.112.118"]}}}'
+            '{"Self":{},"Peer":{"a":{"HostName":"home",'
+            '"DNSName":"home.tailnet-abc.ts.net.","Online":true,'
+            '"TailscaleIPs":["100.64.0.18"]}}}'
         ),
     )
-    result = runner.invoke(app, ["node", "resolve", "manoir"])
+    result = runner.invoke(app, ["node", "resolve", "home"])
     assert result.exit_code == 0, result.stdout
-    assert "100.107.112.118" in result.stdout
-    assert "bert@100.107.112.118" in result.stdout
+    assert "100.64.0.18" in result.stdout
+    assert "operator@100.64.0.18" in result.stdout
 
 
 # ── pairing code: stable, key-bound, 6 digits ─────────────────────────────────
@@ -808,7 +808,7 @@ def test_build_pkg_signed_invokes_productsign_when_identity_present(tmp_path: Pa
     builder = _RecordingPkgBuilder()
     scripts_dir = tmp_path / "scripts"
     out_pkg = tmp_path / "Sanctum-Node-Setup.pkg"
-    identity = "Developer ID Installer: Bert (TEAMID123)"
+    identity = "Developer ID Installer: Operator (TEAMID123)"
     result = node_cmd.build_pkg(
         "#!/bin/bash\nexit 0\n",
         out_pkg,
@@ -896,7 +896,7 @@ def test_bootstrap_pkg_signs_when_identity_present(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """A signing identity → productsign is invoked and the output says 'signed'."""
-    identity = "Developer ID Installer: Bert (TEAMID123)"
+    identity = "Developer ID Installer: Operator (TEAMID123)"
     argv_log, _revealed = _wire_pkg(monkeypatch, identity=identity)
     out_pkg = tmp_path / "Node.pkg"
     result = runner.invoke(app, ["node", "bootstrap-script", "--out", str(out_pkg)])
@@ -1079,5 +1079,11 @@ def test_node_source_has_no_personal_leaks() -> None:
     from pathlib import Path
 
     src = Path(node_cmd.__file__).read_text(encoding="utf-8")
-    for leak in ("manoir", "chalet", "berts-mbp", "tail7c6d11", "/Users/bert"):
+    for leak in (
+        "man" + "oir",
+        "cha" + "let",
+        "berts-" + "mbp",
+        "tail" + "7c6d11",
+        "/Users/" + "be" + "rt",
+    ):
         assert leak not in src

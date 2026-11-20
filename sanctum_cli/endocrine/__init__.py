@@ -1,5 +1,5 @@
 """Sanctum endocrine system — the council's slow, broadcast, feedback-regulated
-modulator of disposition (and, per Bert's steer, its CREATIVITY regulator).
+modulator of disposition (and its CREATIVITY regulator).
 
 This is the MISSING organ in the Sanctum body:
   BONES (Rust)   — castellan / proxyd / cathedral / watchdog / chitti

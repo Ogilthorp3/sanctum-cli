@@ -13,7 +13,7 @@ REPL prints `Yoda: ` and nothing moves. Yoda's seat rides
 read as a hang. The `/council` fan-out already has a spinner
 ("The council deliberates…"); the per-seat chat path has nothing.
 
-Separately, Bert wants Matrix flavour for the CLI: the real terminal-font
+Separately, the operator wants Matrix flavour for the CLI: the real terminal-font
 treatment (as far as a CLI honestly can — fonts belong to the emulator, not
 the program) and a digital-rain easter egg.
 
@@ -57,7 +57,7 @@ the program) and a digital-rain easter egg.
 ## B. iTerm2 "Sanctum Matrix" profile (user-env, not repo code)
 
 A CLI cannot set its own font. The honest equivalent: a dedicated iTerm2
-profile Bert opts into per window. The default profile is not touched.
+profile the operator opts into per window. The default profile is not touched.
 
 - **Font:** Glass TTY VT220 (free, github.com/svofski/glasstty) — the
   canonical readable phosphor-CRT font. True Matrix Code NFI is
@@ -71,7 +71,7 @@ profile Bert opts into per window. The default profile is not touched.
 - **Rollback:** delete the JSON and the font file. Nothing else changes.
 - **Artifact home:** this is user-env configuration, not CLI code. The
   profile JSON is reproduced in the implementation plan/commit message and
-  performed as one-off ops on manoir; nothing ships in the package.
+  performed as one-off ops on the primary host; nothing ships in the package.
 - Terminal.app is left alone.
 
 ## C. `sanctum matrix` — digital rain easter egg

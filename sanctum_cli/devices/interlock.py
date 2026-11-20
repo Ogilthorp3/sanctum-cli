@@ -25,20 +25,17 @@ not-live.
 
 from __future__ import annotations
 
+import os
 import subprocess
 from collections.abc import Callable
 
 from sanctum_cli import config
 
-# The SHIPPED-default Tailscale node for the Firewalla (``ts-firewalla``,
-# tag:sanctum-host). Root SSH over the tailnet to this address is the
-# LAN-INDEPENDENT recovery channel — proven to survive a LAN collapse (the Mini
-# root-SSH'd it over Tailscale while on a different network). This is the channel
-# the interlock's OOB precondition probes. It is NO LONGER hardcoded as the only
-# value (FIX-d1): a haus pins its own tailnet node in instance.yaml
-# (``devices.firewalla.ts_addr``); this constant is the fallback the general-purpose
-# tool ships with so a fresh box still has a usable default.
-TS_FIREWALLA_ADDR = "100.68.36.16"  # ip-allow: Firewalla OOB recovery anchor — a KNOWN stable tailnet address separate from the WAN being torn down; the pin IS the interlock security feature
+# Optional Tailscale node address for the Firewalla (``ts-firewalla``).
+# A haus pins its own tailnet node in instance.yaml (``devices.firewalla.ts_addr``)
+# or via ``SANCTUM_FIREWALLA_TS_ADDR``; no personal tailnet IP is shipped (fail-closed
+# when unresolved).
+TS_FIREWALLA_ADDR: str | None = None
 
 # Bounded so a dead tailnet fails FAST (fail-closed) rather than hanging the 2 a.m.
 # cutover: the ssh connect timeout, and a hard wall on the whole round-trip.
@@ -70,7 +67,7 @@ def _ts_ssh_argv(addr: str, remote: str) -> list[str]:
         "-o",
         f"ConnectTimeout={_SSH_CONNECT_TIMEOUT}",
         # The Firewalla's SSH user is ``pi`` (root login is denied on the box) — LIVE-VERIFIED
-        # ip-allow (OOB anchor); 2026-06-27: ``ssh pi@100.68.36.16 true`` succeeds, ``ssh root@…`` is "Permission denied".
+        # (OOB anchor): ``ssh pi@<tailnet-addr> true`` succeeds, ``ssh root@…`` is "Permission denied".
         # The key is supplied by the operator's ssh-config Host entry (IdentityFile = the box key),
         # matching the runner's transport (:func:`sanctum_cli.net.system._fw_ssh_argv`, also ``pi``).
         f"pi@{addr}",
@@ -108,17 +105,21 @@ def _real_tailnet_ssh_probe(addr: str) -> int:
     return _run_probe(_ts_ssh_argv(addr, "true"))
 
 
-def firewalla_ts_addr() -> str:
-    """Resolve the Tailscale-on-box recovery address — config-first (FIX-d1).
+def firewalla_ts_addr() -> str | None:
+    """Resolve the Tailscale-on-box recovery address — env/config-first (fail closed).
 
-    Reads ``devices.firewalla.ts_addr`` from instance.yaml at CALL TIME so a haus
-    pins its OWN tailnet node IP (the LAN-independent recovery channel is per-haus),
-    falling back to the shipped :data:`TS_FIREWALLA_ADDR` default so the
-    general-purpose tool is unchanged on a fresh box. Read at call time (not bound
-    as a default-arg at import) so a config edit takes effect without a re-import,
-    matching the other FIX-b/-d config-first resolvers.
+    Checks ``SANCTUM_FIREWALLA_TS_ADDR`` first, then ``devices.firewalla.ts_addr``
+    in instance.yaml at CALL TIME so a haus pins its OWN tailnet node IP. Returns
+    ``None`` (never a hardcoded personal IP) when neither is configured.
     """
-    return str(config.instance_value("devices.firewalla.ts_addr", TS_FIREWALLA_ADDR))
+    env_addr = os.environ.get("SANCTUM_FIREWALLA_TS_ADDR", "").strip()
+    if env_addr:
+        return env_addr
+    val = config.instance_value("devices.firewalla.ts_addr", TS_FIREWALLA_ADDR)
+    if val is None:
+        return None
+    s = str(val).strip()
+    return s or None
 
 
 def tailscale_oob_live(
@@ -127,13 +128,15 @@ def tailscale_oob_live(
     """Is the LAN-independent Tailscale-on-box OOB channel live RIGHT NOW?
 
     The canonical proof is a root-SSH round-trip to ``addr`` over the tailnet
-    returning exit 0. ``addr`` is resolved config-first via :func:`firewalla_ts_addr`
-    (``devices.firewalla.ts_addr`` → the shipped default) when not supplied
-    explicitly, so the probed node is the haus's own tailnet box rather than a
-    hardcode. ``probe`` is injectable (tests pass a recording double mapping an
+    returning exit 0. ``addr`` is resolved via :func:`firewalla_ts_addr`
+    (``SANCTUM_FIREWALLA_TS_ADDR`` → ``devices.firewalla.ts_addr``) when not
+    supplied explicitly; returns ``False`` (fail-closed) when no address is
+    configured. ``probe`` is injectable (tests pass a recording double mapping an
     address to a scripted exit code) so this gate is exercised offline; the real
     default is :func:`_real_tailnet_ssh_probe`. Returns True ONLY on exit 0 — any
     non-zero / timeout / spawn-failure reads as not-live (fail-closed).
     """
     resolved_addr = addr if addr is not None else firewalla_ts_addr()
+    if not resolved_addr:
+        return False
     return (probe or _real_tailnet_ssh_probe)(resolved_addr) == 0

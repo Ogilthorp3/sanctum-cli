@@ -49,7 +49,7 @@ def test_tribe_peer_receives_a_signed_file(tmp_path) -> None:
     server.start()
     try:
         # ip-allow: Tailscale CGNAT example, not a host address
-        peer = "100.99.0.8"
+        peer = "100.64.0.8"
         assert url_is_allowed(f"http://{peer}:8788/v1/file")
         ticket = encode_ticket(parcel, [server.url])
         saved = receive_parcel(ticket, tmp_path / "inbox", Ed25519Signer().verify)

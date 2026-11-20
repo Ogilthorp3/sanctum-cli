@@ -16,15 +16,15 @@ if TYPE_CHECKING:
 
 
 def test_merge_heartbeat_sets_key() -> None:
-    out = deadman.merge_heartbeat({}, "manoir:backup-fresh", ts=100, max_hours=26)
-    assert out == {"manoir:backup-fresh": {"ts": 100, "max_hours": 26}}
+    out = deadman.merge_heartbeat({}, "home:backup-fresh", ts=100, max_hours=26)
+    assert out == {"home:backup-fresh": {"ts": 100, "max_hours": 26}}
 
 
 def test_merge_heartbeat_is_pure_and_preserves_others() -> None:
     base: dict[str, object] = {"mbp:restore-drill": {"ts": 1, "max_hours": 192}}
-    out = deadman.merge_heartbeat(base, "manoir:backup-fresh", ts=200, max_hours=26)
+    out = deadman.merge_heartbeat(base, "home:backup-fresh", ts=200, max_hours=26)
     assert out["mbp:restore-drill"] == {"ts": 1, "max_hours": 192}
-    assert out["manoir:backup-fresh"] == {"ts": 200, "max_hours": 26}
+    assert out["home:backup-fresh"] == {"ts": 200, "max_hours": 26}
     assert base == {"mbp:restore-drill": {"ts": 1, "max_hours": 192}}  # input untouched
 
 
