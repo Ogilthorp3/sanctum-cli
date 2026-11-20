@@ -187,26 +187,8 @@ def _gen_passphrase() -> str:
 def _ensure_keychain_entry(
     service: str, account: str, value: str, *, replace: bool
 ) -> None:
-    """Use macOS `security` to add a generic-password entry."""
-    if not shutil.which("/usr/bin/security"):
-        msg = "security CLI missing"
-        raise LocalError(msg)
-    args = [
-        "/usr/bin/security",
-        "add-generic-password",
-        "-a",
-        account,
-        "-s",
-        service,
-        "-w",
-        value,
-    ]
-    if replace:
-        args.append("-U")
-    proc = subprocess.run(args, capture_output=True, text=True, check=False)
-    if proc.returncode != 0:
-        msg = f"failed to write Keychain entry {service}: {proc.stderr.strip()}"
-        raise LocalError(msg)
+    """Write a generic-password entry via ``keychain.write`` (stdin, no argv secret)."""
+    keychain.write(account=account, service=service, value=value, update=replace)
 
 
 def _restic_env(key_id: str, app_key: str, passphrase: str) -> dict[str, str]:

@@ -29,9 +29,13 @@ them.
 
 from __future__ import annotations
 
+import getpass
 import hashlib
 import json
+import os
 import subprocess
+import sys
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -243,29 +247,44 @@ def read_self_tags(run: CommandRunner) -> list[str]:
     return [tag for tag in tags if isinstance(tag, str)]
 
 
-def tribe_up_argv(auth_key: str, hostname: str) -> list[str]:
-    """The exact ``tailscale up`` a friend runs to enter the trusted tribe.
-
-    The key is a Tailscale device auth key. The tag is fixed. A haus node must
-    not run this: that would trade its admin tag for the tribe tag.
-    """
+def validate_tribe_key(auth_key: str) -> str:
+    """Validate a Tailscale tribe auth key (``tskey-auth-`` prefix, no control chars)."""
     key = auth_key.strip()
-    if not key.startswith("tskey-auth-"):
+    if (
+        not key
+        or any(ch in key for ch in ("\r", "\n", "\0"))
+        or not key.startswith("tskey-auth-")
+    ):
         raise UserError(
             "that is not a tribe auth key",
             fix="use the one-time key the operator sent, it starts with tskey-auth-",
         )
+    return key
+
+
+def _normalize_tribe_hostname(hostname: str) -> str:
     host = hostname.strip().lower().replace("'", "").replace(" ", "-")
     if not host or any(ch not in "abcdefghijklmnopqrstuvwxyz0123456789-" for ch in host):
         raise UserError(
             f"bad tribe hostname {hostname!r}",
             fix="letters, numbers, and dashes only",
         )
+    return host
+
+
+def tribe_up_argv(auth_key_file: Path, hostname: str) -> list[str]:
+    """The exact ``tailscale up`` a friend runs to enter the trusted tribe.
+
+    Uses ``--auth-key file:<path>`` so the raw auth key never enters process
+    ``argv``. A haus node must not run this: that would trade its admin tag
+    for the tribe tag.
+    """
+    host = _normalize_tribe_hostname(hostname)
     return [
         _TS_BINARY,
         "up",
         "--auth-key",
-        key,
+        f"file:{auth_key_file}",
         "--advertise-tags",
         _TRIBE_TAG,
         "--hostname",
@@ -599,13 +618,37 @@ def _build_identity_store() -> MeshIdentityStore:
     return MeshIdentityStore(Ed25519Signer(), path=_resolve_identity_dir())
 
 
+def _resolve_tracker_token() -> str | None:
+    """Optional Bearer capability token for private/non-loopback trackers."""
+    env_tok = os.environ.get("SANCTUM_MESH_TRACKER_TOKEN")
+    if env_tok and env_tok.strip():
+        return env_tok.strip()
+    raw = config.instance_value("mesh.tracker_token")
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip()
+    return None
+
+
 def _build_directory(tracker: str | None = None) -> MeshDirectory:
     """The discovery/tracker client (the HTTP-tracker adapter).
 
-    Construction does NO network I/O — :class:`HttpTrackerTransport` builds its httpx
-    client without issuing a request; the first real read/write is the boundary.
+    Construction does NO network I/O and never mints an identity —
+    :class:`HttpTrackerTransport` builds its httpx client without issuing a
+    request, and ``identity_provider`` loads an already-minted identity lazily
+    only on write calls (``register`` / ``announce``).
     """
-    return HttpTrackerTransport(_resolve_tracker_url(tracker))
+
+    def _identity_for_write() -> LoadedIdentity | None:
+        store = _build_identity_store()
+        if store.identity_file.exists():
+            return store.ensure(_resolve_label())
+        return None
+
+    return HttpTrackerTransport(
+        _resolve_tracker_url(tracker),
+        identity_provider=_identity_for_write,
+        auth_token=_resolve_tracker_token(),
+    )
 
 
 def _build_vm_runner() -> VmRunner:
@@ -753,12 +796,15 @@ def _parse_scores(raw: list[str] | None) -> dict[str, float]:
 # ─── commands ────────────────────────────────────────────────────────────
 
 
-def _run_tribe_up(argv: list[str]) -> None:
+def _run_tribe_up(argv: list[str], *, secret: str = "") -> None:
     """Run ``tailscale up`` for a tribe join. The auth key is never echoed."""
-    key = argv[argv.index("--auth-key") + 1]
+    key_arg = argv[argv.index("--auth-key") + 1]
 
     def _redact(text: str) -> str:
-        return text.replace(key, "[redacted]")
+        redacted = text.replace(key_arg, "[redacted]")
+        if secret:
+            redacted = redacted.replace(secret, "[redacted]")
+        return redacted
 
     try:
         proc = subprocess.run(
@@ -774,6 +820,52 @@ def _run_tribe_up(argv: list[str]) -> None:
         raise LocalError(detail, fix="ask the operator for a fresh tribe key")
 
 
+def _resolve_tribe_key(
+    tribe_key_file: Path | None,
+    tribe_key_stdin: bool,
+) -> str:
+    if tribe_key_file is not None and tribe_key_stdin:
+        raise UserError(
+            "pass either --tribe-key-file or --tribe-key-stdin, not both",
+            fix="choose one key source",
+        )
+    if tribe_key_file is not None:
+        try:
+            raw = tribe_key_file.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise UserError(
+                f"cannot read tribe key file {tribe_key_file}: {exc}",
+                fix="pass a readable path to --tribe-key-file",
+            ) from exc
+        return validate_tribe_key(raw)
+    if tribe_key_stdin:
+        return validate_tribe_key(sys.stdin.read())
+    if not sys.stdin.isatty():
+        raise UserError(
+            "tribe auth key requires an interactive terminal, --tribe-key-file, or --tribe-key-stdin",
+            fix="pass --tribe-key-file <path> or pipe via --tribe-key-stdin",
+        )
+    return validate_tribe_key(
+        getpass.getpass("One-time Tailscale tribe auth key (tskey-auth-...): ")
+    )
+
+
+def _run_tribe_up_with_key(auth_key: str, hostname: str) -> None:
+    key = validate_tribe_key(auth_key)
+    _normalize_tribe_hostname(hostname)
+    with tempfile.TemporaryDirectory(prefix="sanctum-tribe-") as td:
+        key_path = Path(td) / "authkey"
+        fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            os.fchmod(fd, 0o600)
+        except Exception:
+            os.close(fd)
+            raise
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(key + "\n")
+        _run_tribe_up(tribe_up_argv(key_path, hostname), secret=key)
+
+
 @mesh_app.command("join", help="Join the open Sanctum mesh (tailnet + identity + discovery).")
 def join_command(
     label: Annotated[
@@ -783,28 +875,44 @@ def join_command(
         bool, typer.Option("--yes", "-y", help="Non-interactive: skip prompts (onboard/scripts).")
     ] = False,
     tribe: Annotated[
-        str | None,
-        typer.Option("--tribe", help="One-time Tailscale auth key for the trusted tribe."),
+        bool,
+        typer.Option(
+            "--tribe",
+            help="Join the trusted tribe (reads auth key via --tribe-key-file, --tribe-key-stdin, or prompt).",
+        ),
+    ] = False,
+    tribe_key_file: Annotated[
+        Path | None,
+        typer.Option(
+            "--tribe-key-file",
+            help="Read Tailscale tribe auth key from file (mode 0600 recommended).",
+        ),
     ] = None,
+    tribe_key_stdin: Annotated[
+        bool,
+        typer.Option("--tribe-key-stdin", help="Read Tailscale tribe auth key from stdin."),
+    ] = False,
 ) -> None:
     try:
         run = _build_command_runner()
         store = _build_identity_store()
         directory = _build_directory()
         chosen_label = label.strip() if label and label.strip() else _resolve_label()
-        if tribe:
+        use_tribe = tribe or tribe_key_file is not None or tribe_key_stdin
+        if use_tribe:
             guard_tribe_join(read_self_tags(run))
-            _run_tribe_up(tribe_up_argv(tribe, chosen_label))
+            tribe_key = _resolve_tribe_key(tribe_key_file, tribe_key_stdin)
+            _run_tribe_up_with_key(tribe_key, chosen_label)
         report = join_mesh(
             store=store,
             directory=directory,
             run=run,
             label=chosen_label,
-            require_tracker=not bool(tribe),
+            require_tracker=not use_tribe,
         )
         _persist_mesh_config(chosen_label, report.addr)
         _print_join(report, yes=yes)
-        if tribe and report.tailnet_up:
+        if use_tribe and report.tailnet_up:
             console.print(
                 "\n[bold green]✓ In the trusted tribe.[/] "
                 "The operator can send a file. You receive it with "
@@ -1031,19 +1139,10 @@ def send_command(
         urls = [local.url]
         peer = tailscale_ipv4(_build_command_runner())
         if peer:
-            try:
-                remote = ParcelServer(path, parcel, peer, port)
-                remote.start()
-                servers.append(remote)
-                urls.append(remote.url)
-            except OSError:
-                for server in servers:
-                    server.stop()
-                servers.clear()
-                wide = ParcelServer(path, parcel, "0.0.0.0", port)
-                wide.start()
-                servers.append(wide)
-                urls = [f"http://{peer}:{wide.bound_port}/v1/file"]
+            remote = ParcelServer(path, parcel, peer, port)
+            remote.start()
+            servers.append(remote)
+            urls.append(remote.url)
         ticket = encode_ticket(parcel, urls)
     except OSError as exc:
         for server in servers:

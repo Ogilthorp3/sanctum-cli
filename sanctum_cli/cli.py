@@ -428,7 +428,10 @@ def uninstall_top(
 
 @app.command("logs", help="Tail the log file for a sanctum service.")
 def logs_top(
-    service: Annotated[str, typer.Argument(help="Service name. Use 'list' to see what's known.")],
+    service: Annotated[
+        str | None,
+        typer.Argument(help="Service name. Use 'list' or --list to see what's known."),
+    ] = None,
     follow: Annotated[bool, typer.Option("--follow/--once", "-f")] = True,
     lines: Annotated[int, typer.Option("--lines", "-n")] = 50,
     list_services: Annotated[bool, typer.Option("--list")] = False,
@@ -554,8 +557,15 @@ def keys_backup_top(
 @keys_app.command("restore", help="Restore Keychain entries from an encrypted `keys backup` bundle.")
 def keys_restore_top(
     path: Annotated[Path, typer.Argument(help="The encrypted bundle to restore from.")],
+    legacy: Annotated[
+        bool,
+        typer.Option(
+            "--legacy",
+            help="Allow decrypting legacy unauthenticated v1 (OpenSSL CBC) bundles.",
+        ),
+    ] = False,
 ) -> None:
-    keys_backup_cmd.keys_restore_command(path=path)
+    keys_backup_cmd.keys_restore_command(path=path, legacy=legacy)
 
 
 @app.command("code", help="Forced Claude routing — coding-oriented prompt.")
@@ -998,14 +1008,31 @@ def keychain_rotate_top(
     account: Annotated[
         str | None, typer.Option("--account", "-a", help="Account (default: sanctum).")
     ] = None,
-    value: Annotated[
-        str | None,
-        typer.Option("--value", help="Provide value. Omit to auto-generate 64 hex chars."),
-    ] = None,
+    prompt: Annotated[
+        bool,
+        typer.Option(
+            "--prompt",
+            "-p",
+            help="Prompt interactively for the new value (masked; never on argv).",
+        ),
+    ] = False,
+    value_stdin: Annotated[
+        bool,
+        typer.Option(
+            "--value-stdin",
+            help="Read the new value from stdin (requires --yes).",
+        ),
+    ] = False,
     yes: Annotated[bool, typer.Option("--yes", "-y")] = False,
 ) -> None:
     try:
-        keychain_command.keychain_rotate(service=service, account=account, new_value=value, yes=yes)
+        keychain_command.keychain_rotate(
+            service=service,
+            account=account,
+            prompt=prompt,
+            value_stdin=value_stdin,
+            yes=yes,
+        )
     except SanctumError as exc:
         _report(exc)
         raise typer.Exit(code=int(exc.exit_code)) from exc

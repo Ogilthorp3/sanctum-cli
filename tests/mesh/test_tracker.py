@@ -35,7 +35,10 @@ from sanctum_cli.mesh.tracker import (
     HttpTrackerTransport,
     TrackerHandlers,
     TrackerRegistry,
+    _announce_signing_message,
+    _register_signing_message,
     build_tracker_app,
+    serve,
 )
 from sanctum_cli.mesh.types import (
     ArtifactKind,
@@ -68,8 +71,16 @@ def _manifest(
     )
 
 
-def _identity() -> MeshIdentity:
-    return MeshIdentity(pubkey="ed25519:PUB", label="manoir", created="2026-07-05T00:00:00Z")
+class _FakeSigningIdentity:
+    """Minimal SigningIdentity backed by a real Ed25519Signer."""
+
+    def __init__(self, pubkey: str, private: str, signer: Ed25519Signer) -> None:
+        self.pubkey = pubkey
+        self._private = private
+        self._signer = signer
+
+    def sign(self, message: bytes) -> str:
+        return self._signer.sign(self._private, message)
 
 
 def _mint() -> tuple[Ed25519Signer, str, str]:
@@ -79,9 +90,68 @@ def _mint() -> tuple[Ed25519Signer, str, str]:
     return signer, public, private
 
 
+def _mint_identity(
+    label: str = "manoir", created: str = "2026-07-05T00:00:00Z"
+) -> tuple[_FakeSigningIdentity, MeshIdentity, Ed25519Signer, str]:
+    signer, public, private = _mint()
+    signing = _FakeSigningIdentity(public, private, signer)
+    identity = MeshIdentity(pubkey=public, label=label, created=created)
+    return signing, identity, signer, private
+
+
+def _identity() -> MeshIdentity:
+    return MeshIdentity(pubkey="ed25519:PUB", label="manoir", created="2026-07-05T00:00:00Z")
+
+
 def _sign_challenge(signer: Ed25519Signer, private: str, public: str, ts: str) -> str:
     """Sign the exact ``community-request:<pubkey>:<ts>`` challenge the gate rebuilds."""
     return signer.sign(private, f"community-request:{public}:{ts}".encode())
+
+
+def _signed_register_body(
+    signer: Ed25519Signer,
+    public: str,
+    private: str,
+    addr: str,
+    *,
+    label: str = "l",
+    created: str = "t",
+    ts: str | None = None,
+) -> dict[str, Any]:
+    stamp = ts if ts is not None else datetime.now(UTC).isoformat()
+    sig = signer.sign(
+        private, _register_signing_message(public, label, created, addr, stamp)
+    )
+    return {
+        "pubkey": public,
+        "label": label,
+        "created": created,
+        "addr": addr,
+        "ts": stamp,
+        "signature": sig,
+    }
+
+
+def _signed_announce_body(
+    signer: Ed25519Signer,
+    public: str,
+    private: str,
+    manifest: ChampionManifest,
+    addr: str,
+    *,
+    ts: str | None = None,
+) -> dict[str, Any]:
+    stamp = ts if ts is not None else datetime.now(UTC).isoformat()
+    sig = signer.sign(
+        private, _announce_signing_message(public, manifest.content_hash, addr, stamp)
+    )
+    return {
+        "manifest": manifest.to_dict(),
+        "addr": addr,
+        "pubkey": public,
+        "ts": stamp,
+        "signature": sig,
+    }
 
 
 def _self_signed_manifest(
@@ -110,49 +180,43 @@ def _seeded_registry(
     return reg
 
 
-def _registry_handler(registry: TrackerRegistry) -> Callable[[httpx.Request], httpx.Response]:
-    """An ``httpx.MockTransport`` handler that mirrors the real server's wire contract.
+def _registry_handler(
+    registry: TrackerRegistry, *, auth_token: str | None = None
+) -> Callable[[httpx.Request], httpx.Response]:
+    """An ``httpx.MockTransport`` handler wired to real ``TrackerHandlers``.
 
-    It routes each request straight into ``registry`` and JSON-encodes the answer
-    exactly as the aiohttp server does, so the client is driven over the true
-    HTTP/JSON path with zero network.
+    Routes each HTTP request into ``TrackerHandlers`` so the client and server
+    exercise the exact same wire + signature + Bearer token contract with zero
+    network sockets.
     """
+    handlers = TrackerHandlers(registry, auth_token=auth_token)
 
     def handle(request: httpx.Request) -> httpx.Response:
         path = request.url.path
+        headers = dict(request.headers)
+        query = dict(request.url.params)
+        json_body = json.loads(request.content) if request.content else None
+        stub = _StubRequest(json_body=json_body, query=query, headers=headers)
         if path == "/register":
-            body = json.loads(request.content)
-            ok = registry.register(body["pubkey"], body["label"], body["created"], body["addr"])
-            return httpx.Response(200, json={"ok": ok})
-        if path == "/announce":
-            body = json.loads(request.content)
-            registry.announce(ChampionManifest.from_dict(body["manifest"]), body["addr"])
-            return httpx.Response(200, json={"ok": True})
-        if path == "/peers":
-            return httpx.Response(200, json={"peers": registry.list_peers()})
-        if path == "/catalog":
-            return httpx.Response(
-                200, json={"champions": [m.to_dict() for m in registry.list_catalog()]}
-            )
-        if path == "/find":
-            ref = registry.find(request.url.params.get("hash", ""))
-            if ref is None:
-                return httpx.Response(404, json={"error": "not found"})
-            return httpx.Response(
-                200,
-                json={
-                    "content_hash": ref.content_hash,
-                    "seeders": ref.seeders,
-                    "manifest": ref.manifest.to_dict(),
-                },
-            )
-        if path == "/pulse":
-            body = json.loads(request.content)
-            ok = registry.record_pulse(NodeMacroMetrics.from_dict(body))
-            return httpx.Response(200, json={"ok": ok})
-        if path == "/analytics":
-            return httpx.Response(200, json=registry.analytics_summary().to_dict())
-        return httpx.Response(404, json={"error": "unknown route"})
+            resp = asyncio.run(handlers.register(stub))  # type: ignore[arg-type]
+        elif path == "/announce":
+            resp = asyncio.run(handlers.announce(stub))  # type: ignore[arg-type]
+        elif path == "/peers":
+            resp = asyncio.run(handlers.peers(stub))  # type: ignore[arg-type]
+        elif path == "/catalog":
+            resp = asyncio.run(handlers.catalog(stub))  # type: ignore[arg-type]
+        elif path == "/find":
+            resp = asyncio.run(handlers.find(stub))  # type: ignore[arg-type]
+        elif path == "/community":
+            resp = asyncio.run(handlers.community(stub))  # type: ignore[arg-type]
+        elif path == "/pulse":
+            resp = asyncio.run(handlers.pulse(stub))  # type: ignore[arg-type]
+        elif path == "/analytics":
+            resp = asyncio.run(handlers.analytics(stub))  # type: ignore[arg-type]
+        else:
+            return httpx.Response(404, json={"error": "unknown route"})
+        assert resp.body is not None
+        return httpx.Response(resp.status, content=bytes(resp.body))
 
     return handle
 
@@ -171,11 +235,17 @@ def transport_factory() -> Iterator[Callable[..., HttpTrackerTransport]]:
         registry: TrackerRegistry | None = None,
         *,
         handler: Callable[[httpx.Request], httpx.Response] | None = None,
+        identity: _FakeSigningIdentity | None = None,
+        auth_token: str | None = None,
     ) -> HttpTrackerTransport:
         route = handler if handler is not None else _registry_handler(registry or TrackerRegistry())
         client = httpx.Client(transport=httpx.MockTransport(route))
         clients.append(client)
-        return HttpTrackerTransport(_BASE, client=client)
+        if identity is None:
+            identity, _, _, _ = _mint_identity()
+        return HttpTrackerTransport(
+            _BASE, client=client, identity=identity, auth_token=auth_token
+        )
 
     yield _make
     for client in clients:
@@ -422,9 +492,10 @@ def test_registry_community_fresh_within_skew_window_is_ok() -> None:
 def test_client_register_returns_true_ack(
     transport_factory: Callable[..., HttpTrackerTransport],
 ) -> None:
+    signing, identity, _, _ = _mint_identity()
     reg = TrackerRegistry()
-    transport = transport_factory(reg)
-    assert transport.register(_identity(), "100.64.0.1") is True
+    transport = transport_factory(reg, identity=signing)
+    assert transport.register(identity, "100.64.0.1") is True
     # the request really reached the registry
     assert reg.list_peers() == ["100.64.0.1"]
 
@@ -435,8 +506,9 @@ def test_client_register_returns_false_when_tracker_declines(
     def decline(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"ok": False})
 
-    transport = transport_factory(handler=decline)
-    assert transport.register(_identity(), "100.64.0.1") is False
+    signing, identity, _, _ = _mint_identity()
+    transport = transport_factory(handler=decline, identity=signing)
+    assert transport.register(identity, "100.64.0.1") is False
 
 
 def test_client_register_raises_on_non_bool_ok(
@@ -445,9 +517,10 @@ def test_client_register_raises_on_non_bool_ok(
     def weird(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"ok": "yes"})
 
-    transport = transport_factory(handler=weird)
+    signing, identity, _, _ = _mint_identity()
+    transport = transport_factory(handler=weird, identity=signing)
     with pytest.raises(LocalError):
-        transport.register(_identity(), "100.64.0.1")
+        transport.register(identity, "100.64.0.1")
 
 
 def test_client_announce_posts_manifest_and_addr(
@@ -460,20 +533,26 @@ def test_client_announce_posts_manifest_and_addr(
         seen["body"] = json.loads(request.content)
         return httpx.Response(200, json={"ok": True})
 
-    transport = transport_factory(handler=capture)
-    manifest = _manifest("sha256:x")
+    signing, _identity_obj, signer, priv = _mint_identity()
+    transport = transport_factory(handler=capture, identity=signing)
+    manifest = _self_signed_manifest(signer, signing.pubkey, priv, content_hash="sha256:x")
     transport.announce(manifest, "100.64.0.7")
 
     assert seen["path"] == "/announce"
-    assert seen["body"] == {"manifest": manifest.to_dict(), "addr": "100.64.0.7"}
+    assert seen["body"]["manifest"] == manifest.to_dict()
+    assert seen["body"]["addr"] == "100.64.0.7"
+    assert seen["body"]["pubkey"] == signing.pubkey
+    assert isinstance(seen["body"]["ts"], str)
+    assert isinstance(seen["body"]["signature"], str)
 
 
 def test_client_announce_then_find_round_trips_through_registry(
     transport_factory: Callable[..., HttpTrackerTransport],
 ) -> None:
+    signing, _identity_obj, signer, priv = _mint_identity()
     reg = TrackerRegistry()
-    transport = transport_factory(reg)
-    manifest = _manifest("sha256:x")
+    transport = transport_factory(reg, identity=signing)
+    manifest = _self_signed_manifest(signer, signing.pubkey, priv, content_hash="sha256:x")
 
     transport.announce(manifest, "100.64.0.7")
     ref = transport.find("sha256:x")
@@ -744,10 +823,15 @@ class _StubRequest:
     """A minimal stand-in for ``web.Request`` covering what the handlers read."""
 
     def __init__(
-        self, *, json_body: dict[str, Any] | None = None, query: dict[str, str] | None = None
+        self,
+        *,
+        json_body: dict[str, Any] | None = None,
+        query: dict[str, str] | None = None,
+        headers: dict[str, str] | None = None,
     ) -> None:
         self._json_body = json_body
         self.query = dict(query or {})
+        self.headers = dict(headers or {})
 
     async def json(self) -> dict[str, Any]:
         assert self._json_body is not None
@@ -760,10 +844,11 @@ def _body(response: web.Response) -> Any:
 
 
 def test_handler_register_delegates_to_registry() -> None:
+    signer, public, private = _mint()
     reg = TrackerRegistry()
     handlers = TrackerHandlers(reg)
     req = _StubRequest(
-        json_body={"pubkey": "pk", "label": "l", "created": "t", "addr": "100.64.0.1"}
+        json_body=_signed_register_body(signer, public, private, "100.64.0.1")
     )
     response = asyncio.run(handlers.register(req))  # type: ignore[arg-type]
 
@@ -773,13 +858,16 @@ def test_handler_register_delegates_to_registry() -> None:
 
 
 def test_handler_announce_stores_then_find_returns_it() -> None:
+    signer, public, private = _mint()
     reg = TrackerRegistry()
     handlers = TrackerHandlers(reg)
-    manifest = _manifest("sha256:x")
+    manifest = _self_signed_manifest(signer, public, private, content_hash="sha256:x")
 
     announce_resp = asyncio.run(
         handlers.announce(
-            _StubRequest(json_body={"manifest": manifest.to_dict(), "addr": "100.64.0.9"}),  # type: ignore[arg-type]
+            _StubRequest(
+                json_body=_signed_announce_body(signer, public, private, manifest, "100.64.0.9")
+            ),  # type: ignore[arg-type]
         )
     )
     assert announce_resp.status == 200
@@ -1017,9 +1105,270 @@ def test_handlers_pulse_and_analytics() -> None:
     assert resp.status == 200
     assert json.loads(resp.body) == {"ok": True}
 
-    resp_analytics = asyncio.run(handlers.analytics(_StubRequest()))
+    resp_analytics = asyncio.run(handlers.analytics(_StubRequest()))  # type: ignore[arg-type]
     assert resp_analytics.status == 200
+    assert resp_analytics.body is not None
     res_data = json.loads(resp_analytics.body)
     assert res_data["total_nodes"] == 1
     assert res_data["countries"] == {"FR": 1}
     assert res_data["memory_tiers_gb"] == {"16GB": 1}
+
+
+# ─── M-CLI-4: authentication, ownership, replay & conflict defenses ─────
+
+
+def test_handler_register_rejects_missing_sig_bad_sig_stale_and_replay() -> None:
+    signer, public, private = _mint()
+    reg = TrackerRegistry()
+    handlers = TrackerHandlers(reg)
+
+    # Missing ts/signature -> 401
+    r_missing = asyncio.run(
+        handlers.register(
+            _StubRequest(
+                json_body={"pubkey": public, "label": "l", "created": "t", "addr": "100.64.0.1"}
+            )  # type: ignore[arg-type]
+        )
+    )
+    assert r_missing.status == 401
+
+    # Bad signature -> 403
+    bad_body = _signed_register_body(signer, public, private, "100.64.0.1")
+    bad_body["signature"] = "00" * 64
+    r_bad = asyncio.run(handlers.register(_StubRequest(json_body=bad_body)))  # type: ignore[arg-type]
+    assert r_bad.status == 403
+    assert _body(r_bad)["reason"] == "bad_signature"
+
+    # Stale timestamp -> 403
+    old_ts = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+    stale_body = _signed_register_body(signer, public, private, "100.64.0.1", ts=old_ts)
+    r_stale = asyncio.run(handlers.register(_StubRequest(json_body=stale_body)))  # type: ignore[arg-type]
+    assert r_stale.status == 403
+    assert _body(r_stale)["reason"] == "stale"
+
+    assert reg.list_peers() == []
+
+    # Valid registration succeeds once, then replay of exact same request fails -> 403
+    good_body = _signed_register_body(signer, public, private, "100.64.0.1")
+    r_ok = asyncio.run(handlers.register(_StubRequest(json_body=good_body)))  # type: ignore[arg-type]
+    assert r_ok.status == 200
+    r_replay = asyncio.run(handlers.register(_StubRequest(json_body=good_body)))  # type: ignore[arg-type]
+    assert r_replay.status == 403
+    assert _body(r_replay)["reason"] == "replayed"
+
+
+def test_handler_register_rejects_addr_hijack_and_allows_same_key() -> None:
+    signer_a, pub_a, priv_a = _mint()
+    signer_b, pub_b, priv_b = _mint()
+    reg = TrackerRegistry()
+    handlers = TrackerHandlers(reg)
+
+    r1 = asyncio.run(
+        handlers.register(
+            _StubRequest(json_body=_signed_register_body(signer_a, pub_a, priv_a, "100.64.0.5"))  # type: ignore[arg-type]
+        )
+    )
+    assert r1.status == 200
+
+    # Different key trying to hijack 100.64.0.5 -> rejected
+    r_hijack = asyncio.run(
+        handlers.register(
+            _StubRequest(json_body=_signed_register_body(signer_b, pub_b, priv_b, "100.64.0.5"))  # type: ignore[arg-type]
+        )
+    )
+    assert r_hijack.status == 403
+    assert _body(r_hijack)["reason"] == "addr_owned"
+    owner = reg.identity_for_addr("100.64.0.5")
+    assert owner is not None and owner.pubkey == pub_a
+
+    # Same key re-registering with a fresh timestamp -> allowed
+    r_same = asyncio.run(
+        handlers.register(
+            _StubRequest(
+                json_body=_signed_register_body(
+                    signer_a, pub_a, priv_a, "100.64.0.5", label="updated"
+                )
+            )  # type: ignore[arg-type]
+        )
+    )
+    assert r_same.status == 200
+
+
+def test_handler_announce_rejects_unauth_forged_spoofed_addr_and_conflict() -> None:
+    signer_a, pub_a, priv_a = _mint()
+    signer_b, pub_b, priv_b = _mint()
+    reg = TrackerRegistry()
+    handlers = TrackerHandlers(reg)
+
+    # Register A at 100.64.0.10
+    assert (
+        asyncio.run(
+            handlers.register(
+                _StubRequest(json_body=_signed_register_body(signer_a, pub_a, priv_a, "100.64.0.10"))  # type: ignore[arg-type]
+            )
+        ).status
+        == 200
+    )
+
+    good_manifest = _self_signed_manifest(signer_a, pub_a, priv_a, content_hash="sha256:champ1")
+
+    # Missing auth fields -> 401
+    r_unauth = asyncio.run(
+        handlers.announce(
+            _StubRequest(json_body={"manifest": good_manifest.to_dict(), "addr": "100.64.0.10"})  # type: ignore[arg-type]
+        )
+    )
+    assert r_unauth.status == 401
+
+    # B tries to announce under A's registered addr -> 403 addr_owned
+    b_manifest = _self_signed_manifest(signer_b, pub_b, priv_b, content_hash="sha256:champ_b")
+    r_spoof = asyncio.run(
+        handlers.announce(
+            _StubRequest(
+                json_body=_signed_announce_body(signer_b, pub_b, priv_b, b_manifest, "100.64.0.10")
+            )  # type: ignore[arg-type]
+        )
+    )
+    assert r_spoof.status == 403
+    assert _body(r_spoof)["reason"] == "addr_owned"
+
+    # Forged manifest signature even with valid request sig -> 403 bad_manifest_signature
+    forged_manifest = _manifest("sha256:forged", producer_pubkey=pub_a)
+    r_forged = asyncio.run(
+        handlers.announce(
+            _StubRequest(
+                json_body=_signed_announce_body(
+                    signer_a, pub_a, priv_a, forged_manifest, "100.64.0.10"
+                )
+            )  # type: ignore[arg-type]
+        )
+    )
+    assert r_forged.status == 403
+    assert _body(r_forged)["reason"] == "bad_manifest_signature"
+    assert reg.find("sha256:forged") is None
+
+    # Legitimate announce succeeds
+    r_ok = asyncio.run(
+        handlers.announce(
+            _StubRequest(
+                json_body=_signed_announce_body(
+                    signer_a, pub_a, priv_a, good_manifest, "100.64.0.10"
+                )
+            )  # type: ignore[arg-type]
+        )
+    )
+    assert r_ok.status == 200
+
+    # B tries to overwrite sha256:champ1 catalog entry with altered metadata -> 409 catalog_conflict
+    conflicting = _self_signed_manifest(signer_b, pub_b, priv_b, content_hash="sha256:champ1")
+    r_conflict = asyncio.run(
+        handlers.announce(
+            _StubRequest(
+                json_body=_signed_announce_body(
+                    signer_b, pub_b, priv_b, conflicting, "100.64.0.11"
+                )
+            )  # type: ignore[arg-type]
+        )
+    )
+    assert r_conflict.status == 409
+    assert _body(r_conflict)["reason"] == "catalog_conflict"
+    assert reg.catalog_entry("sha256:champ1") == good_manifest
+
+
+def test_handlers_enforce_bearer_token_on_mutating_routes() -> None:
+    signer, public, private = _mint()
+    reg = TrackerRegistry()
+    handlers = TrackerHandlers(reg, auth_token="secret-mesh-token")
+    manifest = _self_signed_manifest(signer, public, private, content_hash="sha256:tok1")
+    pulse_data = {
+        "node_id": "test-node",
+        "country": "CA",
+        "chip": "Apple M4",
+        "memory_gb": 32,
+        "os_version": "macOS 15.0",
+        "offline_ratio": 0.9,
+        "eval_baseline": 0.88,
+        "champions_seeded": 1,
+        "champions_adopted": 0,
+        "timestamp": "2026-09-15T00:00:00Z",
+    }
+
+    # Missing or wrong Bearer token -> 401 across register, announce, pulse
+    for fn, body in [
+        (handlers.register, _signed_register_body(signer, public, private, "100.64.0.1")),
+        (handlers.announce, _signed_announce_body(signer, public, private, manifest, "100.64.0.1")),
+        (handlers.pulse, pulse_data),
+    ]:
+        r_none = asyncio.run(fn(_StubRequest(json_body=body)))  # type: ignore[arg-type]
+        assert r_none.status == 401
+        r_wrong = asyncio.run(
+            fn(_StubRequest(json_body=body, headers={"Authorization": "Bearer wrong"}))  # type: ignore[arg-type]
+        )
+        assert r_wrong.status == 401
+
+    # Valid Bearer token succeeds
+    hdr = {"Authorization": "Bearer secret-mesh-token"}
+    assert (
+        asyncio.run(
+            handlers.register(
+                _StubRequest(
+                    json_body=_signed_register_body(signer, public, private, "100.64.0.1"),
+                    headers=hdr,
+                )  # type: ignore[arg-type]
+            )
+        ).status
+        == 200
+    )
+    assert (
+        asyncio.run(
+            handlers.announce(
+                _StubRequest(
+                    json_body=_signed_announce_body(
+                        signer, public, private, manifest, "100.64.0.1"
+                    ),
+                    headers=hdr,
+                )  # type: ignore[arg-type]
+            )
+        ).status
+        == 200
+    )
+    assert (
+        asyncio.run(
+            handlers.pulse(_StubRequest(json_body=pulse_data, headers=hdr))  # type: ignore[arg-type]
+        ).status
+        == 200
+    )
+
+
+def test_client_sends_bearer_token_and_requires_identity() -> None:
+    signing, identity, signer, priv = _mint_identity()
+    reg = TrackerRegistry()
+    client = httpx.Client(
+        transport=httpx.MockTransport(_registry_handler(reg, auth_token="mesh-secret"))
+    )
+    try:
+        unauth = HttpTrackerTransport(_BASE, client=client, identity=signing)
+        with pytest.raises(LocalError, match="HTTP 401"):
+            unauth.register(identity, "100.64.0.2")
+
+        authed = HttpTrackerTransport(
+            _BASE, client=client, identity=signing, auth_token="mesh-secret"
+        )
+        assert authed.register(identity, "100.64.0.2") is True
+        manifest = _self_signed_manifest(signer, signing.pubkey, priv, content_hash="sha256:authed")
+        authed.announce(manifest, "100.64.0.2")
+        assert authed.find("sha256:authed") is not None
+
+        no_id = HttpTrackerTransport(_BASE, client=client, auth_token="mesh-secret")
+        with pytest.raises(LocalError, match="mesh identity required"):
+            no_id.register(identity, "100.64.0.3")
+        with pytest.raises(LocalError, match="mesh identity required"):
+            no_id.announce(manifest, "100.64.0.3")
+    finally:
+        client.close()
+
+
+def test_serve_refuses_non_loopback_without_auth_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("SANCTUM_MESH_TRACKER_TOKEN", raising=False)
+    with pytest.raises(LocalError, match="non-loopback"):
+        serve(host="0.0.0.0", port=8765)

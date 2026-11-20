@@ -30,3 +30,66 @@ def test_revoke_uses_the_paired_account(monkeypatch):
     assert by_service["google-ai-api-key"] == "sanctum"
     assert by_service["bell-hub-admin"] == "admin"
     assert "sanctum-backup-key" not in by_service  # never revoked
+
+
+def test_untap_homebrew_uninstalls_formula_before_untap(monkeypatch):
+    import subprocess
+
+    calls = []
+
+    def fake_run(cmd, **_kwargs):
+        calls.append(list(cmd))
+        return subprocess.CompletedProcess(cmd, 0, "sanctum-cli 0.15.5\n", "")
+
+    monkeypatch.setattr(uninstall.shutil, "which", lambda _name: "/opt/homebrew/bin/brew")
+    monkeypatch.setattr(uninstall.subprocess, "run", fake_run)
+
+    assert uninstall._untap_homebrew() is True
+    assert calls == [
+        ["brew", "list", "--versions", "ogilthorp3/sanctum/sanctum-cli"],
+        ["brew", "uninstall", "ogilthorp3/sanctum/sanctum-cli"],
+        ["brew", "untap", "ogilthorp3/sanctum"],
+    ]
+
+
+def test_untap_homebrew_skips_uninstall_when_not_installed_and_handles_missing_brew(monkeypatch):
+    import subprocess
+
+    calls = []
+
+    def fake_run(cmd, **_kwargs):
+        calls.append(list(cmd))
+        if cmd[:2] == ["brew", "list"]:
+            return subprocess.CompletedProcess(cmd, 1, "", "")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(uninstall.shutil, "which", lambda _name: "/opt/homebrew/bin/brew")
+    monkeypatch.setattr(uninstall.subprocess, "run", fake_run)
+    assert uninstall._untap_homebrew() is True
+    assert calls == [
+        ["brew", "list", "--versions", "ogilthorp3/sanctum/sanctum-cli"],
+        ["brew", "untap", "ogilthorp3/sanctum"],
+    ]
+
+    monkeypatch.setattr(uninstall.shutil, "which", lambda _name: None)
+    assert uninstall._untap_homebrew() is False
+
+
+def test_uninstall_cli_dry_run_mentions_uninstall_and_untap(monkeypatch):
+    from typer.testing import CliRunner
+
+    from sanctum_cli.cli import app
+
+    called = False
+
+    def fail_run(*_a, **_kw):
+        nonlocal called
+        called = True
+        raise AssertionError("dry-run must not run subprocesses")
+
+    monkeypatch.setattr(uninstall.subprocess, "run", fail_run)
+    res = CliRunner().invoke(app, ["uninstall", "--dry-run", "--yes"])
+    assert res.exit_code == 0, res.output
+    assert "uninstall sanctum-cli" in res.output
+    assert "untap ogilthorp3/sanctum" in res.output
+    assert called is False

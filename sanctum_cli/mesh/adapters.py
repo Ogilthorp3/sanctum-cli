@@ -28,13 +28,15 @@ hex strings and are never written to logs, reprs, or error messages.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import re
+import shlex
 import subprocess
 import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
 from cryptography.exceptions import InvalidSignature
@@ -341,6 +343,76 @@ _DEFAULT_PROBE_PROMPTS: tuple[str, ...] = (
     "Reply with the single word: ok",
     "Summarize in one sentence: the sky is blue.",
 )
+_SSH_USER_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+_SSH_HOST_LABEL_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$")
+_REMOTE_DIR_RE = re.compile(r"^/[A-Za-z0-9._/-]+$")
+
+
+def _validate_ssh_host(host: str) -> tuple[str, str]:
+    """Validate an SSH host (optional ``user@`` + hostname/IP) against option/shell injection.
+
+    Returns ``(ssh_host, rsync_host)`` where IPv6 literals are bracketed for ``rsync``.
+    """
+    if not isinstance(host, str) or not host or any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in host):
+        raise LocalError(
+            f"invalid sandbox host {host!r}",
+            fix="set mesh.sandbox_host to a valid hostname or IP address",
+        )
+    if host.count("@") > 1:
+        raise LocalError(
+            f"invalid sandbox host {host!r}",
+            fix="set mesh.sandbox_host to a valid hostname or IP address",
+        )
+    if "@" in host:
+        user, bare = host.split("@", 1)
+        if not user or user.startswith("-") or not _SSH_USER_RE.fullmatch(user):
+            raise LocalError(
+                f"invalid sandbox host {host!r}",
+                fix="set mesh.sandbox_host to a valid hostname or IP address",
+            )
+    else:
+        user, bare = "", host
+
+    if not bare or bare.startswith("-") or ".." in bare or any(ch in bare for ch in (":", "/", "\\")):
+        # Allow pure IPv6 literals via ipaddress below (which contain ':')
+        try:
+            addr = ipaddress.ip_address(bare)
+        except ValueError as exc:
+            raise LocalError(
+                f"invalid sandbox host {host!r}",
+                fix="set mesh.sandbox_host to a valid hostname or IP address",
+            ) from exc
+        if addr.version != 6:
+            raise LocalError(
+                f"invalid sandbox host {host!r}",
+                fix="set mesh.sandbox_host to a valid hostname or IP address",
+            )
+        ssh_host = f"{user}@{bare}" if user else bare
+        rsync_host = f"{user}@[{bare}]" if user else f"[{bare}]"
+        return ssh_host, rsync_host
+
+    if not _SSH_HOST_LABEL_RE.fullmatch(bare):
+        raise LocalError(
+            f"invalid sandbox host {host!r}",
+            fix="set mesh.sandbox_host to a valid hostname or IP address",
+        )
+    normalized = f"{user}@{bare}" if user else bare
+    return normalized, normalized
+
+
+def _validate_remote_dir(remote_dir: str) -> str:
+    """Validate ``remote_dir`` is a safe absolute POSIX path with no traversal or metacharacters."""
+    if (
+        not isinstance(remote_dir, str)
+        or not _REMOTE_DIR_RE.fullmatch(remote_dir)
+        or "//" in remote_dir
+        or ".." in PurePosixPath(remote_dir).parts
+    ):
+        raise LocalError(
+            f"invalid sandbox remote_dir {remote_dir!r}",
+            fix="use a safe absolute POSIX path without '..' or whitespace",
+        )
+    return remote_dir.rstrip("/") or "/"
 
 
 class VmAirgapSandbox:
@@ -374,6 +446,7 @@ def vm_airgap_runner(
     host: str,
     remote_dir: str = "/tmp/sanctum-mesh-sandbox",
     probe_prompts: Sequence[str] | None = None,
+    timeout: float = 120.0,
 ) -> SandboxProbe:
     """Interim real air-gap sandbox: ship + probe the adapter on an isolated VM.
 
@@ -386,18 +459,30 @@ def vm_airgap_runner(
     Live boundary — the real path REQUIRES the air-gapped VM to be up. It is
     exercised by the 2-box acceptance test, NOT by ``make check``.
     """
+    ssh_host, rsync_host = _validate_ssh_host(host)
+    clean_remote_dir = _validate_remote_dir(remote_dir)
+    raw_adapter = str(adapter_path)
+    if any(ch in raw_adapter for ch in ("\x00", "\r", "\n")):
+        raise LocalError(
+            f"invalid adapter path {raw_adapter!r}",
+            fix="adapter path must not contain control characters",
+        )
+    local_src = f"{Path(adapter_path).resolve()}/"
     prompts = list(probe_prompts) if probe_prompts is not None else list(_DEFAULT_PROBE_PROMPTS)
-    request = json.dumps({"adapter_dir": remote_dir, "prompts": prompts})
+    request = json.dumps({"adapter_dir": clean_remote_dir, "prompts": prompts})
+    remote_cmd = shlex.join(["unshare", "-n", "sanctum-mesh-probe", "--json", request])
     try:
         subprocess.run(
-            ["rsync", "-a", "--delete", f"{adapter_path}/", f"{host}:{remote_dir}/"],
+            ["rsync", "-a", "--delete", "--", local_src, f"{rsync_host}:{clean_remote_dir}/"],
             capture_output=True,
+            timeout=timeout,
             check=True,
         )
         proc = subprocess.run(
-            ["ssh", host, "unshare", "-n", "sanctum-mesh-probe", "--json", request],
+            ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "--", ssh_host, remote_cmd],
             capture_output=True,
             text=True,
+            timeout=timeout,
             check=True,
         )
         report = json.loads(proc.stdout)
@@ -406,11 +491,18 @@ def vm_airgap_runner(
             egress_attempted=bool(report["egress_attempted"]),
             notes=str(report.get("notes", "")),
         )
-    except (subprocess.CalledProcessError, OSError, ValueError, KeyError, TypeError) as exc:
-        # A down/unreachable VM, a missing helper, or a garbled probe report must
-        # fail CLOSED as a clean LocalError — never a raw traceback, and never a
-        # silent "clean, no egress". The sandbox gate then rejects; the local
-        # champion stays authoritative. (Mirrors mlx_eval_runner's exit handling.)
+    except (
+        subprocess.CalledProcessError,
+        subprocess.TimeoutExpired,
+        OSError,
+        ValueError,
+        KeyError,
+        TypeError,
+    ) as exc:
+        # A down/unreachable VM, a timeout, a missing helper, or a garbled probe
+        # report must fail CLOSED as a clean LocalError — never a raw traceback,
+        # and never a silent "clean, no egress". The sandbox gate then rejects;
+        # the local champion stays authoritative. (Mirrors mlx_eval_runner's exit handling.)
         raise LocalError(
             f"air-gapped sandbox probe failed on {host}: {exc}",
             fix="ensure mesh.sandbox_host is a reachable VM with the sanctum-mesh-probe "

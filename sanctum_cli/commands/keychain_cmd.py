@@ -8,9 +8,9 @@ locked-keychain case explicitly).
 
 from __future__ import annotations
 
+import getpass
 import secrets
-import shutil
-import subprocess
+import sys
 from dataclasses import dataclass
 from typing import Annotated
 
@@ -19,11 +19,9 @@ from rich.console import Console
 from rich.table import Table
 
 from sanctum_cli import config, keychain
-from sanctum_cli.errors import LocalError
+from sanctum_cli.errors import LocalError, UserError
 
 console = Console()
-
-SECURITY_BIN = "/usr/bin/security"
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,23 +106,53 @@ def keychain_rotate(
         str | None,
         typer.Option("--account", "-a", help="Account name. Defaults to 'sanctum'."),
     ] = None,
-    new_value: Annotated[
-        str | None,
+    prompt: Annotated[
+        bool,
         typer.Option(
-            "--value",
-            help="Provide the new value. Omit to auto-generate a 64-char hex secret.",
+            "--prompt",
+            "-p",
+            help="Prompt interactively for the new value (masked; never on argv).",
         ),
-    ] = None,
+    ] = False,
+    value_stdin: Annotated[
+        bool,
+        typer.Option(
+            "--value-stdin",
+            help="Read the new value from stdin (requires --yes).",
+        ),
+    ] = False,
     yes: Annotated[
         bool, typer.Option("--yes", "-y", help="Skip confirmation prompt.")
     ] = False,
 ) -> None:
     """Replace a Keychain entry with a new value. Auto-generates 64 hex chars by default."""
-    if not shutil.which(SECURITY_BIN):
-        msg = f"missing {SECURITY_BIN}"
-        raise LocalError(msg)
+    if prompt and value_stdin:
+        raise UserError(
+            "pass either --prompt or --value-stdin, not both",
+            fix="choose one input channel",
+        )
+    if value_stdin and not yes:
+        raise UserError(
+            "--value-stdin requires --yes so confirmation does not consume stdin",
+            fix="re-run with --value-stdin --yes",
+        )
+
     acct = account or "sanctum"
-    value = new_value or secrets.token_hex(32)
+    auto_generated = not prompt and not value_stdin
+    if value_stdin:
+        value = sys.stdin.read().rstrip("\r\n")
+        if not value:
+            raise UserError("empty value read from stdin")
+    elif prompt:
+        v1 = getpass.getpass("New Keychain value: ")
+        v2 = getpass.getpass("Confirm new value: ")
+        if v1 != v2:
+            raise UserError("entered values differ")
+        if not v1:
+            raise UserError("new Keychain value must not be empty")
+        value = v1
+    else:
+        value = secrets.token_hex(32)
 
     if not yes:
         from rich.prompt import Confirm
@@ -136,21 +164,17 @@ def keychain_rotate(
             console.print("[dim]aborted[/]")
             raise typer.Exit(code=0)
 
-    proc = subprocess.run(
-        [SECURITY_BIN, "add-generic-password", "-a", acct, "-s", service, "-w", value, "-U"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if proc.returncode != 0:
-        msg = f"rotation failed: {proc.stderr.strip() or 'unknown error'}"
-        raise LocalError(msg)
+    try:
+        keychain.write(account=acct, service=service, value=value, update=True)
+    except LocalError as exc:
+        msg = f"rotation failed: {exc.message}"
+        raise LocalError(msg, fix=exc.fix) from exc
 
     console.print(
         f"[green]✓[/] rotated {service} / {acct}; "
         f"new value is {len(value)} chars long, kept in Keychain only."
     )
-    if new_value is None:
+    if auto_generated:
         # Auto-generated: print so the operator can mirror to 1Password
         from rich.panel import Panel
 

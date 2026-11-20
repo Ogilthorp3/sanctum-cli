@@ -29,7 +29,11 @@ so a change on one side that the other does not follow shows up as a test break.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
+import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
@@ -48,6 +52,7 @@ from sanctum_cli.mesh.types import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from types import ModuleType, TracebackType
 
     from aiohttp import web
@@ -62,7 +67,7 @@ if TYPE_CHECKING:
     # community gate prove ownership through one shape (a PQ signer drops in behind
     # it, and :func:`artifact.verify_signature` accepts it directly). Injectable so
     # the whole gate is unit-testable with a fake / real signer.
-    from sanctum_cli.mesh.artifact import VerifyFn
+    from sanctum_cli.mesh.artifact import SigningIdentity, VerifyFn
 
 __all__ = [
     "CommunityOutcome",
@@ -75,16 +80,54 @@ __all__ = [
 
 _DEFAULT_HOST = "127.0.0.1"
 _DEFAULT_PORT = 8765
+_ENV_TRACKER_TOKEN = "SANCTUM_MESH_TRACKER_TOKEN"
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+_MAX_SEEN_NONCES = 10_000
 
-# The signed community challenge is fresh within ±120 s of the tracker's clock —
-# a small window that bounds replay of a captured request (a tracker-issued nonce
-# is the stronger, deferred option).
+# The signed challenge is fresh within ±120 s of the tracker's clock —
+# a small window that bounds replay of a captured request (combined with a
+# bounded seen-signature replay cache on the handlers).
 _COMMUNITY_SKEW_SECONDS = 120.0
 # The typed 403 refusals the client will accept back on the wire; anything else
 # in a 403 body is a misbehaving tracker (honest-verify raise).
 _COMMUNITY_REFUSALS = frozenset({"bad_signature", "stale", "not_a_contributor"})
 # 403 must pass through _send (a legitimate refusal body), unlike a 5xx (raise).
 _COMMUNITY_ALLOW_STATUS = frozenset({int(httpx.codes.FORBIDDEN)})
+
+
+def _register_signing_message(
+    pubkey: str, label: str, created: str, addr: str, ts: str
+) -> bytes:
+    """Canonical bytes signed by a node for ``POST /register``."""
+    return f"sanctum-mesh-register\n{pubkey}\n{label}\n{created}\n{addr}\n{ts}".encode()
+
+
+def _announce_signing_message(pubkey: str, content_hash: str, addr: str, ts: str) -> bytes:
+    """Canonical bytes signed by a node for ``POST /announce``."""
+    return f"sanctum-mesh-announce\n{pubkey}\n{content_hash}\n{addr}\n{ts}".encode()
+
+
+def _normalize_token(token: str | None) -> str | None:
+    if token is None:
+        return None
+    stripped = token.strip()
+    return stripped or None
+
+
+def _bearer_matches(header_value: str | None, expected: str) -> bool:
+    """Constant-time comparison of an HTTP ``Authorization: Bearer <token>`` header."""
+    if not header_value:
+        return False
+    parts = header_value.split(None, 1)
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        return False
+    got = parts[1].strip()
+    if not got:
+        return False
+    return hmac.compare_digest(
+        hashlib.sha256(got.encode("utf-8")).digest(),
+        hashlib.sha256(expected.encode("utf-8")).digest(),
+    )
 
 
 @dataclass(frozen=True)
@@ -157,14 +200,35 @@ class TrackerRegistry:
         self._signal_invite = signal_invite if (signal_invite and signal_invite.strip()) else None
 
     def register(self, pubkey: str, label: str, created: str, addr: str) -> bool:
-        """Record ``(pubkey, label, created)`` at ``addr`` and ack (always True).
+        """Record ``(pubkey, label, created)`` at ``addr`` and ack.
 
-        Idempotent: re-registering an addr refreshes its identity and never
-        duplicates it in ``peers``.
+        Idempotent for the owning key: re-registering an addr with the same
+        ``pubkey`` refreshes its identity and never duplicates it in ``peers``.
+        If ``addr`` is already bound to a different ``pubkey``, returns ``False``
+        (fail-closed against address hijacking).
         """
+        existing = self._identities.get(addr)
+        if existing is not None and existing.pubkey != pubkey:
+            return False
         self._identities[addr] = MeshIdentity(pubkey=pubkey, label=label, created=created)
         self._add_peer(addr)
         return True
+
+    def identity_for_addr(self, addr: str) -> MeshIdentity | None:
+        """Return the registered :class:`MeshIdentity` for ``addr``, if any."""
+        return self._identities.get(addr)
+
+    def catalog_entry(self, content_hash: str) -> ChampionManifest | None:
+        """Return the catalogued :class:`ChampionManifest` for ``content_hash``, if any."""
+        return self._catalog.get(content_hash)
+
+    def verify_signature(self, pubkey: str, message: bytes, signature: str) -> bool:
+        """Verify ``signature`` over ``message`` using the registry's verify seam."""
+        return self._verify(pubkey, message, signature)
+
+    def verify_manifest_signature(self, manifest: ChampionManifest) -> bool:
+        """Verify ``manifest``'s self-signature using the registry's verify seam."""
+        return artifact.verify_signature(manifest, self._verify)
 
     def list_peers(self) -> list[str]:
         """Return a copy of the known peer addrs (insertion order, de-duplicated)."""
@@ -324,15 +388,39 @@ class HttpTrackerTransport:
         *,
         client: httpx.Client | None = None,
         timeout: float = 5.0,
+        identity: SigningIdentity | None = None,
+        identity_provider: Callable[[], SigningIdentity | None] | None = None,
+        auth_token: str | None = None,
     ) -> None:
         self._base = base_url.rstrip("/")
         self._timeout = timeout
+        self._identity = identity
+        self._identity_provider = identity_provider
+        self._auth_token = _normalize_token(auth_token)
         if client is None:
             self._client = httpx.Client(timeout=timeout)
             self._owns_client = True
         else:
             self._client = client
             self._owns_client = False
+
+    def _signing_identity(self, *, expected_pubkey: str | None = None) -> SigningIdentity:
+        candidate = (
+            self._identity
+            if self._identity is not None
+            else (self._identity_provider() if self._identity_provider is not None else None)
+        )
+        if candidate is None:
+            raise LocalError(
+                "mesh identity required for authenticated tracker write",
+                fix="run 'sanctum mesh join' to mint a mesh identity",
+            )
+        if expected_pubkey is not None and candidate.pubkey != expected_pubkey:
+            raise LocalError(
+                "mesh signing identity does not match the registered pubkey",
+                fix="re-run 'sanctum mesh join' with your node's identity",
+            )
+        return candidate
 
     # -- lifecycle -------------------------------------------------------
 
@@ -357,9 +445,18 @@ class HttpTrackerTransport:
     def register(self, identity: MeshIdentity, addr: str) -> bool:
         """Advertise ``identity`` at ``addr``; return the tracker's real ack.
 
+        Signs ``(pubkey, label, created, addr, ts)`` with this node's Ed25519
+        identity so the tracker proves key ownership on every registration.
         ``{"ok": true}`` → ``True``, ``{"ok": false}`` → ``False`` (a genuine
         refusal). Anything else — a non-2xx, a missing/non-bool ``ok`` — raises.
         """
+        signer = self._signing_identity(expected_pubkey=identity.pubkey)
+        ts = datetime.now(UTC).isoformat()
+        sig = signer.sign(
+            _register_signing_message(
+                identity.pubkey, identity.label, identity.created, addr, ts
+            )
+        )
         data = self._json(
             self._send(
                 "POST",
@@ -369,6 +466,8 @@ class HttpTrackerTransport:
                     "label": identity.label,
                     "created": identity.created,
                     "addr": addr,
+                    "ts": ts,
+                    "signature": sig,
                 },
             )
         )
@@ -404,7 +503,22 @@ class HttpTrackerTransport:
 
     def announce(self, manifest: ChampionManifest, addr: str) -> None:
         """Advertise that ``addr`` seeds ``manifest`` (raises on any non-2xx)."""
-        self._send("POST", "/announce", json_body={"manifest": manifest.to_dict(), "addr": addr})
+        signer = self._signing_identity()
+        ts = datetime.now(UTC).isoformat()
+        sig = signer.sign(
+            _announce_signing_message(signer.pubkey, manifest.content_hash, addr, ts)
+        )
+        self._send(
+            "POST",
+            "/announce",
+            json_body={
+                "manifest": manifest.to_dict(),
+                "addr": addr,
+                "pubkey": signer.pubkey,
+                "ts": ts,
+                "signature": sig,
+            },
+        )
 
     def find(self, content_hash: str) -> ArtifactRef | None:
         """Return the seeders + manifest for ``content_hash``.
@@ -520,9 +634,17 @@ class HttpTrackerTransport:
         transport-level failure) is an honest raise.
         """
         url = self._base + path
+        headers: dict[str, str] | None = None
+        if self._auth_token is not None:
+            headers = {"Authorization": f"Bearer {self._auth_token}"}
         try:
             resp = self._client.request(
-                method, url, json=json_body, params=params, timeout=self._timeout
+                method,
+                url,
+                json=json_body,
+                params=params,
+                headers=headers,
+                timeout=self._timeout,
             )
         except httpx.HTTPError as exc:
             raise LocalError(
@@ -603,24 +725,97 @@ def _json_response(payload: dict[str, Any], *, status: int = 200) -> web.Respons
 class TrackerHandlers:
     """aiohttp request handlers that delegate to a :class:`TrackerRegistry`.
 
-    Each handler is intentionally thin: parse the request, call the registry,
-    JSON-encode its answer. Grouped on a class (not closures) so every handler
-    can be unit-tested by awaiting it with a stub request — no live socket.
+    Each handler is intentionally thin: authenticate the request, parse it,
+    call the registry, JSON-encode its answer. Grouped on a class (not closures)
+    so every handler can be unit-tested by awaiting it with a stub request — no
+    live socket.
     """
 
-    def __init__(self, registry: TrackerRegistry) -> None:
+    def __init__(self, registry: TrackerRegistry, *, auth_token: str | None = None) -> None:
         self.registry = registry
+        self._auth_token = _normalize_token(auth_token)
+        self._seen_nonces: dict[tuple[str, str, str], datetime] = {}
+
+    def _require_bearer(self, request: web.Request) -> web.Response | None:
+        if self._auth_token is None:
+            return None
+        headers = getattr(request, "headers", None)
+        auth_header: str | None = None
+        if headers is not None:
+            auth_header = next(
+                (v for k, v in headers.items() if k.lower() == "authorization"),
+                None,
+            )
+        if not _bearer_matches(auth_header, self._auth_token):
+            return _json_response({"ok": False, "reason": "unauthorized"}, status=401)
+        return None
+
+    def _prune_seen_nonces(self, now: datetime) -> None:
+        cutoff = _COMMUNITY_SKEW_SECONDS * 2.0
+        expired = [
+            key
+            for key, seen_at in self._seen_nonces.items()
+            if abs((now - seen_at).total_seconds()) > cutoff
+        ]
+        for key in expired:
+            del self._seen_nonces[key]
+        while len(self._seen_nonces) >= _MAX_SEEN_NONCES:
+            oldest = next(iter(self._seen_nonces))
+            del self._seen_nonces[oldest]
+
+    def _is_replayed(self, pubkey: str, ts: str, signature: str, now: datetime) -> bool:
+        self._prune_seen_nonces(now)
+        return (pubkey, ts, signature) in self._seen_nonces
+
+    def _record_nonce(self, pubkey: str, ts: str, signature: str, now: datetime) -> None:
+        self._prune_seen_nonces(now)
+        self._seen_nonces[(pubkey, ts, signature)] = now
 
     async def register(self, request: web.Request) -> web.Response:
-        """``POST /register`` → ``{"ok": bool}`` (the registry's ack)."""
-        body = await request.json()
-        ok = self.registry.register(
-            str(body["pubkey"]),
-            str(body["label"]),
-            str(body["created"]),
-            str(body["addr"]),
-        )
-        return _json_response({"ok": ok})
+        """``POST /register`` → signed identity registration; ``{"ok": bool}``."""
+        if (unauth := self._require_bearer(request)) is not None:
+            return unauth
+        try:
+            body = await request.json()
+        except (ValueError, TypeError):
+            return _json_response({"ok": False, "reason": "invalid_json"}, status=400)
+        if not isinstance(body, dict):
+            return _json_response({"ok": False, "reason": "invalid_json"}, status=400)
+
+        pubkey = body.get("pubkey")
+        label = body.get("label")
+        created = body.get("created")
+        addr = body.get("addr")
+        ts = body.get("ts")
+        signature = body.get("signature")
+        if (
+            not isinstance(pubkey, str)
+            or not pubkey.strip()
+            or not isinstance(label, str)
+            or not isinstance(created, str)
+            or not isinstance(addr, str)
+            or not addr.strip()
+            or not isinstance(ts, str)
+            or not ts.strip()
+            or not isinstance(signature, str)
+            or not signature.strip()
+        ):
+            return _json_response({"ok": False, "reason": "unauthorized"}, status=401)
+
+        now = datetime.now(UTC)
+        if _challenge_is_stale(ts, now):
+            return _json_response({"ok": False, "reason": "stale"}, status=403)
+        if self._is_replayed(pubkey, ts, signature, now):
+            return _json_response({"ok": False, "reason": "replayed"}, status=403)
+        msg = _register_signing_message(pubkey, label, created, addr, ts)
+        if not self.registry.verify_signature(pubkey, msg, signature):
+            return _json_response({"ok": False, "reason": "bad_signature"}, status=403)
+        self._record_nonce(pubkey, ts, signature, now)
+
+        ok = self.registry.register(pubkey, label, created, addr)
+        if not ok:
+            return _json_response({"ok": False, "reason": "addr_owned"}, status=403)
+        return _json_response({"ok": True})
 
     async def peers(self, _request: web.Request) -> web.Response:
         """``GET /peers`` → ``{"peers": [...]}``."""
@@ -633,10 +828,59 @@ class TrackerHandlers:
         )
 
     async def announce(self, request: web.Request) -> web.Response:
-        """``POST /announce`` → store the manifest + seeder; ``{"ok": true}``."""
-        body = await request.json()
-        manifest = ChampionManifest.from_dict(body["manifest"])
-        self.registry.announce(manifest, str(body["addr"]))
+        """``POST /announce`` → signed announce + manifest verify + conflict check."""
+        if (unauth := self._require_bearer(request)) is not None:
+            return unauth
+        try:
+            body = await request.json()
+        except (ValueError, TypeError):
+            return _json_response({"ok": False, "reason": "invalid_json"}, status=400)
+        if not isinstance(body, dict):
+            return _json_response({"ok": False, "reason": "invalid_json"}, status=400)
+
+        pubkey = body.get("pubkey")
+        addr = body.get("addr")
+        ts = body.get("ts")
+        signature = body.get("signature")
+        manifest_raw = body.get("manifest")
+        if (
+            not isinstance(pubkey, str)
+            or not pubkey.strip()
+            or not isinstance(addr, str)
+            or not addr.strip()
+            or not isinstance(ts, str)
+            or not ts.strip()
+            or not isinstance(signature, str)
+            or not signature.strip()
+        ):
+            return _json_response({"ok": False, "reason": "unauthorized"}, status=401)
+        if not isinstance(manifest_raw, Mapping):
+            return _json_response({"ok": False, "reason": "invalid_manifest"}, status=400)
+        try:
+            manifest = ChampionManifest.from_dict(manifest_raw)
+        except (KeyError, ValueError, TypeError):
+            return _json_response({"ok": False, "reason": "invalid_manifest"}, status=400)
+
+        now = datetime.now(UTC)
+        if _challenge_is_stale(ts, now):
+            return _json_response({"ok": False, "reason": "stale"}, status=403)
+        if self._is_replayed(pubkey, ts, signature, now):
+            return _json_response({"ok": False, "reason": "replayed"}, status=403)
+        msg = _announce_signing_message(pubkey, manifest.content_hash, addr, ts)
+        if not self.registry.verify_signature(pubkey, msg, signature):
+            return _json_response({"ok": False, "reason": "bad_signature"}, status=403)
+        self._record_nonce(pubkey, ts, signature, now)
+
+        owner = self.registry.identity_for_addr(addr)
+        if owner is not None and owner.pubkey != pubkey:
+            return _json_response({"ok": False, "reason": "addr_owned"}, status=403)
+        if not self.registry.verify_manifest_signature(manifest):
+            return _json_response({"ok": False, "reason": "bad_manifest_signature"}, status=403)
+        existing_manifest = self.registry.catalog_entry(manifest.content_hash)
+        if existing_manifest is not None and existing_manifest != manifest:
+            return _json_response({"ok": False, "reason": "catalog_conflict"}, status=409)
+
+        self.registry.announce(manifest, addr)
         return _json_response({"ok": True})
 
     async def find(self, request: web.Request) -> web.Response:
@@ -679,8 +923,13 @@ class TrackerHandlers:
 
     async def pulse(self, request: web.Request) -> web.Response:
         """``POST /pulse`` → record anonymized node pulse; ``{"ok": true}``."""
-        body = await request.json()
-        metrics = NodeMacroMetrics.from_dict(body)
+        if (unauth := self._require_bearer(request)) is not None:
+            return unauth
+        try:
+            body = await request.json()
+            metrics = NodeMacroMetrics.from_dict(body)
+        except (ValueError, TypeError, KeyError):
+            return _json_response({"ok": False, "reason": "invalid_pulse"}, status=400)
         ok = self.registry.record_pulse(metrics)
         return _json_response({"ok": ok})
 
@@ -690,7 +939,11 @@ class TrackerHandlers:
         return _json_response(summary.to_dict())
 
 
-def build_tracker_app(registry: TrackerRegistry | None = None) -> web.Application:
+def build_tracker_app(
+    registry: TrackerRegistry | None = None,
+    *,
+    auth_token: str | None = None,
+) -> web.Application:
     """Wire the discovery + community routes to a fresh (or injected) :class:`TrackerRegistry`.
 
     Returns an ``aiohttp.web.Application`` ready for :func:`serve` (or for a test
@@ -699,7 +952,13 @@ def build_tracker_app(registry: TrackerRegistry | None = None) -> web.Applicatio
     ``POST /pulse``, and ``GET /analytics``.
     """
     web_mod = _aiohttp_web()
-    handlers = TrackerHandlers(registry if registry is not None else TrackerRegistry())
+    resolved_token = _normalize_token(
+        auth_token if auth_token is not None else os.environ.get(_ENV_TRACKER_TOKEN)
+    )
+    handlers = TrackerHandlers(
+        registry if registry is not None else TrackerRegistry(),
+        auth_token=resolved_token,
+    )
     app = cast("web.Application", web_mod.Application())
     app.router.add_post("/register", handlers.register)
     app.router.add_get("/peers", handlers.peers)
@@ -716,7 +975,30 @@ def serve(
     host: str = _DEFAULT_HOST,
     port: int = _DEFAULT_PORT,
     registry: TrackerRegistry | None = None,
+    *,
+    auth_token: str | None = None,
+    allow_unauthenticated_nonlocal: bool = False,
 ) -> None:  # pragma: no cover - blocking live server, exercised by the e2e drill
-    """Run the tracker app (blocking) on ``host:port`` — the real loopback server."""
+    """Run the tracker app (blocking) on ``host:port``.
+
+    Fails closed when binding a non-loopback ``host`` without a configured
+    Bearer ``auth_token`` (unless ``allow_unauthenticated_nonlocal=True``).
+    """
+    resolved_token = _normalize_token(
+        auth_token if auth_token is not None else os.environ.get(_ENV_TRACKER_TOKEN)
+    )
+    if (
+        host not in _LOOPBACK_HOSTS
+        and resolved_token is None
+        and not allow_unauthenticated_nonlocal
+    ):
+        raise LocalError(
+            f"refusing to serve mesh tracker on non-loopback host {host!r} without auth_token",
+            fix=f"set {_ENV_TRACKER_TOKEN} or pass auth_token, or bind 127.0.0.1",
+        )
     web_mod = _aiohttp_web()
-    web_mod.run_app(build_tracker_app(registry), host=host, port=port)
+    web_mod.run_app(
+        build_tracker_app(registry, auth_token=resolved_token),
+        host=host,
+        port=port,
+    )

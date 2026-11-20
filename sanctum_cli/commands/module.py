@@ -33,8 +33,8 @@ from __future__ import annotations
 import os
 import secrets as _secrets
 import shlex
-import shutil
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -47,7 +47,9 @@ from rich.text import Text
 
 from sanctum_cli import keychain
 from sanctum_cli.commands import uninstall as _uninstall
+from sanctum_cli.errors import LocalError
 from sanctum_cli.modules.manifest import (
+    SAFE_MODULE_NAME_RE,
     ManifestError,
     ModuleManifest,
     SecretGenerate,
@@ -62,8 +64,6 @@ if TYPE_CHECKING:
 module_app = typer.Typer(help="Inspect, install, and remove Sanctum modules.")
 
 console = Console()
-
-SECURITY_BIN = "/usr/bin/security"
 
 
 def _load_soak_result(module: str, result_path_template: str) -> SoakResult | None:
@@ -244,9 +244,13 @@ def install_module(
     operator-supplied and surfaced in ``InstallResult.must_supply``.
     """
     manifest = _resolve_manifest(source)
+    if not SAFE_MODULE_NAME_RE.fullmatch(manifest.module):
+        raise ManifestError(f"invalid module name {manifest.module!r}")
     target_dir = modules_dir if modules_dir is not None else _user_modules_dir()
     target_dir.mkdir(parents=True, exist_ok=True)
     dest = target_dir / f"{manifest.module}.module.yaml"
+    if dest.is_symlink() or dest.resolve().parent != target_dir.resolve():
+        raise ManifestError(f"refusing unsafe manifest destination: {dest}")
 
     # Serialize from the validated model so the on-disk copy is canonical and
     # round-trips through load_manifest (a different-author check vs. the raw
@@ -283,6 +287,24 @@ def install_module(
 # ─── core: uninstall ─────────────────────────────────────────────────
 
 
+def _validate_purge_path(raw: str) -> Path:
+    """Ensure a ``--purge`` target stays strictly inside ``~/.sanctum`` with no symlinks."""
+    home_sanctum = Path.home() / ".sanctum"
+    sanctum_root = home_sanctum.resolve()
+    p = Path(raw).expanduser()
+    resolved = p.resolve()
+    if resolved == sanctum_root or not resolved.is_relative_to(sanctum_root):
+        raise ManifestError(f"refusing to purge path outside ~/.sanctum: {raw!r}")
+    if home_sanctum.is_symlink() or p.is_symlink():
+        raise ManifestError(f"refusing to purge symlink path: {raw!r}")
+    for parent in p.parents:
+        if parent == home_sanctum:
+            break
+        if parent.is_symlink():
+            raise ManifestError(f"refusing to purge path with symlink ancestor: {raw!r}")
+    return p
+
+
 def uninstall_module(
     name: str,
     *,
@@ -306,9 +328,12 @@ def uninstall_module(
 
     Injected callables let tests assert against recorded calls without
     touching the real Keychain or launchd. Raises ``ManifestError`` for an
-    unknown module.
+    unknown module or unsafe purge path.
     """
     manifest = registry.get(name)
+    if not SAFE_MODULE_NAME_RE.fullmatch(manifest.module):
+        raise ManifestError(f"invalid module name {manifest.module!r}")
+    purge_targets = [_validate_purge_path(raw) for raw in manifest.uninstall.remove_paths] if purge else []
     result = UninstallResult(name=name)
 
     # 1. bootout labels — resolve the launchd domain per service kind.
@@ -334,15 +359,18 @@ def uninstall_module(
     # 3. rename the installed manifest file (recoverable)
     target_dir = modules_dir if modules_dir is not None else _user_modules_dir()
     installed = target_dir / f"{manifest.module}.module.yaml"
-    if installed.is_file() and rename_path(installed, manifest.uninstall.rename_suffix):
+    if (
+        installed.is_file()
+        and not installed.is_symlink()
+        and installed.resolve().parent == target_dir.resolve()
+        and rename_path(installed, manifest.uninstall.rename_suffix)
+    ):
         result.renamed.append(str(installed))
 
-    # 4. purge-only: remove declared paths
-    if purge:
-        for raw in manifest.uninstall.remove_paths:
-            p = Path(raw).expanduser()
-            if remove_path(p):
-                result.removed.append(str(p))
+    # 4. purge-only: remove declared paths (pre-validated above)
+    for p in purge_targets:
+        if remove_path(p):
+            result.removed.append(str(p))
 
     return result
 
@@ -387,39 +415,29 @@ def _bootout_full_target(target: str) -> None:
 def _real_keychain_mint(account: str, service: str) -> None:
     """Mint a fresh 64-hex-char secret into the login Keychain.
 
-    Shells ``security add-generic-password -U`` exactly like
-    ``keychain rotate`` so the boundary stays auditable. Raises
-    ``ManifestError`` if the ``security`` binary is missing or the write
-    fails.
-
-    Security note: the minted secret is passed as the ``-w`` argv to
-    ``security``.  It is therefore transiently visible via ``ps`` for the
-    duration of the subprocess call — the same exposure as ``sanctum
-    keychain rotate``.  The macOS ``security`` CLI has no stdin mode for
-    ``add-generic-password``, so argv is the only available channel.  This
-    matches the repo's secrets-opsec doctrine: short-lived argv exposure is
-    accepted for minting; operators must not run ``ps`` during the call.
+    Delegates to :func:`sanctum_cli.keychain.write` (which writes via
+    ``security -i`` stdin so the minted secret never appears in process
+    ``argv``). Raises ``ManifestError`` if the write fails.
     """
-    if not shutil.which(SECURITY_BIN):
-        raise ManifestError(
-            f"missing {SECURITY_BIN}; install Xcode Command Line Tools"
-        )
     value = _secrets.token_hex(32)  # 64 hex chars
-    proc = subprocess.run(
-        [SECURITY_BIN, "add-generic-password", "-a", account, "-s", service, "-w", value, "-U"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if proc.returncode != 0:
-        raise ManifestError(
-            f"keychain mint failed for {service}: {proc.stderr.strip() or 'unknown error'}"
-        )
+    try:
+        keychain.write(account=account, service=service, value=value, update=True)
+    except LocalError as exc:
+        raise ManifestError(f"keychain mint failed for {service}: {exc.message}") from exc
 
 
 def _real_remove_path(path: Path) -> bool:
     """Rename *path* to a ``.purged-<utc-stamp>`` sibling (recoverable, not a
-    hard delete). Returns True iff the path existed and was renamed."""
+    hard delete). Returns True iff the path existed, is safely within
+    ``~/.sanctum``, is not a symlink, and was renamed."""
+    if path.is_symlink():
+        console.print(f"  [yellow]refusing to remove symlink {path}[/]")
+        return False
+    sanctum_root = (Path.home() / ".sanctum").resolve()
+    resolved = path.resolve()
+    if resolved == sanctum_root or not resolved.is_relative_to(sanctum_root):
+        console.print(f"  [yellow]refusing to remove path outside ~/.sanctum: {path}[/]")
+        return False
     if not path.exists():
         return False
     stamp = datetime.now(UTC).strftime("%Y-%m-%d-%H%M%S")
@@ -481,8 +499,12 @@ def install_command(
         for svc in result.must_supply:
             console.print(
                 f"    · {svc}  →  "
-                f"sanctum keychain rotate {svc} --value <your-value>"
+                f"sanctum keychain rotate {svc} --prompt"
             )
+
+
+def _is_interactive_tty() -> bool:
+    return sys.stdin.isatty()
 
 
 @module_app.command("uninstall", help="Tear down a module (bootout, revoke, rename).")
@@ -492,9 +514,32 @@ def uninstall_command(
         bool,
         typer.Option("--purge", help="Also remove the module's declared remove_paths."),
     ] = False,
+    yes: Annotated[
+        bool,
+        typer.Option("--yes", "-y", help="Skip confirmation prompt for --purge."),
+    ] = False,
 ) -> None:
     """Run the module's manifest teardown via the shared global primitives."""
     registry = ModuleRegistry.discover()
+    try:
+        manifest = registry.get(name)
+    except ManifestError as exc:
+        console.print(str(exc))
+        raise typer.Exit(2) from exc
+
+    if purge and not yes:
+        if not _is_interactive_tty():
+            console.print("[red]--purge requires --yes in non-interactive mode.[/]")
+            raise typer.Exit(2)
+        for raw in manifest.uninstall.remove_paths:
+            console.print(f"  [yellow]will remove:[/] {raw}")
+        if not typer.confirm(
+            f"Purge {len(manifest.uninstall.remove_paths)} declared path(s) for '{name}'?",
+            default=False,
+        ):
+            console.print("[dim]aborted[/]")
+            raise typer.Exit(0)
+
     try:
         result = uninstall_module(
             name,

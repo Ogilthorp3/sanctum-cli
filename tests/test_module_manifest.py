@@ -52,3 +52,26 @@ def test_load_manifest_raises_manifest_error_on_invalid_yaml(tmp_path):
         pass  # expected
     except yaml.YAMLError:
         pytest.fail("load_manifest should wrap YAMLError in ManifestError, not re-raise raw")
+
+
+@pytest.mark.parametrize(
+    "bad_name",
+    ["../evil", "a/b", "..", ".hidden", "", "a b", "foo\\bar", "a" * 65],
+)
+def test_manifest_rejects_unsafe_module_name(tmp_path, bad_name: str) -> None:
+    import yaml
+
+    bad = {**VALID, "module": bad_name, "uninstall": {**VALID["uninstall"]}}
+    with pytest.raises(ManifestError, match="invalid module name"):
+        ModuleManifest.model_validate(bad)
+
+    yml = tmp_path / "badname.module.yaml"
+    yml.write_text(yaml.safe_dump(bad), encoding="utf-8")
+    with pytest.raises(ManifestError, match="invalid module name"):
+        load_manifest(yml)
+
+
+def test_manifest_rejects_unsafe_rename_suffix() -> None:
+    bad = {**VALID, "uninstall": {**VALID["uninstall"], "rename_suffix": "../escape"}}
+    with pytest.raises(ManifestError, match=r"invalid uninstall\.rename_suffix"):
+        ModuleManifest.model_validate(bad)

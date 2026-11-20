@@ -338,11 +338,17 @@ def scaffold_instance(path: Path | None = None, *, name: str | None = None) -> P
     """
     target = path or instance_path()
     target.parent.mkdir(parents=True, exist_ok=True)
-    if name:
-        chosen_name, slug = name, slugify_name(name)
+    cleaned = name.strip() if name else ""
+    if cleaned:
+        chosen_name, slug = cleaned, slugify_name(cleaned)
     else:
         chosen_name, slug = _default_identity()
-    target.write_text(f"instance:\n  name: {chosen_name}\n  slug: {slug}\n", encoding="utf-8")
+    rendered = yaml.safe_dump(
+        {"instance": {"name": chosen_name, "slug": slug}},
+        sort_keys=False,
+        allow_unicode=True,
+    )
+    target.write_text(rendered, encoding="utf-8")
     return target
 
 

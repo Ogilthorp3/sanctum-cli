@@ -31,6 +31,7 @@ What it never touches:
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
@@ -159,9 +160,29 @@ def _revoke_keychain_entries() -> list[str]:
 
 
 def _untap_homebrew() -> bool:
+    """Uninstall ``ogilthorp3/sanctum/sanctum-cli`` if present, then untap ``ogilthorp3/sanctum``."""
+    if not shutil.which("brew"):
+        return False
+    installed = subprocess.run(
+        ["brew", "list", "--versions", "ogilthorp3/sanctum/sanctum-cli"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if installed.returncode == 0:
+        uninstalled = subprocess.run(
+            ["brew", "uninstall", "ogilthorp3/sanctum/sanctum-cli"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if uninstalled.returncode != 0:
+            return False
     result = subprocess.run(
         ["brew", "untap", "ogilthorp3/sanctum"],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
+        check=False,
     )
     return result.returncode == 0
 
@@ -208,7 +229,7 @@ def uninstall_command(
         "[dim]Will[/]:",
         "  · bootout every haus.sanctum.* LaunchAgent + rename plists .uninstalled-YYYY-MM-DD",
         "  · revoke sanctum Keychain entries (OpenRouter, Anthropic, Gemini, R2, etc.)",
-        "  · untap ogilthorp3/sanctum from Homebrew",
+        "  · uninstall sanctum-cli + untap ogilthorp3/sanctum from Homebrew",
         "  · rename SanctumBridge.app + SanctumLauncher.app with .uninstalled suffix",
         "",
         "[dim]Will NOT touch[/]:",
@@ -249,11 +270,11 @@ def uninstall_command(
     revoked = _revoke_keychain_entries()
     console.print(f"  revoked {len(revoked)} entry(ies)")
 
-    console.print("[bold]Step 3.[/] Homebrew tap")
+    console.print("[bold]Step 3.[/] Homebrew package & tap")
     if _untap_homebrew():
-        console.print("  untapped ogilthorp3/sanctum")
+        console.print("  uninstalled sanctum-cli and untapped ogilthorp3/sanctum")
     else:
-        console.print("  [dim]tap not present or already untapped[/]")
+        console.print("  [dim]brew/tap not present or uninstall/untap skipped[/]")
 
     console.print("[bold]Step 4.[/] App bundles")
     renamed_apps = _rename_app_bundles()
@@ -268,7 +289,7 @@ def uninstall_command(
     console.print()
     body = (
         "[bold green]Uninstall complete.[/]\n\n"
-        "Sanctum services are stopped. The brew tap is removed. Your data was preserved at ~/.sanctum/ "
+        "Sanctum services are stopped. The brew formula and tap are removed. Your data was preserved at ~/.sanctum/ "
         "(unless you used --purge — in which case it's at ~/.sanctum.purged-…, recoverable for ~30 days).\n\n"
         "To reinstall: [cyan]brew install ogilthorp3/sanctum/sanctum-cli && sanctum onboard --recipe family[/]"
     )

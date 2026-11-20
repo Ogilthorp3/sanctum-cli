@@ -45,14 +45,24 @@ def test_client_secret_regex() -> None:
 
 
 def test_full_wizard_happy_path(
-    minimal_instance_yaml: Path, monkeypatch: pytest.MonkeyPatch
+    minimal_instance_yaml: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setenv("SANCTUM_INSTANCE_FILE", str(minimal_instance_yaml))
+    rclone_conf = tmp_path / "rclone.conf"
+    cmds: list[list[str]] = []
 
     def fake_run(cmd, **_kwargs):  # type: ignore[no-untyped-def]
-        # All rclone subcommands and security calls succeed
+        cmds.append(list(cmd))
         if "listremotes" in cmd:
             return _completed(stdout="")  # no existing remote
+        if cmd[:3] == ["rclone", "config", "file"]:
+            return _completed(stdout=f"Configuration file is stored at:\n{rclone_conf}\n")
+        if cmd[:3] == ["rclone", "config", "create"]:
+            rclone_conf.write_text(
+                f"[{gdrive.RCLONE_REMOTE}]\ntype = drive\nclient_id = {VALID_CLIENT_ID}\n",
+                encoding="utf-8",
+            )
+            rclone_conf.chmod(0o600)
         return _completed()
 
     def fake_prompt(label, *, validator, hint, password=False, max_attempts=3):  # type: ignore[no-untyped-def]
@@ -67,6 +77,7 @@ def test_full_wizard_happy_path(
         patch("sanctum_cli.backends.gdrive.webbrowser.open", return_value=True),
         patch("sanctum_cli.backends.gdrive.keychain.exists", return_value=True),
         patch("sanctum_cli.backends.gdrive.keychain.read", return_value="passphrase"),
+        patch("sanctum_cli.backends.gdrive.keychain.write", return_value=None),
     ):
         result = runner.invoke(
             app, ["cloud", "setup", "--backend", "gdrive", "--no-open", "--no-persist"]
@@ -74,13 +85,17 @@ def test_full_wizard_happy_path(
 
     assert result.exit_code == 0, result.stdout + (result.stderr or "")
     assert "done" in result.stdout.lower() or "OAuth complete" in result.stdout
+    for cmd in cmds:
+        assert VALID_CLIENT_SECRET not in cmd
+    conf_text = rclone_conf.read_text(encoding="utf-8")
+    assert f"client_secret = {VALID_CLIENT_SECRET}" in conf_text
+    assert (rclone_conf.stat().st_mode & 0o777) == 0o600
 
 
 def test_wizard_promotes_to_secondary_when_primary_present(
     full_instance_yaml: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """When primary is already set (B2), the gdrive wizard fills secondary."""
-    # Copy the full_instance_yaml content but strip secondary so this slot is open
     import yaml as _yaml
 
     src_text = full_instance_yaml.read_text()
@@ -91,9 +106,13 @@ def test_wizard_promotes_to_secondary_when_primary_present(
     target.write_text(_yaml.safe_dump(parsed), encoding="utf-8")
     monkeypatch.setenv("SANCTUM_INSTANCE_FILE", str(target))
 
+    rclone_conf = tmp_path / "rclone.conf"
+
     def fake_run(cmd, **_kwargs):  # type: ignore[no-untyped-def]
         if "listremotes" in cmd:
             return _completed(stdout="")
+        if cmd[:3] == ["rclone", "config", "file"]:
+            return _completed(stdout=f"Configuration file is stored at:\n{rclone_conf}\n")
         return _completed()
 
     def fake_prompt(label, *, validator, hint, password=False, max_attempts=3):  # type: ignore[no-untyped-def]
@@ -108,6 +127,7 @@ def test_wizard_promotes_to_secondary_when_primary_present(
         patch("sanctum_cli.backends.gdrive.webbrowser.open", return_value=True),
         patch("sanctum_cli.backends.gdrive.keychain.exists", return_value=True),
         patch("sanctum_cli.backends.gdrive.keychain.read", return_value="passphrase"),
+        patch("sanctum_cli.backends.gdrive.keychain.write", return_value=None),
     ):
         result = runner.invoke(
             app, ["cloud", "setup", "--backend", "gdrive", "--no-open"]
@@ -144,3 +164,30 @@ def test_wizard_preflight_rclone_missing(
     assert result.exit_code == 1
     combined = result.stdout + (result.stderr or "")
     assert "rclone" in combined.lower()
+
+
+def test_inject_rclone_client_secret_rejects_encrypted_config(tmp_path: Path) -> None:
+    from sanctum_cli.errors import UserError
+
+    conf = tmp_path / "rclone.conf"
+    conf.write_text("RCLONE_ENCRYPT_V0:abcdef\n", encoding="utf-8")
+    try:
+        gdrive._inject_rclone_client_secret(conf, gdrive.RCLONE_REMOTE, VALID_CLIENT_SECRET)
+    except UserError as exc:
+        assert "encrypted" in exc.message.lower()
+    else:
+        raise AssertionError("expected UserError on encrypted rclone.conf")
+
+
+def test_inject_rclone_client_secret_preserves_other_sections_at_0600(tmp_path: Path) -> None:
+    conf = tmp_path / "rclone.conf"
+    conf.write_text(
+        "[other-remote]\ntype = s3\n\n[gdrive-sanctum]\ntype = drive\nclient_secret = old\n",
+        encoding="utf-8",
+    )
+    gdrive._inject_rclone_client_secret(conf, gdrive.RCLONE_REMOTE, VALID_CLIENT_SECRET)
+    text = conf.read_text(encoding="utf-8")
+    assert "[other-remote]\ntype = s3\n" in text
+    assert f"client_secret = {VALID_CLIENT_SECRET}" in text
+    assert "client_secret = old" not in text
+    assert (conf.stat().st_mode & 0o777) == 0o600

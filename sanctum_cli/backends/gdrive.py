@@ -20,13 +20,15 @@ runs unattended.
 
 from __future__ import annotations
 
+import os
 import re
+import secrets
 import shutil
 import subprocess
 import webbrowser
 from dataclasses import dataclass
 from datetime import UTC
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 from rich.console import Console
 from rich.panel import Panel
@@ -43,9 +45,6 @@ from sanctum_cli.backends.b2 import (  # reuse helpers
     _round_trip,
 )
 from sanctum_cli.errors import LocalError, UserError
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 console = Console()
 
@@ -150,8 +149,103 @@ def _walk_console(auto_open: bool) -> None:
 # ─── rclone wiring ──────────────────────────────────────────────────
 
 
+def _rclone_config_path() -> Path:
+    """Discover the active rclone config path via ``rclone config file``."""
+    proc = subprocess.run(
+        ["rclone", "config", "file"],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=RCLONE_TIMEOUT_S,
+    )
+    if proc.returncode != 0:
+        msg = f"rclone config file failed: {proc.stderr.strip() or 'unknown'}"
+        raise LocalError(msg)
+    lines = [ln.strip() for ln in proc.stdout.splitlines() if ln.strip()]
+    if not lines:
+        msg = "rclone config file returned empty path"
+        raise LocalError(msg)
+    return Path(lines[-1]).expanduser()
+
+
+def _inject_rclone_client_secret(
+    conf_path: Path, remote_name: str, client_secret: str
+) -> None:
+    """Write ``client_secret`` into ``[remote_name]`` in ``rclone.conf`` at mode ``0600``."""
+    if any(ch in client_secret for ch in ("\r", "\n", "\x00")):
+        raise UserError(
+            "client_secret contains invalid control characters",
+            fix="paste a single-line OAuth client_secret",
+        )
+    existing = conf_path.read_text(encoding="utf-8") if conf_path.exists() else ""
+    if existing.lstrip().startswith("RCLONE_ENCRYPT_V0:"):
+        raise UserError(
+            "encrypted rclone.conf is not supported for automatic secret injection",
+            fix="decrypt rclone.conf temporarily or add client_secret via `rclone config`",
+        )
+
+    lines = existing.splitlines(keepends=True)
+    header = f"[{remote_name}]"
+    new_line = f"client_secret = {client_secret}\n"
+    out_lines: list[str] = []
+    in_target = False
+    found_section = False
+    replaced = False
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            if in_target and not replaced:
+                out_lines.append(new_line)
+                replaced = True
+            in_target = stripped == header
+            if in_target:
+                found_section = True
+            out_lines.append(line)
+            continue
+        if in_target and re.match(r"^\s*client_secret\s*=", line):
+            if not replaced:
+                out_lines.append(new_line)
+                replaced = True
+            continue
+        out_lines.append(line)
+
+    if in_target and not replaced:
+        if out_lines and not out_lines[-1].endswith("\n"):
+            out_lines[-1] += "\n"
+        out_lines.append(new_line)
+        replaced = True
+    elif not found_section:
+        if out_lines and not out_lines[-1].endswith("\n"):
+            out_lines[-1] += "\n"
+        if out_lines:
+            out_lines.append("\n")
+        out_lines.extend([f"{header}\n", new_line])
+
+    updated = "".join(out_lines)
+    conf_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = conf_path.with_name(f".{conf_path.name}.{secrets.token_hex(6)}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        try:
+            os.fchmod(fd, 0o600)
+        except Exception:
+            os.close(fd)
+            raise
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(updated)
+        tmp.replace(conf_path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
 def _rclone_config_create(client_id: str, client_secret: str) -> None:
-    """Create the gdrive-sanctum remote non-interactively."""
+    """Create the gdrive-sanctum remote non-interactively without secret in argv."""
+    if any(ch in client_secret for ch in ("\r", "\n", "\x00")):
+        raise UserError(
+            "client_secret contains invalid control characters",
+            fix="paste a single-line OAuth client_secret",
+        )
     proc = subprocess.run(
         [
             "rclone",
@@ -161,8 +255,6 @@ def _rclone_config_create(client_id: str, client_secret: str) -> None:
             "drive",
             "client_id",
             client_id,
-            "client_secret",
-            client_secret,
             "scope",
             "drive",
             "config_is_local",
@@ -176,6 +268,7 @@ def _rclone_config_create(client_id: str, client_secret: str) -> None:
     if proc.returncode != 0:
         msg = f"rclone config create failed: {proc.stderr.strip() or 'unknown'}"
         raise UserError(msg)
+    _inject_rclone_client_secret(_rclone_config_path(), RCLONE_REMOTE, client_secret)
 
 
 def _rclone_reconnect() -> None:

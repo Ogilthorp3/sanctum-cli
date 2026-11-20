@@ -128,3 +128,30 @@ def test_gemini_provider_invalid_via_rejected(tmp_path: Path) -> None:
     with pytest.raises(ConfigError) as ei:
         config.load(target)
     assert "gemini" in ei.value.message
+
+
+@pytest.mark.parametrize(
+    "tricky_name",
+    [
+        "Home: 2026",
+        "true",
+        "123",
+        "Evil\ncli:\n  default_provider: gemini",
+    ],
+)
+def test_scaffold_instance_safe_yaml_quoting_and_no_injection(
+    tmp_path: Path, tricky_name: str
+) -> None:
+    target = tmp_path / "instance.yaml"
+    config.scaffold_instance(target, name=tricky_name)
+    cfg = config.load(target)
+    assert cfg.instance.name == tricky_name
+    assert cfg.cli.default_provider == "claude"
+
+
+def test_scaffold_instance_whitespace_only_falls_back_to_default(tmp_path: Path) -> None:
+    target = tmp_path / "instance.yaml"
+    config.scaffold_instance(target, name="   \t\n  ")
+    cfg = config.load(target)
+    assert cfg.instance.name
+    assert cfg.instance.slug

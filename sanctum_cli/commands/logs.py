@@ -45,9 +45,9 @@ LOG_MAP: dict[str, list[Path]] = {
 
 def logs_command(
     service: Annotated[
-        str,
+        str | None,
         typer.Argument(help="Service name. `sanctum logs --list` to see all known services."),
-    ],
+    ] = None,
     follow: Annotated[
         bool, typer.Option("--follow/--once", "-f", help="Stream (default) or one-shot snapshot."),
     ] = True,
@@ -65,6 +65,11 @@ def logs_command(
                 marker = "✓" if p.is_file() else "·"
                 console.print(f"  {marker}  {name:18s}  {p}")
         return
+
+    if not service:
+        console.print("[red]missing service name.[/]")
+        console.print("Run `sanctum logs --list` to see known services.")
+        raise typer.Exit(code=2)
 
     paths: list[Path] | None = LOG_MAP.get(service.lower())
     if not paths:

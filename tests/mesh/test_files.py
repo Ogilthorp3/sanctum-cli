@@ -105,3 +105,12 @@ def test_tailscale_ipv4_ignores_other_addresses() -> None:
 
     assert tailscale_ipv4(run) == "100.64.1.8"
     assert tailscale_ipv4(lambda _argv: "") is None
+
+
+@pytest.mark.parametrize("wildcard", ["0.0.0.0", "::"])
+def test_parcel_server_refuses_wildcard_bind(tmp_path, wildcard: str) -> None:
+    source = tmp_path / "pkg.zip"
+    source.write_bytes(b"data")
+    parcel = build_file_parcel(source, _identity(tmp_path))
+    with pytest.raises(LocalError, match="wildcard"):
+        ParcelServer(source, parcel, wildcard, 0)

@@ -65,40 +65,90 @@ def test_test_fails_loudly_when_unreadable(
     assert result.exit_code == 4  # LOCAL_ERROR
 
 
-def test_rotate_with_explicit_value_and_yes() -> None:
-    calls: list[list[str]] = []
+def test_rotate_rejects_removed_value_flag() -> None:
+    result = runner.invoke(
+        app,
+        ["keychain", "rotate", "test-svc", "--value", "ROTATED", "-y"],
+    )
+    assert result.exit_code != 0
 
-    def _run(cmd, **_kwargs):  # type: ignore[no-untyped-def]
-        calls.append(cmd)
+
+def test_rotate_with_value_stdin_and_yes_uses_security_stdin() -> None:
+    from sanctum_cli import keychain
+
+    calls: list[tuple[list[str], str]] = []
+
+    def _run(cmd, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append((list(cmd), str(kwargs.get("input", ""))))
         return _completed()
 
     with (
-        patch("sanctum_cli.commands.keychain_cmd.shutil.which", return_value="/usr/bin/security"),
-        patch("sanctum_cli.commands.keychain_cmd.subprocess.run", side_effect=_run),
+        patch("sanctum_cli.keychain.shutil.which", return_value="/usr/bin/security"),
+        patch("sanctum_cli.keychain.subprocess.run", side_effect=_run),
     ):
         result = runner.invoke(
             app,
-            ["keychain", "rotate", "test-svc", "-a", "sanctum", "--value", "ROTATED", "-y"],
+            ["keychain", "rotate", "test-svc", "-a", "sanctum", "--value-stdin", "-y"],
+            input="ROTATED_SECRET\n",
         )
-    assert result.exit_code == 0
-    args = calls[0]
-    assert "-U" in args
-    assert "test-svc" in args
-    assert "ROTATED" in args
+    assert result.exit_code == 0, result.output
+    cmd, stdin_data = calls[0]
+    assert cmd == [keychain.SECURITY_BIN, "-i"]
+    assert "ROTATED_SECRET" not in " ".join(cmd)
+    assert f"-X {b'ROTATED_SECRET'.hex()}" in stdin_data
+    assert "-U" in stdin_data
 
 
-def test_rotate_auto_generates_64_hex_chars() -> None:
-    captured: dict[str, str] = {}
+def test_rotate_value_stdin_requires_yes() -> None:
+    result = runner.invoke(
+        app,
+        ["keychain", "rotate", "test-svc", "--value-stdin"],
+        input="ROTATED_SECRET\n",
+    )
+    assert result.exit_code == 1
+    assert "--yes" in (result.stdout + (result.stderr or ""))
 
-    def _run(cmd, **_kwargs):  # type: ignore[no-untyped-def]
-        # The value is the arg right after -w
-        idx = cmd.index("-w")
-        captured["value"] = cmd[idx + 1]
+
+def test_rotate_with_prompt_uses_getpass_and_security_stdin() -> None:
+    from sanctum_cli import keychain
+
+    calls: list[tuple[list[str], str]] = []
+
+    def _run(cmd, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append((list(cmd), str(kwargs.get("input", ""))))
         return _completed()
 
     with (
-        patch("sanctum_cli.commands.keychain_cmd.shutil.which", return_value="/usr/bin/security"),
-        patch("sanctum_cli.commands.keychain_cmd.subprocess.run", side_effect=_run),
+        patch("sanctum_cli.commands.keychain_cmd.getpass.getpass", return_value="PROMPTED_VAL"),
+        patch("sanctum_cli.keychain.shutil.which", return_value="/usr/bin/security"),
+        patch("sanctum_cli.keychain.subprocess.run", side_effect=_run),
+    ):
+        result = runner.invoke(app, ["keychain", "rotate", "test-svc", "--prompt", "-y"])
+    assert result.exit_code == 0, result.output
+    cmd, stdin_data = calls[0]
+    assert cmd == [keychain.SECURITY_BIN, "-i"]
+    assert "PROMPTED_VAL" not in " ".join(cmd)
+    assert f"-X {b'PROMPTED_VAL'.hex()}" in stdin_data
+
+
+def test_rotate_auto_generates_64_hex_chars() -> None:
+    import re
+
+    from sanctum_cli import keychain
+
+    captured: dict[str, str] = {}
+
+    def _run(cmd, **kwargs):  # type: ignore[no-untyped-def]
+        assert cmd == [keychain.SECURITY_BIN, "-i"]
+        stdin_data = str(kwargs.get("input", ""))
+        m = re.search(r"-X ([0-9a-fA-F]+)", stdin_data)
+        assert m is not None
+        captured["value"] = bytes.fromhex(m.group(1)).decode("utf-8")
+        return _completed()
+
+    with (
+        patch("sanctum_cli.keychain.shutil.which", return_value="/usr/bin/security"),
+        patch("sanctum_cli.keychain.subprocess.run", side_effect=_run),
     ):
         result = runner.invoke(app, ["keychain", "rotate", "test-svc", "-y"])
     assert result.exit_code == 0
@@ -108,14 +158,16 @@ def test_rotate_auto_generates_64_hex_chars() -> None:
 
 def test_rotate_failure_returns_local_error() -> None:
     with (
-        patch("sanctum_cli.commands.keychain_cmd.shutil.which", return_value="/usr/bin/security"),
+        patch("sanctum_cli.keychain.shutil.which", return_value="/usr/bin/security"),
         patch(
-            "sanctum_cli.commands.keychain_cmd.subprocess.run",
+            "sanctum_cli.keychain.subprocess.run",
             return_value=_completed(rc=99, stderr="boom"),
         ),
     ):
         result = runner.invoke(
-            app, ["keychain", "rotate", "test-svc", "--value", "x", "-y"]
+            app,
+            ["keychain", "rotate", "test-svc", "--value-stdin", "-y"],
+            input="new-secret\n",
         )
     assert result.exit_code == 4
     combined = result.stdout + (result.stderr or "")

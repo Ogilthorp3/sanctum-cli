@@ -7,14 +7,17 @@ The manifest is the boundary between a module and the spine; consumers
 """
 from __future__ import annotations
 
+import re
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
 import yaml
-from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, ValidationError, field_validator, model_validator
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+SAFE_MODULE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 
 
 class ManifestError(ValueError):
@@ -66,6 +69,13 @@ class UninstallSpec(BaseModel):
     remove_paths: list[str] = []       # only removed under --purge
     rename_suffix: str = ".uninstalled-{date}"
 
+    @field_validator("rename_suffix")
+    @classmethod
+    def _validate_rename_suffix(cls, v: str) -> str:
+        if any(bad in v for bad in ("/", "\\", "..", "\x00")):
+            raise ManifestError(f"invalid uninstall.rename_suffix {v!r}")
+        return v
+
 
 class SoakSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -87,6 +97,15 @@ class ModuleManifest(BaseModel):
     docs: str
     demo: str
     soak: SoakSpec = SoakSpec()
+
+    @field_validator("module")
+    @classmethod
+    def _validate_module_name(cls, v: str) -> str:
+        if not SAFE_MODULE_NAME_RE.fullmatch(v):
+            raise ManifestError(
+                f"invalid module name {v!r}: must match {SAFE_MODULE_NAME_RE.pattern}"
+            )
+        return v
 
     @model_validator(mode="after")
     def _check_revoke_secrets_declared(self) -> ModuleManifest:

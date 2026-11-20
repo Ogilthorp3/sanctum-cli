@@ -56,7 +56,7 @@ from sanctum_cli.mesh.verify import EvalGate, Sandbox, SandboxResult, adopt
 _HOST = "127.0.0.1"
 _PORT = 8791  # off the default 8765 so a running tracker doesn't collide
 _PORT2 = 8792  # a second tracker (community-configured) for the community leg
-_ADDR = "100.99.99.99"  # a plausible tailnet addr for this drill node
+_ADDR = "100.99.99.99"  # ip-allow: synthetic CGNAT tailnet example for single-box drill
 _BASELINE = 0.881
 _COMMUNITY_INVITE = "https://signal.group/#sanctum-mesh-drill"
 
@@ -176,7 +176,7 @@ def _run(tmp: Path) -> int:
     shutil.copytree(champion_src, local)
 
     # ── SEED over the real tracker (real HTTP POST) ──────────────────────────
-    client = HttpTrackerTransport(f"http://{_HOST}:{_PORT}")
+    client = HttpTrackerTransport(f"http://{_HOST}:{_PORT}", identity=identity)
     client.register(identity.identity, _ADDR)
     client.announce(manifest, _ADDR)
     catalog = client.catalog()
@@ -258,7 +258,7 @@ def _run(tmp: Path) -> int:
     ready2 = threading.Event()
     threading.Thread(target=_serve_tracker, args=(registry2, _PORT2, ready2), daemon=True).start()
     ready2.wait(timeout=5.0)
-    community_client = HttpTrackerTransport(f"http://{_HOST}:{_PORT2}")
+    community_client = HttpTrackerTransport(f"http://{_HOST}:{_PORT2}", identity=identity)
     # our drill identity becomes a real contributor once it announces a champion here
     community_client.register(identity.identity, _ADDR)
     community_client.announce(manifest, _ADDR)

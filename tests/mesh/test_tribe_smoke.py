@@ -25,9 +25,14 @@ def test_haus_node_cannot_join_the_tribe() -> None:
         guard_tribe_join(["tag:sanctum-admin"])
 
 
-def test_tribe_join_advertises_only_the_tribe_tag() -> None:
-    argv = tribe_up_argv("tskey-auth-example", "Godot's Studio")
+def test_tribe_join_advertises_only_the_tribe_tag(tmp_path) -> None:
+    key_file = tmp_path / "authkey"
+    argv = tribe_up_argv(key_file, "Godot's Studio")
     assert argv[0] == "tailscale"
+    assert "--auth-key" in argv
+    auth_arg = argv[argv.index("--auth-key") + 1]
+    assert auth_arg == f"file:{key_file}"
+    assert "tskey-auth-" not in " ".join(argv)
     assert "--advertise-tags" in argv
     assert argv[argv.index("--advertise-tags") + 1] == "tag:sanctum-tribe"
     assert "tag:sanctum-admin" not in argv

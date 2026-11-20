@@ -175,6 +175,7 @@ def test_full_wizard_happy_path(
         patch("sanctum_cli.backends.b2.shutil.which", return_value="/x"),
         patch("sanctum_cli.backends.b2.keychain.exists", return_value=True),
         patch("sanctum_cli.backends.b2.keychain.read", return_value="existing-pass"),
+        patch("sanctum_cli.backends.b2.keychain.write", return_value=None),
         patch("sanctum_cli.backends.b2._round_trip", return_value=None),
         patch("sanctum_cli.backends.b2.webbrowser.open", return_value=True),
         patch("sanctum_cli.backends.b2._prompt_validated", side_effect=fake_prompt),
@@ -229,3 +230,26 @@ def test_wizard_gdrive_dispatches_to_gdrive_module(
     with patch("sanctum_cli.commands.cloud.gdrive.run_wizard") as mocked:
         runner.invoke(app, ["cloud", "setup", "--backend", "gdrive", "--no-open", "--no-persist"])
     mocked.assert_called_once()
+
+
+def test_ensure_keychain_entry_delegates_to_keychain_write_without_argv_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sanctum_cli import keychain
+
+    seen: list[tuple[list[str], str]] = []
+
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen.append((list(cmd), str(kwargs.get("input", ""))))
+        return _completed()
+
+    monkeypatch.setattr(keychain.shutil, "which", lambda _b: keychain.SECURITY_BIN)
+    monkeypatch.setattr(keychain.subprocess, "run", fake_run)
+
+    b2._ensure_keychain_entry("b2-account-id", "sanctum", "super-secret-b2-val", replace=True)
+    assert len(seen) == 1
+    cmd, stdin_data = seen[0]
+    assert cmd == [keychain.SECURITY_BIN, "-i"]
+    assert "super-secret-b2-val" not in " ".join(cmd)
+    assert "-X " in stdin_data
+    assert " -U" in stdin_data

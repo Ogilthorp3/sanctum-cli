@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import shutil
 import socket
 import sqlite3
 import ssl
@@ -30,7 +31,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Annotated, cast
 
 import typer
 from rich.console import Console
@@ -132,11 +133,8 @@ def probe_network() -> ProbeResult:
         return ProbeResult(False, "DNS resolution failed")
 
 
-def probe_node_identity() -> ProbeResult:
-    """`/usr/local/bin/node` is the Node.js Foundation signed binary."""
-    node_path = Path("/usr/local/bin/node")
-    if not node_path.is_file():
-        return ProbeResult(False, "/usr/local/bin/node missing — see install runbook")
+def _codesign_check(node_path: Path) -> tuple[bool, bool, str]:
+    """Return ``(is_foundation, codesign_ok, detail_or_output)`` for ``node_path``."""
     try:
         out = subprocess.run(
             ["codesign", "-dvv", str(node_path)],
@@ -144,12 +142,59 @@ def probe_node_identity() -> ProbeResult:
             text=True,
             timeout=3,
         )
-        signing = out.stderr + out.stdout
-        if "HX7739G8FX" in signing:
-            return ProbeResult(True, "Node.js Foundation HX7739G8FX")
-        return ProbeResult(False, "node is at /usr/local/bin but not signed by Node.js Foundation")
     except Exception as e:
-        return ProbeResult(False, f"codesign failed: {e}")
+        return False, False, f"codesign failed: {e}"
+    signing = out.stderr + out.stdout
+    if "HX7739G8FX" in signing:
+        return True, True, signing
+    return False, out.returncode == 0, signing
+
+
+def probe_node_identity() -> ProbeResult:
+    """Verify node binary identity (strict HX7739G8FX on haus; Homebrew/PATH or n/a on CLI)."""
+    haus_node = Path("/usr/local/bin/node")
+    if haus_node.is_file():
+        is_foundation, codesign_ok, detail = _codesign_check(haus_node)
+        if is_foundation:
+            return ProbeResult(True, "Node.js Foundation HX7739G8FX")
+        if _haus_tier_installed():
+            if not codesign_ok and detail.startswith("codesign failed:"):
+                return ProbeResult(False, detail)
+            return ProbeResult(
+                False, "node is at /usr/local/bin but not signed by Node.js Foundation"
+            )
+
+    if _haus_tier_installed():
+        return ProbeResult(False, "/usr/local/bin/node missing — see install runbook")
+
+    candidates: list[Path] = []
+    seen: set[Path] = set()
+    for raw in (Path("/opt/homebrew/bin/node"), haus_node, shutil.which("node")):
+        if not raw:
+            continue
+        p = Path(raw)
+        if p not in seen:
+            seen.add(p)
+            candidates.append(p)
+
+    for candidate in candidates:
+        if not candidate.is_file():
+            continue
+        is_foundation, codesign_ok, detail = _codesign_check(candidate)
+        if is_foundation:
+            return ProbeResult(True, f"Node.js Foundation HX7739G8FX ({candidate})")
+        if codesign_ok:
+            return ProbeResult(True, f"Homebrew/PATH node ({candidate})")
+        return ProbeResult(
+            False,
+            detail if detail.startswith("codesign failed:") else f"codesign failed for {candidate}",
+        )
+
+    return ProbeResult(
+        True,
+        not_applicable=True,
+        reason="CLI-only install: node not installed (optional outside haus)",
+    )
 
 
 def probe_yoda_cathedral() -> ProbeResult:
@@ -365,24 +410,23 @@ PROBES: list[Probe] = [
 #
 # Resolution convention for a dotted probe path "a.b.c.probe_fn":
 #   - The *callable* is the last component; everything before it is the
-#     module path within ``sanctum_cli.commands``.
+#     module path within ``sanctum_cli.commands`` (or ``sanctum_cli``).
 #   - We try ``sanctum_cli.commands.<a.b.c>`` first, then ``sanctum_cli.<a.b.c>``
-#     as a fallback, then the path verbatim.
+#     as a fallback — never arbitrary top-level packages.
 #   - If the import fails, a failing probe is returned so self-test surfaces
 #     the broken reference without crashing.
 
 _SEARCH_PREFIXES = (
     "sanctum_cli.commands.",
     "sanctum_cli.",
-    "",
 )
 
 
 def _resolve_probe_callable(dotted_path: str) -> Callable[[], ProbeResult]:
     """Resolve a dotted probe path to a callable, or return a failing stub.
 
-    The path must end with a callable name.  The portion before the last dot
-    is the module path; we try each prefix in ``_SEARCH_PREFIXES`` in order.
+    The path must end with a public callable name.  The portion before the last
+    dot is the module path; we try each prefix in ``_SEARCH_PREFIXES`` in order.
 
     Returns a zero-argument callable that returns a ``ProbeResult``.
     """
@@ -390,15 +434,27 @@ def _resolve_probe_callable(dotted_path: str) -> Callable[[], ProbeResult]:
         detail = f"probe path '{dotted_path}' has no module component (need 'module.fn')"
         return lambda: ProbeResult(False, detail)
 
+    parts = dotted_path.split(".")
+    if any(not part.isidentifier() for part in parts):
+        detail = f"probe path '{dotted_path}' contains invalid identifier"
+        return lambda: ProbeResult(False, detail)
+
     mod_part, fn_name = dotted_path.rsplit(".", 1)
+    if fn_name.startswith("_"):
+        detail = f"probe path '{dotted_path}' targets private attribute '{fn_name}'"
+        return lambda: ProbeResult(False, detail)
+
     last_exc: Exception = ImportError(f"no prefix resolved '{dotted_path}'")
 
     for prefix in _SEARCH_PREFIXES:
-        full_mod = f"{prefix}{mod_part}" if prefix else mod_part
+        full_mod = f"{prefix}{mod_part}"
         try:
             mod = importlib.import_module(full_mod)
-            fn: Callable[[], ProbeResult] = getattr(mod, fn_name)
-            return fn
+            fn = getattr(mod, fn_name)
+            if not callable(fn):
+                last_exc = TypeError(f"'{full_mod}.{fn_name}' is not callable")
+                continue
+            return cast("Callable[[], ProbeResult]", fn)
         except (ImportError, AttributeError) as exc:
             last_exc = exc
             continue

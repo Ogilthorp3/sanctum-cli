@@ -506,6 +506,111 @@ def test_vm_airgap_runner_raises_localerror_when_vm_down(
         adapters.vm_airgap_runner(tmp_path / "adapter", host="dead-vm")
 
 
+@pytest.mark.parametrize(
+    "bad_host",
+    [
+        "",
+        "-oProxyCommand=id",
+        "user@-evil",
+        "vm;id",
+        "vm\nid",
+        "vm:22",
+        "vm/path",
+        "vm..bad",
+        "user@a@b",
+    ],
+)
+def test_vm_airgap_runner_rejects_hostile_host_before_subprocess(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, bad_host: str
+) -> None:
+    called = False
+
+    def fake_run(*_a: object, **_kw: object) -> subprocess.CompletedProcess[str]:
+        nonlocal called
+        called = True
+        raise AssertionError("subprocess must not be called")
+
+    monkeypatch.setattr(adapters.subprocess, "run", fake_run)
+    with pytest.raises(LocalError, match="invalid sandbox host"):
+        adapters.vm_airgap_runner(tmp_path / "adapter", host=bad_host)
+    assert called is False
+
+
+@pytest.mark.parametrize(
+    "bad_dir",
+    [
+        "",
+        "relative/dir",
+        "/tmp/../etc",
+        "/tmp/a;id",
+        "/tmp/a:b",
+        "/tmp/a b",
+        "/tmp//a",
+    ],
+)
+def test_vm_airgap_runner_rejects_hostile_remote_dir(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, bad_dir: str
+) -> None:
+    called = False
+
+    def fake_run(*_a: object, **_kw: object) -> subprocess.CompletedProcess[str]:
+        nonlocal called
+        called = True
+        raise AssertionError("subprocess must not be called")
+
+    monkeypatch.setattr(adapters.subprocess, "run", fake_run)
+    with pytest.raises(LocalError, match="invalid sandbox remote_dir"):
+        adapters.vm_airgap_runner(tmp_path / "adapter", host="vm-air", remote_dir=bad_dir)
+    assert called is False
+
+
+def test_vm_airgap_runner_uses_double_dash_absolute_src_and_shlex_quoted_ssh(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import shlex
+
+    calls: list[list[str]] = []
+
+    def fake_run(argv: list[str], **_kw: object) -> subprocess.CompletedProcess[str]:
+        calls.append(list(argv))
+        return subprocess.CompletedProcess(
+            argv, 0, stdout='{"completed": true, "egress_attempted": false}', stderr=""
+        )
+
+    monkeypatch.setattr(adapters.subprocess, "run", fake_run)
+    hostile_prompts = ['"; rm -rf / #', "$(whoami)", "`id`"]
+    adapter_rel = tmp_path / "adapter:colon"
+    adapter_rel.mkdir()
+    adapters.vm_airgap_runner(
+        adapter_rel,
+        host="user@vm-air",
+        probe_prompts=hostile_prompts,
+    )
+
+    rsync_argv, ssh_argv = calls
+    assert rsync_argv[0] == "rsync"
+    assert "--" in rsync_argv
+    src_arg = rsync_argv[rsync_argv.index("--") + 1]
+    assert src_arg.startswith("/")
+    assert ssh_argv[0] == "ssh"
+    assert "--" in ssh_argv
+    dash_idx = ssh_argv.index("--")
+    assert ssh_argv[dash_idx + 1] == "user@vm-air"
+    remote_cmd = ssh_argv[dash_idx + 2]
+    assert shlex.split(remote_cmd)[:4] == ["unshare", "-n", "sanctum-mesh-probe", "--json"]
+
+
+def test_vm_airgap_runner_timeout_raises_localerror(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def fake_run(argv: list[str], **_kw: object) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(argv, timeout=1.0)
+
+    monkeypatch.setattr(adapters.subprocess, "run", fake_run)
+    with pytest.raises(LocalError, match="failed"):
+        adapters.vm_airgap_runner(tmp_path / "adapter", host="vm-air", timeout=1.0)
+
+
 @pytest.mark.integration
 def test_real_runner_smoke(tmp_path: Path) -> None:  # pragma: no cover
     # Executable documentation of the live path. DESELECTED from `make check` by

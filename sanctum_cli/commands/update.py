@@ -9,7 +9,10 @@ something is the kind of thing the operator finds out at 3am).
 
 from __future__ import annotations
 
+import shutil
 import subprocess
+import sys
+from pathlib import Path
 from typing import Annotated
 
 import typer
@@ -17,6 +20,25 @@ from rich.console import Console
 from rich.panel import Panel
 
 console = Console()
+
+
+def _resolve_self_test_cmd() -> list[str]:
+    """Resolve the post-upgrade ``sanctum self-test`` command on disk.
+
+    Prefers ``shutil.which("sanctum")`` and Homebrew prefix bins before
+    ``sys.executable`` so ``brew upgrade`` executes the newly symlinked
+    version rather than an in-process pre-upgrade module or old Cellar venv.
+    """
+    which_bin = shutil.which("sanctum")
+    if which_bin:
+        return [which_bin, "self-test"]
+    for candidate in (Path("/opt/homebrew/bin/sanctum"), Path("/usr/local/bin/sanctum")):
+        if candidate.is_file():
+            return [str(candidate), "self-test"]
+    sibling = Path(sys.executable).with_name("sanctum")
+    if sibling.is_file():
+        return [str(sibling), "self-test"]
+    return [sys.executable, "-m", "sanctum_cli", "self-test"]
 
 
 def update_command(
@@ -31,6 +53,10 @@ def update_command(
     console.print()
     console.print(Panel.fit("[bold]sanctum update[/]", border_style="cyan"))
     console.print()
+
+    if not dry_run and not shutil.which("brew"):
+        console.print("[red]Homebrew (brew) not found on PATH.[/]")
+        raise typer.Exit(code=1)
 
     console.print("[bold]Step 1.[/] brew update")
     if dry_run:
@@ -72,19 +98,21 @@ def update_command(
         console.print("  [dim](dry-run, skipping)[/]")
         raise typer.Exit(code=0)
 
-    # Invoke the self-test command in-process so the user sees the panel.
-    from sanctum_cli.commands import self_test as st
+    cmd = _resolve_self_test_cmd()
     try:
-        st.self_test_command(json_output=False, only=None)
-    except typer.Exit as exc:
-        if exc.exit_code == 0:
-            console.print(Panel(
-                "[bold green]Update complete.[/] Self-test passed.",
-                border_style="green",
-            ))
-        else:
-            console.print(Panel(
-                "[bold red]Update applied, but self-test failed.[/] Investigate before relying on the new version.",
-                border_style="red",
-            ))
-        raise
+        proc = subprocess.run(cmd, check=False)
+    except OSError as exc:
+        console.print(f"  [red]failed to launch self-test ({cmd[0]}):[/] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    if proc.returncode == 0:
+        console.print(Panel(
+            "[bold green]Update complete.[/] Self-test passed.",
+            border_style="green",
+        ))
+    else:
+        console.print(Panel(
+            "[bold red]Update applied, but self-test failed.[/] Investigate before relying on the new version.",
+            border_style="red",
+        ))
+    raise typer.Exit(code=proc.returncode)

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
@@ -42,8 +43,6 @@ from sanctum_cli.mesh.types import (
 from sanctum_cli.mesh.verify import SandboxResult
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from sanctum_cli.mesh.identity import LoadedIdentity
     from sanctum_cli.mesh.types import ChampionManifest, MeshIdentity
 
@@ -814,3 +813,148 @@ def test_mesh_analytics_command_with_nodes(monkeypatch: pytest.MonkeyPatch) -> N
     assert "US: 2" in res.output
     assert "Apple M4 Pro (3)" in res.output
     assert "92.0% local inference" in res.output
+
+
+def test_send_fails_closed_when_tailscale_bind_raises_oserror(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sample = tmp_path / "bundle.zip"
+    sample.write_bytes(b"payload")
+    store = _make_store(tmp_path, token="sender")
+    store.ensure("haus-sender")
+    _install(monkeypatch, store=store, directory=FakeDirectory())
+
+    stopped: list[str] = []
+    hosts_started: list[str] = []
+
+    class _FakeServer:
+        def __init__(self, path: Path, parcel: object, host: str, port: int) -> None:
+            del path, parcel, port
+            assert host != "0.0.0.0", "must never fall back to wildcard bind"
+            self.host = host
+            self.bound_port = 8788
+
+        @property
+        def url(self) -> str:
+            return f"http://{self.host}:{self.bound_port}/v1/file"
+
+        def start(self) -> None:
+            hosts_started.append(self.host)
+            # ip-allow: Tailscale CGNAT example, not a host address
+            if self.host == "100.64.0.9":
+                raise OSError("address not available")
+
+        def stop(self) -> None:
+            stopped.append(self.host)
+
+    # ip-allow: Tailscale CGNAT example, not a host address
+    monkeypatch.setattr(mesh_cmd, "ParcelServer", _FakeServer)
+    monkeypatch.setattr(mesh_cmd, "tailscale_ipv4", lambda _run: "100.64.0.9")
+
+    res = runner.invoke(app, ["mesh", "send", str(sample)])
+    assert res.exit_code == int(ExitCode.LOCAL_ERROR)
+    assert hosts_started == ["127.0.0.1", "100.64.0.9"]
+    assert "127.0.0.1" in stopped
+    assert "0.0.0.0" not in hosts_started
+
+
+def test_send_without_tailscale_binds_loopback_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sample = tmp_path / "bundle.zip"
+    sample.write_bytes(b"payload")
+    store = _make_store(tmp_path, token="sender")
+    store.ensure("haus-sender")
+    _install(monkeypatch, store=store, directory=FakeDirectory())
+
+    hosts_started: list[str] = []
+
+    class _FakeServer:
+        def __init__(self, path: Path, parcel: object, host: str, port: int) -> None:
+            del path, parcel, port
+            self.host = host
+            self.bound_port = 8788
+
+        @property
+        def url(self) -> str:
+            return f"http://{self.host}:{self.bound_port}/v1/file"
+
+        def start(self) -> None:
+            hosts_started.append(self.host)
+
+        def stop(self) -> None:
+            pass
+
+    monkeypatch.setattr(mesh_cmd, "ParcelServer", _FakeServer)
+    monkeypatch.setattr(mesh_cmd, "tailscale_ipv4", lambda _run: None)
+    monkeypatch.setattr(mesh_cmd, "serve_until_stopped", lambda servers: None)
+
+    res = runner.invoke(app, ["mesh", "send", str(sample)])
+    assert res.exit_code == 0, res.output
+    assert hosts_started == ["127.0.0.1"]
+
+
+def test_join_tribe_reads_key_from_stdin_and_passes_file_ref(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _make_store(tmp_path, token="friend")
+    directory = FakeDirectory()
+    _install(monkeypatch, store=store, directory=directory, run=_runner_up("100.64.0.42"))
+    monkeypatch.setattr(mesh_cmd, "read_self_tags", lambda _run: [])
+
+    seen: dict[str, object] = {}
+
+    def _fake_subprocess_run(argv: list[str], **_kw: object) -> object:
+        seen["argv"] = list(argv)
+        auth_val = argv[argv.index("--auth-key") + 1]
+        assert auth_val.startswith("file:")
+        key_file = Path(auth_val.removeprefix("file:"))
+        seen["key_file"] = key_file
+        seen["mode"] = key_file.stat().st_mode & 0o777
+        seen["contents"] = key_file.read_text(encoding="utf-8").strip()
+
+        class _Proc:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        return _Proc()
+
+    monkeypatch.setattr(mesh_cmd.subprocess, "run", _fake_subprocess_run)
+
+    res = runner.invoke(
+        app,
+        ["mesh", "join", "--tribe", "--tribe-key-stdin", "--label", "friend-mac"],
+        input="tskey-auth-super-secret-123\n",
+    )
+    assert res.exit_code == 0, res.output
+    argv = seen["argv"]
+    assert isinstance(argv, list)
+    assert "tskey-auth-super-secret-123" not in " ".join(argv)
+    assert seen["mode"] == 0o600
+    assert seen["contents"] == "tskey-auth-super-secret-123"
+    assert not Path(seen["key_file"]).exists()  # type: ignore[arg-type]
+
+
+def test_join_tribe_rejects_raw_key_on_argv() -> None:
+    res = runner.invoke(app, ["mesh", "join", "--tribe", "tskey-auth-leak"])
+    assert res.exit_code != 0
+
+
+def test_build_directory_honors_tracker_token_without_minting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from sanctum_cli.mesh.tracker import HttpTrackerTransport
+
+    id_dir = tmp_path / "id-dir"
+    inst = tmp_path / "instance.yaml"
+    inst.write_text(
+        f"mesh:\n  identity_dir: {id_dir}\n  tracker_token: tok-secret\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("SANCTUM_INSTANCE_FILE", str(inst))
+    directory = mesh_cmd._build_directory()
+    assert isinstance(directory, HttpTrackerTransport)
+    assert directory._auth_token == "tok-secret"
+    assert not id_dir.exists()
+    directory.close()

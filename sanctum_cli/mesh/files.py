@@ -176,10 +176,24 @@ def url_is_allowed(url: str) -> bool:
     return parsed.scheme == "https"
 
 
+def _validate_parcel_bind_host(host: str) -> None:
+    """Refuse unspecified wildcard bind addresses (``0.0.0.0`` / ``::``)."""
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return
+    if address.is_unspecified:
+        raise LocalError(
+            f"refusing to bind parcel server to wildcard address {host!r}",
+            fix="bind 127.0.0.1 or a Tailscale IP",
+        )
+
+
 class ParcelServer:
     """Serve one parcel's bytes on a single address until :meth:`stop`."""
 
     def __init__(self, path: Path, parcel: FileParcel, host: str, port: int) -> None:
+        _validate_parcel_bind_host(host)
         self.path = path
         self.parcel = parcel
         self.host = host
@@ -198,6 +212,7 @@ class ParcelServer:
         return f"http://{self.host}:{self.bound_port}/v1/file"
 
     def start(self) -> None:
+        _validate_parcel_bind_host(self.host)
         path = self.path
         expected = self.parcel.size_bytes
 

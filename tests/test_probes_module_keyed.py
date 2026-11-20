@@ -255,3 +255,33 @@ def test_run_soak_no_module_probes_does_not_crash(tmp_path, monkeypatch):
     data = json.loads(result_file.read_text())
     sample = data["samples"][0]
     assert sample["red_probes"] == []
+
+
+# ── Part (d): H-CLI-7 probe import restriction ───────────────────────────
+
+
+def test_probe_search_prefixes_exclude_empty_prefix() -> None:
+    assert "" not in st._SEARCH_PREFIXES
+
+
+@pytest.mark.parametrize(
+    "bad_path",
+    [
+        "os.system",
+        "builtins.eval",
+        "subprocess.run",
+        "self_test._haus_tier_installed",
+        "self_test.not-an-identifier",
+    ],
+)
+def test_resolve_probe_callable_rejects_arbitrary_and_private_imports(bad_path: str) -> None:
+    fn = st._resolve_probe_callable(bad_path)
+    res = fn()
+    assert res.passed is False
+
+
+def test_resolve_probe_callable_allows_sanctum_probes() -> None:
+    fn1 = st._resolve_probe_callable("self_test.probe_network")
+    fn2 = st._resolve_probe_callable("commands.self_test.probe_audit_log_bounded")
+    assert fn1 is st.probe_network
+    assert fn2 is st.probe_audit_log_bounded

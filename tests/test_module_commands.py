@@ -409,3 +409,151 @@ def test_bootout_uses_gui_domain_for_launchagent(tmp_path: Path) -> None:
     )
 
     assert booted == [f"gui/{os.getuid()}/com.sanctum.shipbar-test-agent"]
+
+
+# ── H-CLI-6 & H-CLI-7: mint stdin + purge confirm/allowlist/symlink ───
+
+
+def test_real_keychain_mint_delegates_to_keychain_write_and_wraps_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import subprocess as _sp
+
+    from sanctum_cli import keychain
+
+    seen: list[tuple[list[str], str]] = []
+
+    def fake_run(cmd: list[str], **kwargs: object) -> _sp.CompletedProcess[str]:
+        seen.append((list(cmd), str(kwargs.get("input", ""))))
+        return _sp.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(keychain.shutil, "which", lambda _b: keychain.SECURITY_BIN)
+    monkeypatch.setattr(keychain.subprocess, "run", fake_run)
+
+    module_cmd._real_keychain_mint("sanctum", "shipbar-test-key")
+    assert seen and seen[0][0] == [keychain.SECURITY_BIN, "-i"]
+    assert "-w" not in seen[0][0]
+    assert "-X " in seen[0][1]
+
+    def fail_write(**_kwargs: object) -> None:
+        from sanctum_cli.errors import LocalError
+
+        raise LocalError("keychain locked")
+
+    monkeypatch.setattr(keychain, "write", fail_write)
+    with pytest.raises(module_cmd.ManifestError, match="keychain mint failed"):
+        module_cmd._real_keychain_mint("sanctum", "shipbar-test-key")
+
+
+def test_module_install_prints_prompt_not_value(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    src = _write_synth(tmp_path)
+    monkeypatch.setenv("SANCTUM_MODULES_DIR", str(tmp_path / "modules"))
+    monkeypatch.setattr(module_cmd.keychain, "exists", lambda _a, _s: False)
+    monkeypatch.setattr(module_cmd, "_real_keychain_mint", lambda _a, _s: None)
+
+    r = runner.invoke(app, ["module", "install", str(src)])
+    assert r.exit_code == 0, r.output
+    assert "--prompt" in r.output
+    assert "--value" not in r.output
+
+
+@pytest.mark.parametrize(
+    "unsafe_path",
+    [
+        "/etc/hosts",
+        "~/.ssh",
+        "~",
+        "~/.sanctum",
+        "~/.sanctum/../../etc/passwd",
+    ],
+)
+def test_uninstall_purge_rejects_paths_outside_sanctum(
+    tmp_path: Path, unsafe_path: str
+) -> None:
+    yaml_text = SYNTH_MANIFEST.replace(
+        'remove_paths: ["~/.sanctum/shipbar-test-scratch"]',
+        f'remove_paths: ["{unsafe_path}"]',
+    )
+    reg = _reg_from_yaml(tmp_path, yaml_text)
+    booted: list[str] = []
+    removed: list[str] = []
+
+    with pytest.raises(module_cmd.ManifestError, match=r"outside ~/\.sanctum"):
+        module_cmd.uninstall_module(
+            "testmod",
+            purge=True,
+            registry=reg,
+            bootout_label=lambda target: booted.append(target),
+            revoke_secret=lambda _a, _s: True,
+            rename_path=lambda _p, _s: True,
+            remove_path=lambda p: (removed.append(str(p)), True)[1],
+        )
+    assert booted == []
+    assert removed == []
+
+
+def test_uninstall_purge_rejects_symlinks_and_real_remove_path_guards(
+    tmp_path: Path,
+) -> None:
+    sanctum_dir = Path.home() / ".sanctum"
+    sanctum_dir.mkdir(parents=True, exist_ok=True)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("keep-me", encoding="utf-8")
+    link = sanctum_dir / "bad-link"
+    link.symlink_to(outside)
+
+    yaml_text = SYNTH_MANIFEST.replace(
+        'remove_paths: ["~/.sanctum/shipbar-test-scratch"]',
+        'remove_paths: ["~/.sanctum/bad-link"]',
+    )
+    reg = _reg_from_yaml(tmp_path, yaml_text)
+    with pytest.raises(module_cmd.ManifestError):
+        module_cmd.uninstall_module(
+            "testmod",
+            purge=True,
+            registry=reg,
+            bootout_label=lambda _t: None,
+            revoke_secret=lambda _a, _s: True,
+            rename_path=lambda _p, _s: True,
+            remove_path=lambda _p: True,
+        )
+
+    # _real_remove_path independently refuses symlinks and outside paths
+    assert module_cmd._real_remove_path(link) is False
+    assert module_cmd._real_remove_path(outside) is False
+    assert outside.read_text(encoding="utf-8") == "keep-me"
+
+
+def test_uninstall_cli_purge_requires_yes_or_confirmation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reg = _synth_registry(tmp_path)
+    monkeypatch.setattr(module_cmd.ModuleRegistry, "discover", staticmethod(lambda: reg))
+
+    called: list[str] = []
+    monkeypatch.setattr(module_cmd, "uninstall_module", lambda name, **_kw: called.append(name))
+
+    # Non-interactive without --yes -> exit 2, uninstall_module never called
+    r_noninteractive = runner.invoke(app, ["module", "uninstall", "testmod", "--purge"])
+    assert r_noninteractive.exit_code == 2
+    assert called == []
+
+    # Interactive with confirm=False -> aborts cleanly (exit 0), uninstall_module never called
+    monkeypatch.setattr(module_cmd, "_is_interactive_tty", lambda: True)
+    r_declined = runner.invoke(
+        app, ["module", "uninstall", "testmod", "--purge"], input="n\n"
+    )
+    assert r_declined.exit_code == 0, r_declined.output
+    assert called == []
+
+    # With --yes -> calls uninstall_module
+    monkeypatch.setattr(
+        module_cmd,
+        "uninstall_module",
+        lambda name, **_kw: (called.append(name), module_cmd.UninstallResult(name=name))[1],
+    )
+    r_yes = runner.invoke(app, ["module", "uninstall", "testmod", "--purge", "--yes"])
+    assert r_yes.exit_code == 0
+    assert called == ["testmod"]

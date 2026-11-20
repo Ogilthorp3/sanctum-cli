@@ -178,3 +178,51 @@ def test_probe_proxy_key_fails_with_fallback_detail_when_unprovisioned(monkeypat
 def test_proxy_key_probe_is_registered_in_the_fleet():
     """The probe is wired into PROBES so self-test actually runs it."""
     assert any("proxy key" in p.name.lower() for p in st.PROBES)
+
+
+def test_probe_node_identity_haus_tier_requires_foundation_node(monkeypatch):
+    from pathlib import Path
+
+    monkeypatch.setattr(st, "_haus_tier_installed", lambda: True)
+    monkeypatch.setattr(Path, "is_file", lambda self: str(self) == "/usr/local/bin/node")
+    monkeypatch.setattr(
+        st,
+        "_codesign_check",
+        lambda _p: (True, True, "TeamIdentifier=HX7739G8FX"),
+    )
+    ok = st.probe_node_identity()
+    assert ok.passed is True
+    assert "HX7739G8FX" in ok.detail
+
+    # Non-Foundation node fails on haus tier
+    monkeypatch.setattr(st, "_codesign_check", lambda _p: (False, True, "Signature=adhoc"))
+    bad = st.probe_node_identity()
+    assert bad.passed is False
+
+    # Missing /usr/local/bin/node fails on haus tier
+    monkeypatch.setattr(Path, "is_file", lambda _self: False)
+    missing = st.probe_node_identity()
+    assert missing.passed is False
+
+
+def test_probe_node_identity_cli_only_allows_homebrew_or_na(monkeypatch):
+    from pathlib import Path
+
+    monkeypatch.setattr(st, "_haus_tier_installed", lambda: False)
+    monkeypatch.setattr(
+        Path,
+        "is_file",
+        lambda self: str(self) == "/opt/homebrew/bin/node",
+    )
+    monkeypatch.setattr(st, "_codesign_check", lambda _p: (False, True, "Signature=adhoc"))
+    brew_res = st.probe_node_identity()
+    assert brew_res.passed is True
+    assert brew_res.not_applicable is False
+    assert "/opt/homebrew/bin/node" in brew_res.detail
+
+    # Absent node on CLI-only tier -> n/a (not fail)
+    monkeypatch.setattr(Path, "is_file", lambda _self: False)
+    monkeypatch.setattr(st.shutil, "which", lambda _name: None)
+    na_res = st.probe_node_identity()
+    assert na_res.passed is True
+    assert na_res.not_applicable is True
