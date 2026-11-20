@@ -9,11 +9,14 @@ when a real probe passes, and honest hand-offs for the steps only a human can do
 
 from __future__ import annotations
 
+import html
+
 PAGE = """<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="sanctum-setup-token" content="__SANCTUM_SETUP_TOKEN__" />
 <title>Sanctum Setup — the Wizard is in.</title>
 <style>
   :root {
@@ -129,16 +132,17 @@ PAGE = """<!doctype html>
 <script>
 const $  = (s,r=document)=>r.querySelector(s);
 const $$ = (s,r=document)=>[...r.querySelectorAll(s)];
+const TOKEN = $('meta[name="sanctum-setup-token"]')?.content || '';
 let STATE=null, PANES=[], cur=0;
 const local = { autoOK:false, claude:false, gemini:false, netScanned:false, family:null };
 
-async function getState(){ STATE = await (await fetch('/state')).json(); }
-async function probe(id){ return (await fetch('/probe/'+id)).json(); }
+async function getState(){ STATE = await (await fetch('/state',{headers:{'X-Sanctum-Setup-Token':TOKEN}})).json(); }
+async function probe(id){ return (await fetch('/probe/'+encodeURIComponent(id),{headers:{'X-Sanctum-Setup-Token':TOKEN}})).json(); }
 async function act(step, action, payload={}){
-  return (await fetch('/action',{method:'POST',headers:{'Content-Type':'application/json'},
+  return (await fetch('/action',{method:'POST',headers:{'Content-Type':'application/json','X-Sanctum-Setup-Token':TOKEN},
     body:JSON.stringify({step,action,payload})})).json();
 }
-function esc(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;'); }
+function esc(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
 function dotClass(s){ s=String(s).toLowerCase();
   return ({ok:'ok',operational:'ok',green:'ok',attention:'warn',todo:'todo',down:'down',
            degraded:'down',failed:'down',unknown:'unk'})[s] || 'unk'; }
@@ -201,7 +205,7 @@ function render(){
 
 $('#back').onclick = ()=>{ if(cur>0){cur--;render();} };
 $('#next').onclick = async ()=>{
-  if(cur===PANES.length-1){ await act('','' ); await fetch('/done',{method:'POST'});
+  if(cur===PANES.length-1){ await fetch('/done',{method:'POST',headers:{'Content-Type':'application/json','X-Sanctum-Setup-Token':TOKEN},body:'{}'});
     $('#pane').innerHTML = `<div class="hero">✓</div><h1>All set.</h1>
       <p class="lede">Sanctum is ready. You can close this window.</p>`;
     $('.footer').style.display='none'; return; }
@@ -616,3 +620,8 @@ const WIRE = {
 </body>
 </html>
 """
+
+
+def render_page(token: str) -> str:
+    """Inject the per-session CSRF token into the setup HTML page."""
+    return PAGE.replace("__SANCTUM_SETUP_TOKEN__", html.escape(token, quote=True))

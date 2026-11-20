@@ -431,10 +431,8 @@ def _ensure_group_and_user() -> None:
                 ],
                 check=True,
             )
-            import secrets
-
             _run(
-                ["dscl", ".", "-passwd", f"/Users/{SERVICE_USERNAME}", secrets.token_urlsafe(24)],
+                ["dscl", ".", "-create", f"/Users/{SERVICE_USERNAME}", "Password", "*"],
                 check=False,
             )
             Path(home).mkdir(parents=True, exist_ok=True)
@@ -462,27 +460,83 @@ def _ensure_group_and_user() -> None:
         pass
 
 
+_SERVICE_SECRET_ALLOWLIST: tuple[str, ...] = (
+    "gemini-api-key",
+    "openrouter-api-key",
+    "anthropic-api-key",
+    "sonos-bridge.token",
+    "ha-token",
+)
+
+
 def _acl_operator_tree(op_home: Path) -> None:
-    """Best-effort group share of operator .sanctum + .openclaw for service user."""
+    """Least-privilege group share of non-secret operator .sanctum/.openclaw trees."""
     sanctum = op_home / ".sanctum"
     sanctum.mkdir(parents=True, exist_ok=True)
-    # execute on home + openclaw parent
-    _run(["chmod", "g+x", str(op_home)], check=False)
+    # Non-recursive execute/traverse on operator home + .openclaw parent
+    _run(["chmod", "+a", f"group:{SERVICE_USERNAME} allow execute", str(op_home)], check=False)
     openclaw = op_home / ".openclaw"
     openclaw.mkdir(parents=True, exist_ok=True)
     (openclaw / "logs").mkdir(parents=True, exist_ok=True)
-    _run(["chmod", "g+x", str(openclaw)], check=False)
-    _run(["chgrp", "-R", SERVICE_USERNAME, str(openclaw / "logs")], check=False)
-    _run(["chmod", "-R", "g+rwX", str(openclaw / "logs")], check=False)
-    # sanctum tree (skip locked files)
-    _run(["chgrp", "-R", SERVICE_USERNAME, str(sanctum)], check=False)
-    _run(["chmod", "-R", "g+rX", str(sanctum)], check=False)
-    for sub in ("state", "logs", "memory", "force-flow", "secrets", "credentials"):
+    _run(["chmod", "+a", f"group:{SERVICE_USERNAME} allow execute", str(openclaw)], check=False)
+    if not (openclaw / "logs").is_symlink():
+        _run(["chgrp", "-R", SERVICE_USERNAME, str(openclaw / "logs")], check=False)
+        _run(["chmod", "-R", "g+rwX", str(openclaw / "logs")], check=False)
+
+    # Non-recursive group share on ~/.sanctum root + safe config metadata files
+    _run(["chgrp", SERVICE_USERNAME, str(sanctum)], check=False)
+    _run(["chmod", "g+rx", str(sanctum)], check=False)
+    for fname in ("endpoints.env", "endpoints.json", ".node_id", "instance.yaml"):
+        cfg_file = sanctum / fname
+        if cfg_file.is_file() and not cfg_file.is_symlink():
+            _run(["chgrp", SERVICE_USERNAME, str(cfg_file)], check=False)
+            _run(["chmod", "g+r", str(cfg_file)], check=False)
+
+    # Recursive share ONLY on safe non-secret service subtrees
+    for sub in ("bin", "sanctum-proxy", "memory-vault", "lib"):
         p = sanctum / sub
-        if p.is_dir():
+        if p.is_dir() and not p.is_symlink():
             _run(["chgrp", "-R", SERVICE_USERNAME, str(p)], check=False)
-            mode = "g+rwX" if sub in ("state", "logs", "memory", "force-flow") else "g+rX"
-            _run(["chmod", "-R", mode, str(p)], check=False)
+            _run(["chmod", "-R", "g+rX", str(p)], check=False)
+    for sub in ("state", "logs", "memory", "force-flow", "metrics"):
+        p = sanctum / sub
+        if p.is_dir() and not p.is_symlink():
+            _run(["chgrp", "-R", SERVICE_USERNAME, str(p)], check=False)
+            _run(["chmod", "-R", "g+rwX", str(p)], check=False)
+
+    # Non-recursive allowlist for non-CA-key TLS certs
+    certs = sanctum / "certs"
+    if certs.is_dir() and not certs.is_symlink():
+        _run(["chgrp", SERVICE_USERNAME, str(certs)], check=False)
+        _run(["chmod", "g+rx", str(certs)], check=False)
+        clients = certs / "clients"
+        if clients.is_dir() and not clients.is_symlink():
+            _run(["chgrp", SERVICE_USERNAME, str(clients)], check=False)
+            _run(["chmod", "g+rx", str(clients)], check=False)
+        for rel in ("ca.crt", "clients/canary.crt", "clients/canary-pkcs8.key"):
+            cf = certs / rel
+            if cf.is_file() and not cf.is_symlink():
+                _run(["chgrp", SERVICE_USERNAME, str(cf)], check=False)
+                _run(["chmod", "0640", str(cf)], check=False)
+
+    # Traverse-only (no -R, no g+r) on secrets/ and credentials/
+    for secret_dir_name in ("secrets", "credentials"):
+        sd = sanctum / secret_dir_name
+        if sd.exists():
+            real_sd = sd.resolve()
+            if real_sd.is_dir():
+                _run(
+                    ["chmod", "+a", f"group:{SERVICE_USERNAME} allow search", str(real_sd)],
+                    check=False,
+                )
+    secrets_dir = sanctum / "secrets"
+    if secrets_dir.exists():
+        real_secrets = secrets_dir.resolve()
+        for token_name in _SERVICE_SECRET_ALLOWLIST:
+            tf = real_secrets / token_name
+            if tf.is_file() and not tf.is_symlink():
+                _run(["chgrp", SERVICE_USERNAME, str(tf)], check=False)
+                _run(["chmod", "0640", str(tf)], check=False)
 
 
 def _install_plists(op_home: Path) -> None:
@@ -551,23 +605,27 @@ def run_install(*, dry_run: bool = False) -> int:
     Returns the subprocess / install exit code.
     """
     if dry_run:
-        # ensure assets can be read from the package
-        _ = _package_asset("haus.sanctum.proxyd.plist")
-        materialize_assets(operator_home())
+        # Validate packaged assets load cleanly without writing anything to disk.
+        for name in (
+            "haus.sanctum.proxyd.plist",
+            "haus.sanctum.force-flow.plist",
+            "haus.sanctum.memory-vault.plist",
+        ):
+            _ = _package_asset(name)
         return 0
 
     if os.geteuid() == 0:
         return install_wave1_as_root()
 
-    # Re-enter as root with the same interpreter so package data stays available.
+    # Re-enter as root with isolated Python (-I) and sanitized sudo env (no -E).
     import sys
 
     code = (
-        "import os, sys; "
+        "import sys; "
         "from sanctum_cli.service_user import install_wave1_as_root; "
         "sys.exit(install_wave1_as_root())"
     )
-    cmd = ["sudo", "-E", sys.executable, "-c", code]
+    cmd = ["sudo", "--", sys.executable, "-I", "-c", code]
     return subprocess.call(cmd)
 
 

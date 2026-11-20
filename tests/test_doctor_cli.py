@@ -83,6 +83,8 @@ def test_doctor_brief_when_all_green(
         patch("sanctum_cli.commands.doctor.subprocess.run", side_effect=_patch_subprocess()),
         patch("sanctum_cli.commands.doctor.shutil.which", return_value="/usr/bin/launchctl"),
         patch("sanctum_cli.commands.doctor.make_provider", return_value=fake),
+        patch("sanctum_cli.commands.doctor.haus_tier_present", return_value=False),
+        patch("sanctum_cli.commands.doctor._http_ok", return_value=False),
     ):
         result = runner.invoke(app, ["doctor"])
     assert result.exit_code == 0, result.stdout
@@ -104,6 +106,8 @@ def test_doctor_expands_when_degraded(
         ),
         patch("sanctum_cli.commands.doctor.shutil.which", return_value="/usr/bin/launchctl"),
         patch("sanctum_cli.commands.doctor.make_provider", return_value=fake),
+        patch("sanctum_cli.commands.doctor.haus_tier_present", return_value=False),
+        patch("sanctum_cli.commands.doctor._http_ok", return_value=False),
     ):
         result = runner.invoke(app, ["doctor"])
     assert result.exit_code == 0
@@ -122,6 +126,8 @@ def test_doctor_full_renders_table(
         patch("sanctum_cli.commands.doctor.subprocess.run", side_effect=_patch_subprocess()),
         patch("sanctum_cli.commands.doctor.shutil.which", return_value="/usr/bin/launchctl"),
         patch("sanctum_cli.commands.doctor.make_provider", return_value=fake),
+        patch("sanctum_cli.commands.doctor.haus_tier_present", return_value=False),
+        patch("sanctum_cli.commands.doctor._http_ok", return_value=False),
     ):
         result = runner.invoke(app, ["doctor", "--full"])
     assert result.exit_code == 0
@@ -139,6 +145,8 @@ def test_doctor_json_emits_machine_readable(
         patch("sanctum_cli.commands.doctor.subprocess.run", side_effect=_patch_subprocess()),
         patch("sanctum_cli.commands.doctor.shutil.which", return_value="/usr/bin/launchctl"),
         patch("sanctum_cli.commands.doctor.make_provider", return_value=fake),
+        patch("sanctum_cli.commands.doctor.haus_tier_present", return_value=False),
+        patch("sanctum_cli.commands.doctor._http_ok", return_value=False),
     ):
         result = runner.invoke(app, ["doctor", "--json"])
     assert result.exit_code == 0
@@ -160,6 +168,8 @@ def test_doctor_failed_provider_degrades_overall(
         patch("sanctum_cli.commands.doctor.subprocess.run", side_effect=_patch_subprocess()),
         patch("sanctum_cli.commands.doctor.shutil.which", return_value="/usr/bin/launchctl"),
         patch("sanctum_cli.commands.doctor.make_provider", return_value=fake),
+        patch("sanctum_cli.commands.doctor.haus_tier_present", return_value=False),
+        patch("sanctum_cli.commands.doctor._http_ok", return_value=False),
     ):
         result = runner.invoke(app, ["doctor", "--json"])
     assert result.exit_code == 0
@@ -176,9 +186,98 @@ def test_doctor_filters_only_sanctum_prefixed_agents(
         patch("sanctum_cli.commands.doctor.subprocess.run", side_effect=_patch_subprocess()),
         patch("sanctum_cli.commands.doctor.shutil.which", return_value="/usr/bin/launchctl"),
         patch("sanctum_cli.commands.doctor.make_provider", return_value=fake),
+        patch("sanctum_cli.commands.doctor.haus_tier_present", return_value=False),
+        patch("sanctum_cli.commands.doctor._http_ok", return_value=False),
     ):
         result = runner.invoke(app, ["doctor", "--json"])
     assert result.exit_code == 0
     payload = json.loads(result.stdout)
     labels = {a["label"] for a in payload["agents"]}
     assert all(label.startswith("haus.sanctum.") for label in labels)
+
+
+def test_doctor_force_flow_expected_only_on_haus_tier() -> None:
+    from sanctum_cli.commands import doctor
+
+    with (
+        patch("sanctum_cli.commands.doctor.subprocess.run", side_effect=_patch_subprocess()),
+        patch("sanctum_cli.commands.doctor.shutil.which", return_value="/usr/bin/launchctl"),
+        patch("sanctum_cli.commands.doctor.haus_tier_present", return_value=False),
+        patch("sanctum_cli.commands.doctor._http_ok", return_value=False),
+    ):
+        rows_basic = doctor._agents()
+    assert all(r.label != "haus.sanctum.force-flow" for r in rows_basic)
+    assert all(r.status == "OPERATIONAL" for r in rows_basic)
+
+    with (
+        patch("sanctum_cli.commands.doctor.subprocess.run", side_effect=_patch_subprocess()),
+        patch("sanctum_cli.commands.doctor.shutil.which", return_value="/usr/bin/launchctl"),
+        patch("sanctum_cli.commands.doctor.haus_tier_present", return_value=True),
+        patch("sanctum_cli.commands.doctor._http_ok", return_value=False),
+    ):
+        rows_haus = doctor._agents()
+    ff = [r for r in rows_haus if r.label == "haus.sanctum.force-flow"]
+    assert len(ff) == 1
+    assert ff[0].status == "FAILED"
+
+
+def test_doctor_repos_injects_cloud_creds_and_isolates_failures(tmp_path: Path) -> None:
+    from sanctum_cli import config
+    from sanctum_cli.commands import doctor
+    from sanctum_cli.keychain import KeychainEntryMissingError
+
+    inst = tmp_path / "instance.yaml"
+    inst.write_text(
+        """\
+instance:
+  name: Cloud Box
+  slug: cloud-box
+cli:
+  cloud_backup:
+    primary:
+      kind: restic
+      repo: s3:https://id.r2.cloudflarestorage.com/bucket
+      keychain:
+        service: primary-svc
+        account: primary-acct
+    secondary:
+      kind: restic
+      repo: b2:bucket
+      keychain:
+        service: missing-svc
+        account: secondary-acct
+""",
+        encoding="utf-8",
+    )
+    cfg = config.load(inst)
+    seen_envs: list[dict[str, str]] = []
+
+    def fake_read(*, account: str, service: str) -> str:
+        if service == "missing-svc":
+            raise KeychainEntryMissingError("missing secondary")
+        return f"{account}:{service}"
+
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen_envs.append(dict(kwargs["env"]))  # type: ignore[arg-type]
+        return _completed(stdout="[]")
+
+    with (
+        patch("sanctum_cli.commands.doctor.shutil.which", return_value="/usr/bin/restic"),
+        patch("sanctum_cli.keychain.read", side_effect=fake_read),
+        patch("sanctum_cli.commands.doctor.subprocess.run", side_effect=fake_run),
+    ):
+        rows = doctor._repos(cfg)
+
+    assert len(rows) == 2
+    assert rows[0].status == "OPERATIONAL"
+    assert seen_envs[0]["AWS_ACCESS_KEY_ID"] == "sanctum:r2-access-key-id"
+    assert rows[1].status == "UNKNOWN"
+    assert "keychain unavailable" in (rows[1].detail or "")
+
+
+def test_doctor_source_has_no_hardcoded_operator_home() -> None:
+    from pathlib import Path
+
+    from sanctum_cli.commands import doctor
+
+    assert "/Users/bert" not in Path(doctor.__file__).read_text(encoding="utf-8")

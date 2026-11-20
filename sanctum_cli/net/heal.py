@@ -68,6 +68,7 @@ MAX_HEAL_ATTEMPTS = 3
 # at all) must INCREMENT the attempts counter so the cap accrues.
 HEAL_RESULT_MARKER = "NET_HEAL_RESULT"
 HEAL_RESULT_HEALED = f"{HEAL_RESULT_MARKER}=healed"
+HEAL_RESULT_HEALTHY = f"{HEAL_RESULT_MARKER}=healthy"
 HEAL_RESULT_REVERTED = f"{HEAL_RESULT_MARKER}=reverted"
 HEAL_RESULT_NOOP = f"{HEAL_RESULT_MARKER}=noop"
 
@@ -334,7 +335,7 @@ def diagnose_posture(
         verdict="HEALTHY",
         detail="Posture is healthy — DHCP, reachable gateway, on-subnet.",
         remedy="",
-        action=HealAction("none", safe=True, detail="no action"),
+        action=HealAction("none", safe=False, detail="no action"),
         posture=posture,
     )
 
@@ -367,11 +368,17 @@ def plan_heal(
     The stop ``reason`` is specific per gate so callers surface the real cause.
     """
     action = diagnosis.action
-    if action is None or not action.safe:
+    if action is None or action.kind == "none":
         return HealPlan(
             execute=False,
             action=None,
-            reason=f"stop-and-alert: {diagnosis.verdict} is not auto-healable ({action.detail if action else 'no action'}).",
+            reason=f"no-op: {diagnosis.verdict} — nothing to heal.",
+        )
+    if not action.safe:
+        return HealPlan(
+            execute=False,
+            action=None,
+            reason=f"stop-and-alert: {diagnosis.verdict} is not auto-healable ({action.detail}).",
         )
     if attempts >= MAX_HEAL_ATTEMPTS:
         return HealPlan(
@@ -437,7 +444,7 @@ def heal_action_argv(action: HealAction, iface: str) -> list[str]:
     """
     if action.kind == "flip_dhcp":
         return ["networksetup", "-setdhcp", "Wi-Fi"]
-    if action.kind == "dhcp_renew":
+    if action.kind == "dhcp_renew" and iface:
         return ["ipconfig", "set", iface, "DHCP"]
     return []
 
@@ -492,13 +499,90 @@ mkdir -p "$STATE_DIR"
 now() {{ date '+%Y-%m-%dT%H:%M:%S'; }}
 heartbeat() {{ printf '%s %s\\n' "$(now)" "$1" >> "$HEARTBEAT_FILE"; }}
 
-# Resolve the sanctum CLI (bare root env has no user PATH additions).
-SANCTUM="$(command -v sanctum || true)"
-[ -z "$SANCTUM" ] && [ -x /opt/homebrew/bin/sanctum ] && SANCTUM=/opt/homebrew/bin/sanctum
-[ -z "$SANCTUM" ] && [ -x /usr/local/bin/sanctum ] && SANCTUM=/usr/local/bin/sanctum
-if [ -z "$SANCTUM" ]; then
-  heartbeat "ERROR sanctum-cli-not-found"
-  exit 0
+# Resolve the sanctum CLI safely. When running as root (LaunchDaemon), lock PATH,
+# scrub PYTHON* env vars, and verify root ownership + non-group/world-writable
+# permissions across symlink, realpath, ancestor dirs, and #! interpreter.
+_check_root_owner_perms() {{
+  _p="$1"
+  _info=$(/usr/bin/stat -f '%u %Lp' "$_p" 2>/dev/null) || return 1
+  _uid="${{_info%% *}}"
+  _mode="${{_info##* }}"
+  [ "$_uid" = "0" ] || return 1
+  [ $((8#$_mode & 8#022)) -eq 0 ] || return 1
+  return 0
+}}
+
+_is_root_trusted() {{
+  _target="$1"
+  [ -n "$_target" ] || return 1
+  if [ -L "$_target" ]; then
+    _linfo=$(/usr/bin/stat -L -f '%u %Lp' "$_target" 2>/dev/null) || true
+    _sinfo=$(/usr/bin/stat -f '%u %Lp' "$_target" 2>/dev/null) || return 1
+    _suid="${{_sinfo%% *}}"
+    _smode="${{_sinfo##* }}"
+    [ "$_suid" = "0" ] || return 1
+    [ $((8#$_smode & 8#022)) -eq 0 ] || return 1
+  fi
+  _resolved=$(/bin/realpath "$_target" 2>/dev/null) || return 1
+  [ -f "$_resolved" ] && [ -x "$_resolved" ] || return 1
+  _check_root_owner_perms "$_resolved" || return 1
+  _dir=$(/usr/bin/dirname "$_resolved")
+  while [ -n "$_dir" ]; do
+    _check_root_owner_perms "$_dir" || return 1
+    [ "$_dir" = "/" ] && break
+    _dir=$(/usr/bin/dirname "$_dir")
+  done
+  _hdr=$(/usr/bin/head -c 2 "$_resolved" 2>/dev/null || true)
+  if [ "$_hdr" = "#!" ]; then
+    _shebang=$(/usr/bin/head -n 1 "$_resolved" 2>/dev/null | /usr/bin/sed 's/^#![[:space:]]*//' | /usr/bin/awk '{{print $1}}')
+    [ -n "$_shebang" ] || return 1
+    _sreal=$(/bin/realpath "$_shebang" 2>/dev/null) || return 1
+    [ -f "$_sreal" ] && [ -x "$_sreal" ] || return 1
+    _check_root_owner_perms "$_shebang" || return 1
+    _check_root_owner_perms "$_sreal" || return 1
+    _sdir=$(/usr/bin/dirname "$_sreal")
+    while [ -n "$_sdir" ]; do
+      _check_root_owner_perms "$_sdir" || return 1
+      [ "$_sdir" = "/" ] && break
+      _sdir=$(/usr/bin/dirname "$_sdir")
+    done
+  fi
+  return 0
+}}
+
+if [ "$(/usr/bin/id -u)" -eq 0 ]; then
+  PATH="/usr/bin:/bin:/usr/sbin:/sbin"
+  export PATH
+  unset PYTHONPATH PYTHONHOME PYTHONUSERBASE PYTHONSTARTUP
+  _TRUSTED_FOUND=""
+  _UNTRUSTED_CAND=""
+  for _cand in "/Library/Application Support/sanctum/bin/sanctum" /usr/local/bin/sanctum /opt/homebrew/bin/sanctum; do
+    if [ -e "$_cand" ] || [ -L "$_cand" ]; then
+      if _is_root_trusted "$_cand"; then
+        _TRUSTED_FOUND="$_cand"
+        break
+      else
+        [ -z "$_UNTRUSTED_CAND" ] && _UNTRUSTED_CAND="$_cand"
+      fi
+    fi
+  done
+  if [ -z "$_TRUSTED_FOUND" ]; then
+    if [ -n "$_UNTRUSTED_CAND" ]; then
+      heartbeat "ERROR sanctum-binary-untrusted path=$_UNTRUSTED_CAND"
+    else
+      heartbeat "ERROR sanctum-cli-not-found"
+    fi
+    exit 0
+  fi
+  SANCTUM="$_TRUSTED_FOUND"
+else
+  SANCTUM="$(command -v sanctum || true)"
+  [ -z "$SANCTUM" ] && [ -x /opt/homebrew/bin/sanctum ] && SANCTUM=/opt/homebrew/bin/sanctum
+  [ -z "$SANCTUM" ] && [ -x /usr/local/bin/sanctum ] && SANCTUM=/usr/local/bin/sanctum
+  if [ -z "$SANCTUM" ]; then
+    heartbeat "ERROR sanctum-cli-not-found"
+    exit 0
+  fi
 fi
 
 # 1. Kill-switch: DISABLED sentinel present → no-op (fail-safe off), never mutate.
@@ -538,6 +622,10 @@ if printf '%s' "$OUT" | grep -q '{HEAL_RESULT_HEALED}'; then
   # A real re-probe verified the heal — reset the attempts counter.
   echo 0 > "$ATTEMPTS_FILE"
   heartbeat "healed spine=$SPINE rc=$RC"
+elif printf '%s' "$OUT" | grep -q '{HEAL_RESULT_HEALTHY}'; then
+  # Node is already healthy — keep attempts at 0 without burning the no-loop cap.
+  echo 0 > "$ATTEMPTS_FILE"
+  heartbeat "healthy spine=$SPINE rc=$RC"
 else
   # Not healed this cycle (reverted / noop / no token) — bump the persisted
   # attempts (no-loop backoff) so the MAX_ATTEMPTS cap accrues and stops+alerts.

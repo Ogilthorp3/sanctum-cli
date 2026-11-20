@@ -89,3 +89,62 @@ def test_collect_probes_primary_and_secondary_preserving_order(full_instance_yam
         "/Volumes/T9/sanctum-restic",
         "rclone:gdrive-sanctum:sanctum-restic",
     ]
+
+
+def test_collect_injects_cloud_creds_for_s3_and_b2(tmp_path: Path) -> None:
+    inst = tmp_path / "instance.yaml"
+    inst.write_text(
+        """\
+instance:
+  name: Cloud Box
+  slug: cloud-box
+cli:
+  cloud_backup:
+    primary:
+      kind: restic
+      repo: s3:https://id.r2.cloudflarestorage.com/bucket
+      keychain:
+        service: primary-pw-svc
+        account: primary-acct
+    secondary:
+      kind: restic
+      repo: b2:my-bucket:path
+      keychain:
+        service: secondary-pw-svc
+        account: secondary-acct
+""",
+        encoding="utf-8",
+    )
+    cfg = config.load(inst)
+    seen_envs: dict[str, dict[str, str]] = {}
+
+    def fake_probe_backup(repo: str, env: dict[str, str]) -> status.BackupInfo:
+        seen_envs[repo] = env
+        return status.BackupInfo(
+            repo=repo,
+            last_snapshot_iso=None,
+            age_human=None,
+            snapshot_count=0,
+            status="OPERATIONAL",
+            detail=None,
+        )
+
+    def fake_read(*, account: str, service: str) -> str:
+        return f"{account}:{service}"
+
+    with (
+        patch("sanctum_cli.keychain.read", side_effect=fake_read),
+        patch("sanctum_cli.commands.status.probe_backup", side_effect=fake_probe_backup),
+    ):
+        status.collect(cfg)
+
+    r2_env = seen_envs["s3:https://id.r2.cloudflarestorage.com/bucket"]
+    assert r2_env["RESTIC_PASSWORD"] == "primary-acct:primary-pw-svc"
+    assert r2_env["AWS_ACCESS_KEY_ID"] == "sanctum:r2-access-key-id"
+    assert r2_env["AWS_SECRET_ACCESS_KEY"] == "sanctum:r2-secret-access-key"
+    assert r2_env["AWS_DEFAULT_REGION"] == "auto"
+
+    b2_env = seen_envs["b2:my-bucket:path"]
+    assert b2_env["RESTIC_PASSWORD"] == "secondary-acct:secondary-pw-svc"
+    assert b2_env["B2_ACCOUNT_ID"] == "sanctum:b2-account-id"
+    assert b2_env["B2_ACCOUNT_KEY"] == "sanctum:b2-application-key"

@@ -191,6 +191,22 @@ def _read_ha_token() -> str | None:
         return None
 
 
+def _validated_base_url(raw_url: str) -> str | None:
+    """Validate http(s) base URL without userinfo, query, or fragment; strip trailing slash."""
+    clean = (raw_url or "").strip()
+    parts = urlsplit(clean)
+    if (
+        parts.scheme.lower() not in ("http", "https")
+        or not parts.hostname
+        or parts.username is not None
+        or parts.password is not None
+        or bool(parts.query)
+        or bool(parts.fragment)
+    ):
+        return None
+    return clean.rstrip("/")
+
+
 def _fetch_api_json(
     path: str, *, url: str | None = None, token: str | None = None
 ) -> dict[str, Any] | None:
@@ -210,10 +226,14 @@ def _fetch_api_json(
     bearer = token if token is not None else _read_ha_token()
     if not bearer:
         return None
-    base = url if url is not None else _ha_url()
+    base = _validated_base_url(url if url is not None else _ha_url())
+    if base is None:
+        return None
     safe_path = _encode_path(path)
     try:
-        with httpx.Client(transport=_ha_transport(), timeout=_HTTP_TIMEOUT_S) as client:
+        with httpx.Client(
+            transport=_ha_transport(), timeout=_HTTP_TIMEOUT_S, follow_redirects=False
+        ) as client:
             resp = client.get(
                 f"{base}{safe_path}",
                 headers={"Authorization": f"Bearer {bearer}"},
@@ -256,10 +276,16 @@ def _get_api_json_strict(path: str) -> dict[str, Any] | None:
                 "~/.sanctum/secrets/ha-token"
             ),
         )
-    base = _ha_url()
+    raw_base = _ha_url()
+    base = _validated_base_url(raw_base)
+    if base is None:
+        msg = f"invalid HA Green URL {raw_base!r}"
+        raise DeviceError(msg, fix="set HA_GREEN_URL to an http:// or https:// base URL")
     safe_path = _encode_path(path)
     try:
-        with httpx.Client(transport=_ha_transport(), timeout=_HTTP_TIMEOUT_S) as client:
+        with httpx.Client(
+            transport=_ha_transport(), timeout=_HTTP_TIMEOUT_S, follow_redirects=False
+        ) as client:
             resp = client.get(
                 f"{base}{safe_path}",
                 headers={"Authorization": f"Bearer {bearer}"},

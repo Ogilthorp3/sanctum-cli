@@ -24,6 +24,7 @@ from rich.table import Table
 
 from sanctum_cli import config
 from sanctum_cli.errors import LocalError
+from sanctum_cli.restic import restic_env_for_repo
 
 console = Console()
 
@@ -218,45 +219,16 @@ def _backup_status_from_age(iso: str) -> str:
     return "FAILED"
 
 
-def _password_env(cfg: config.Config) -> dict[str, str]:
-    """Pull restic passphrase from Keychain if cloud_backup configured."""
-    import os as _os
-
-    env = dict(_os.environ)
-    cb = cfg.cli.cloud_backup
-    if cb is None or cb.primary is None:
-        return env
-    try:
-        from sanctum_cli import keychain
-
-        env["RESTIC_PASSWORD"] = keychain.read(
-            account=cb.primary.keychain.account, service=cb.primary.keychain.service
-        )
-    except LocalError:
-        # Probe failure surfaces in the per-repo status — not fatal here.
-        pass
-    return env
-
-
 def _repo_password_env(
     repo_cfg: config.CloudBackupRepo,
     base_env: dict[str, str],
-    cache: dict[tuple[str, str], str | None],
+    cache: dict[tuple[str, str], str],
 ) -> dict[str, str]:
-    """Build env with RESTIC_PASSWORD for a single repo, caching Keychain lookups."""
-    key = (repo_cfg.keychain.account, repo_cfg.keychain.service)
-    if key not in cache:
-        try:
-            from sanctum_cli import keychain
-
-            cache[key] = keychain.read(account=key[0], service=key[1])
-        except LocalError:
-            cache[key] = None
-    env = dict(base_env)
-    pwd = cache[key]
-    if pwd is not None:
-        env["RESTIC_PASSWORD"] = pwd
-    return env
+    """Build env with RESTIC_PASSWORD + cloud creds for a single repo, caching Keychain reads."""
+    try:
+        return restic_env_for_repo(repo_cfg, base_env=base_env, cache=cache)
+    except LocalError:
+        return dict(base_env)
 
 
 # ─── Aggregator ─────────────────────────────────────────────────────
@@ -270,7 +242,7 @@ def collect(cfg: config.Config) -> dict[str, Any]:
     cb = cfg.cli.cloud_backup
     if cb is not None:
         base_env = dict(_os.environ)
-        cache: dict[tuple[str, str], str | None] = {}
+        cache: dict[tuple[str, str], str] = {}
         targets: list[tuple[str, dict[str, str]]] = []
         if cb.primary is not None:
             targets.append((cb.primary.repo, _repo_password_env(cb.primary, base_env, cache)))

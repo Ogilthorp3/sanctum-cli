@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import subprocess
 from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
@@ -679,6 +680,57 @@ def test_run_canary_returns_skipped_when_restored_file_missing() -> None:
     """restic succeeds but the restored file isn't on disk → SKIPPED (can't verify)."""
     outcome = _run_real_canary_with(restic_returncode=0, restored_bytes=None)
     assert outcome is onboard.CanaryOutcome.SKIPPED
+
+
+def test_run_canary_injects_cloud_creds_and_handles_keychain_error(tmp_path: Path) -> None:
+    """R2/B2 canary injects cloud creds and never raises on missing Keychain entry."""
+    from sanctum_cli.config import (
+        CliConfig,
+        CloudBackup,
+        CloudBackupRepo,
+        Config,
+        InstanceMetadata,
+        KeychainRef,
+    )
+    from sanctum_cli.keychain import KeychainEntryMissingError
+
+    r2_cfg = Config(
+        instance=InstanceMetadata(name="t", slug="t"),
+        cli=CliConfig(
+            cloud_backup=CloudBackup(
+                primary=CloudBackupRepo(
+                    kind="restic",
+                    repo="s3:https://id.r2.cloudflarestorage.com/bucket",
+                    keychain=KeychainRef(account="a", service="s"),
+                )
+            )
+        ),
+    )
+    probe = tmp_path / ".zshrc"
+    probe.write_bytes(b"export PATH=/usr/bin\n")
+    seen_env: dict[str, str] = {}
+
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen_env.update(kwargs["env"])  # type: ignore[arg-type]
+        return subprocess.CompletedProcess(cmd, returncode=1, stdout="", stderr="err")
+
+    with (
+        patch("sanctum_cli.commands.onboard.config.load", return_value=r2_cfg),
+        patch("sanctum_cli.commands.onboard.Path.expanduser", return_value=probe),
+        patch("sanctum_cli.keychain.read", side_effect=lambda account, service: f"{account}:{service}"),
+        patch("subprocess.run", side_effect=fake_run),
+    ):
+        out = onboard._run_canary()
+    assert out is onboard.CanaryOutcome.FAILED
+    assert seen_env["AWS_ACCESS_KEY_ID"] == "sanctum:r2-access-key-id"
+    assert seen_env["AWS_DEFAULT_REGION"] == "auto"
+
+    with (
+        patch("sanctum_cli.commands.onboard.config.load", return_value=r2_cfg),
+        patch("sanctum_cli.commands.onboard.Path.expanduser", return_value=probe),
+        patch("sanctum_cli.keychain.read", side_effect=KeychainEntryMissingError("missing")),
+    ):
+        assert onboard._run_canary() is onboard.CanaryOutcome.FAILED
 
 
 # ── Boundary: the ORCHESTRATOR threads the canary outcome into recap + green-check ──

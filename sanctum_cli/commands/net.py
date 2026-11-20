@@ -3,10 +3,11 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import socket
 import subprocess
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, TypeVar
@@ -489,6 +490,7 @@ def _emit_heal_result(outcome: str) -> None:
     """
     token = {
         "healed": heal.HEAL_RESULT_HEALED,
+        "healthy": heal.HEAL_RESULT_HEALTHY,
         "reverted": heal.HEAL_RESULT_REVERTED,
         "noop": heal.HEAL_RESULT_NOOP,
     }[outcome]
@@ -564,6 +566,7 @@ def _install_heal_daemon() -> None:
 
     try:
         wrapper_path.parent.mkdir(parents=True, exist_ok=True)
+        wrapper_path.parent.chmod(0o755)
         err_path.parent.mkdir(parents=True, exist_ok=True)
         plist_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -574,6 +577,7 @@ def _install_heal_daemon() -> None:
             heal.render_heal_plist(wrapper=wrapper_path, err_log=err_path),
             encoding="utf-8",
         )
+        plist_path.chmod(0o644)
     except OSError as exc:
         err = LocalError(
             f"failed to install net-heal daemon files: {exc}",
@@ -582,6 +586,16 @@ def _install_heal_daemon() -> None:
         )
         _report(err)
         raise typer.Exit(code=int(err.exit_code)) from exc
+
+    active_bin = shutil.which("sanctum")
+    if active_bin:
+        with suppress(OSError):
+            st = Path(active_bin).resolve().stat()
+            if st.st_uid != 0 or (st.st_mode & 0o022) != 0:
+                console.print(
+                    f"[yellow]![/] active sanctum binary {escape(active_bin)} is not root-owned "
+                    "(or is group/world-writable); root net-heal daemon refuses untrusted binaries."
+                )
 
     console.print(f"[green]✓[/] wrote wrapper     {escape(str(wrapper_path))} [dim](0755)[/]")
     console.print(f"[green]✓[/] wrote LaunchDaemon {escape(str(plist_path))}")
@@ -676,6 +690,10 @@ def net_heal(
     # --apply: a stop-and-alert plan never mutates — surface the reason + the
     # one-line manual fix and exit clean (fail-closed / stays-out-of-NAT).
     if not plan.execute or plan.action is None:
+        if diag.verdict == "HEALTHY" or diag.action.kind == "none":
+            console.print("\n[green]✓ healthy[/] — nothing to heal.")
+            _emit_heal_result("healthy")
+            return
         console.print(f"\n[yellow]stop + alert:[/] {escape(plan.reason)}")
         if diag.remedy:
             console.print(f"  → {escape(diag.remedy)}")
@@ -707,6 +725,10 @@ def net_heal(
         return
 
     argv = heal.heal_action_argv(plan.action, posture.iface)
+    if not argv:
+        console.print("\n[yellow]stop + alert:[/] no runnable heal command.")
+        _emit_heal_result("noop")
+        return
     console.print(f"\n[dim]healing:[/] {escape(' '.join(argv))}")
     runner(argv)
 

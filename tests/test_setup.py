@@ -607,3 +607,257 @@ def test_page_greets_as_the_wizard() -> None:
     """Bert's Burning Man name is on the door — title + one welcome-pane line."""
     assert "<title>Sanctum Setup — the Wizard is in.</title>" in PAGE
     assert "The Wizard will see you now." in PAGE
+
+
+# ── CRIT-01 security hardening + H-CLI-8 peer resolution ───────────────────────
+
+
+def _start_setup_server(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[setup.ThreadingHTTPServer, setup._Session, int]:
+    session = setup._Session(token="test-csrf-token-123")
+    server = setup.ThreadingHTTPServer(("127.0.0.1", 0), setup._make_handler(session))
+    import threading
+
+    t = threading.Thread(target=server.serve_forever, daemon=True)
+    t.start()
+    return server, session, int(server.server_port)
+
+
+def test_http_server_enforces_csrf_host_origin_content_type_and_size(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import http.client
+    import json
+
+    monkeypatch.setattr(setup, "gather_state", lambda: {"tier": "basic", "steps": {}})
+    monkeypatch.setattr(setup, "probe", lambda pid: {"pid": pid})
+    called_actions: list[tuple[str, str, dict[str, object]]] = []
+    monkeypatch.setattr(
+        setup,
+        "do_action",
+        lambda step, action, payload: called_actions.append((step, action, payload)) or {"ok": True},
+    )
+
+    server, session, port = _start_setup_server(monkeypatch)
+    try:
+        # 1. GET / sets Cache-Control: no-store and embeds token in meta tag
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        conn.request("GET", "/", headers={"Host": f"127.0.0.1:{port}"})
+        resp = conn.getresponse()
+        body = resp.read().decode("utf-8")
+        assert resp.status == 200
+        assert resp.getheader("Cache-Control") == "no-store"
+        assert 'meta name="sanctum-setup-token" content="test-csrf-token-123"' in body
+        conn.close()
+
+        # 2. GET /state & /probe without token -> 403
+        for path in ("/state", "/probe/verify"):
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+            conn.request("GET", path, headers={"Host": f"127.0.0.1:{port}"})
+            r = conn.getresponse()
+            r.read()
+            assert r.status == 403
+            conn.close()
+
+        # 3. GET /state with valid token -> 200
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        conn.request(
+            "GET",
+            "/state",
+            headers={"Host": f"127.0.0.1:{port}", "X-Sanctum-Setup-Token": session.token},
+        )
+        r = conn.getresponse()
+        assert r.status == 200
+        assert json.loads(r.read())["tier"] == "basic"
+        conn.close()
+
+        valid_headers = {
+            "Host": f"127.0.0.1:{port}",
+            "Origin": f"http://127.0.0.1:{port}",
+            "Content-Type": "application/json",
+            "X-Sanctum-Setup-Token": session.token,
+        }
+
+        # 4. POST /action missing token -> 403
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        h = {k: v for k, v in valid_headers.items() if k != "X-Sanctum-Setup-Token"}
+        conn.request("POST", "/action", body="{}", headers=h)
+        r = conn.getresponse()
+        r.read()
+        assert r.status == 403
+        conn.close()
+
+        # 5. POST /action wrong Host (DNS rebinding) -> 403
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        h = {**valid_headers, "Host": f"evil.example:{port}"}
+        conn.request("POST", "/action", body="{}", headers=h)
+        r = conn.getresponse()
+        r.read()
+        assert r.status == 403
+        conn.close()
+
+        # 6. POST /action missing Origin, Origin: null, or cross-origin -> 403
+        for bad_origin in (None, "null", "https://evil.example"):
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+            h = {k: v for k, v in valid_headers.items() if k != "Origin"}
+            if bad_origin is not None:
+                h["Origin"] = bad_origin
+            conn.request("POST", "/action", body="{}", headers=h)
+            r = conn.getresponse()
+            r.read()
+            assert r.status == 403
+            conn.close()
+
+        # 7. POST /action Sec-Fetch-Site: cross-site -> 403
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        h = {**valid_headers, "Sec-Fetch-Site": "cross-site"}
+        conn.request("POST", "/action", body="{}", headers=h)
+        r = conn.getresponse()
+        r.read()
+        assert r.status == 403
+        conn.close()
+
+        # 8. POST /action Content-Type: text/plain -> 415
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        h = {**valid_headers, "Content-Type": "text/plain"}
+        conn.request("POST", "/action", body="{}", headers=h)
+        r = conn.getresponse()
+        r.read()
+        assert r.status == 415
+        conn.close()
+
+        # 9. POST /action oversized Content-Length -> 413 (and invalid/negative -> 400)
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        h = {**valid_headers, "Content-Length": str(setup._MAX_BODY_BYTES + 1)}
+        conn.request("POST", "/action", headers=h)
+        r = conn.getresponse()
+        r.read()
+        assert r.status == 413
+        conn.close()
+
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        conn.request("POST", "/action", body="{bad json", headers=valid_headers)
+        r = conn.getresponse()
+        r.read()
+        assert r.status == 400
+        conn.close()
+
+        # 10. Unauthenticated POST /done -> 403 and does NOT set shutdown
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        h = {k: v for k, v in valid_headers.items() if k != "X-Sanctum-Setup-Token"}
+        conn.request("POST", "/done", body="{}", headers=h)
+        r = conn.getresponse()
+        r.read()
+        assert r.status == 403
+        assert not session.shutdown.is_set()
+        conn.close()
+
+        assert called_actions == []
+
+        # 11. Valid POST /action and POST /done -> 200 and sets shutdown
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        conn.request(
+            "POST",
+            "/action",
+            body=json.dumps({"step": "identity", "action": "save", "payload": {"name": "Home"}}),
+            headers=valid_headers,
+        )
+        r = conn.getresponse()
+        assert r.status == 200
+        assert json.loads(r.read())["ok"] is True
+        conn.close()
+        assert called_actions == [("identity", "save", {"name": "Home"})]
+
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        conn.request("POST", "/done", body="{}", headers=valid_headers)
+        r = conn.getresponse()
+        assert r.status == 200
+        assert json.loads(r.read())["ok"] is True
+        conn.close()
+        assert session.shutdown.is_set()
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_open_url_enforces_strict_allowlist(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[list[str]] = []
+    monkeypatch.setattr(setup.subprocess, "run", lambda argv, **kw: calls.append(list(argv)))
+
+    for bad in (
+        "file:///System/Applications/Calculator.app",
+        "smb://evil.example/share",
+        "javascript:alert(1)",
+        "-a",
+        "https://evil.example/phish",
+        "",
+    ):
+        res = setup.do_action("open", "url", {"url": bad})
+        assert res["ok"] is False
+    assert calls == []
+
+    for good in (setup._OAUTH_URL, setup._FDA_ANCHOR, setup._AUTOMATION_ANCHOR):
+        res = setup.do_action("open", "url", {"url": good})
+        assert res["ok"] is True
+    assert calls == [
+        ["open", setup._OAUTH_URL],
+        ["open", setup._FDA_ANCHOR],
+        ["open", setup._AUTOMATION_ANCHOR],
+    ]
+
+
+def test_firewalla_and_ha_refuse_stored_token_on_changed_origin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fw_log = _patch_firewalla(monkeypatch, ok=True, stored_token="secret-fw-tok")
+    res = setup.do_action("firewalla", "save", {"url": "http://evil.example:9999", "token": ""})
+    assert res["ok"] is False
+    assert fw_log["probed"] is None
+    assert fw_log["persisted"] is None
+
+    for bad_url in ("file:///etc/passwd", "http://user:pass@127.0.0.1:1984"):
+        res = setup.do_action("firewalla", "save", {"url": bad_url, "token": "tok"})
+        assert res["ok"] is False
+        assert fw_log["probed"] is None
+
+    ha_log = _patch_ha(monkeypatch, running=True, stored_token="secret-ha-tok")
+    res = setup.do_action("ha", "save", {"url": "http://evil.example:9999", "token": ""})
+    assert res["ok"] is False
+    assert ha_log["checked"] is None
+    assert ha_log["persisted"] is None
+
+    for bad_url in ("file:///etc/passwd", "http://user:pass@homeassistant.local:8123"):
+        res = setup.do_action("ha", "save", {"url": bad_url, "token": "tok"})
+        assert res["ok"] is False
+        assert ha_log["checked"] is None
+
+
+def test_setup_resolves_tailnet_peer_dynamically_without_author_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pathlib import Path
+
+    from sanctum_cli.commands import tailnet as tn
+
+    src = Path(setup.__file__).read_text(encoding="utf-8")
+    assert "berts-mbp" not in src
+
+    monkeypatch.delenv("SANCTUM_TAILNET_PEER", raising=False)
+    monkeypatch.setattr(setup.config, "instance_value", lambda key, default=None: default)
+    monkeypatch.setattr(tn, "_tailscale_bin", lambda: None)
+    assert setup._resolve_tailnet_peer() is None
+
+    seen_peers: list[str] = []
+    monkeypatch.setattr(tn, "_probe_spine", lambda: None)
+    monkeypatch.setattr(tn, "_probe_peer", lambda name: seen_peers.append(name) or None)
+    monkeypatch.setattr(tn, "_probe_cred", lambda: None)
+    monkeypatch.setattr(tn, "_probe_drift", lambda: None)
+    monkeypatch.setattr(tn, "_probe_trifecta", lambda: None)
+    setup._probe_tailnet()
+    assert seen_peers == []
+
+    monkeypatch.setenv("SANCTUM_TAILNET_PEER", "studio-mac")
+    assert setup._resolve_tailnet_peer() == "studio-mac"
+    setup._probe_tailnet()
+    assert seen_peers == ["studio-mac"]

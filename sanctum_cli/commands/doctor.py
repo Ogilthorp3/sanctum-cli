@@ -24,6 +24,8 @@ from sanctum_cli import config
 from sanctum_cli.errors import LocalError
 from sanctum_cli.providers import Provider, make_provider
 from sanctum_cli.providers.base import HealthSnapshot
+from sanctum_cli.restic import restic_env_for_repo
+from sanctum_cli.service_user import haus_tier_present
 
 console = Console()
 err = Console(stderr=True)
@@ -124,7 +126,7 @@ class Report:
 
 
 def _agents() -> list[AgentRow]:
-    expected_labels = ["haus.sanctum.force-flow"]
+    expected_labels = ["haus.sanctum.force-flow"] if haus_tier_present() else []
     if not shutil.which("launchctl"):
         return []
     try:
@@ -251,38 +253,34 @@ def _repos(cfg: config.Config) -> list[RepoRow]:
     cb = cfg.cli.cloud_backup
     if cb is None or not shutil.which("restic"):
         return []
-    repos: list[tuple[str, str, str]] = []  # (label, path, keychain_password)
-    try:
-        from sanctum_cli import keychain
-
-        password = keychain.read(
-            account=cb.primary.keychain.account if cb.primary else "",
-            service=cb.primary.keychain.service if cb.primary else "",
-        )
-    except LocalError as exc:
-        return [
-            RepoRow(
-                repo="(restic)",
-                status="UNKNOWN",
-                detail=f"keychain unavailable: {exc.message[:80]}",
-            )
-        ]
-    if cb.primary is not None:
-        repos.append(("primary", cb.primary.repo, password))
-    if cb.secondary is not None:
-        repos.append(("secondary", cb.secondary.repo, password))
+    repo_cfgs = [r for r in (cb.primary, cb.secondary) if r is not None]
+    if not repo_cfgs:
+        return []
 
     rows: list[RepoRow] = []
-    for _label, repo, pwd in repos:
-        rows.append(_restic_check(repo, pwd))
+    cache: dict[tuple[str, str], str] = {}
+    for repo_cfg in repo_cfgs:
+        try:
+            env = restic_env_for_repo(repo_cfg, cache=cache)
+        except LocalError as exc:
+            rows.append(
+                RepoRow(
+                    repo=repo_cfg.repo,
+                    status="UNKNOWN",
+                    detail=f"keychain unavailable: {exc.message[:80]}",
+                )
+            )
+            continue
+        rows.append(_restic_check(repo_cfg.repo, env["RESTIC_PASSWORD"], env=env))
     return rows
 
 
-def _restic_check(repo: str, password: str) -> RepoRow:
+def _restic_check(
+    repo: str, password: str, *, env: dict[str, str] | None = None
+) -> RepoRow:
     import os as _os
 
-    env = dict(_os.environ)
-    env["RESTIC_PASSWORD"] = password
+    proc_env = dict(env) if env is not None else {**_os.environ, "RESTIC_PASSWORD": password}
     try:
         out = subprocess.run(
             ["restic", "-r", repo, "snapshots", "--json", "--latest", "1", "--no-lock"],
@@ -290,7 +288,7 @@ def _restic_check(repo: str, password: str) -> RepoRow:
             text=True,
             timeout=RESTIC_PROBE_TIMEOUT_S,
             check=False,
-            env=env,
+            env=proc_env,
         )
     except subprocess.TimeoutExpired:
         return RepoRow(repo=repo, status="UNKNOWN", detail="restic probe timed out")
@@ -456,11 +454,9 @@ def doctor_command(
                     target_dir = plist_path.parent
                     target_dir.mkdir(parents=True, exist_ok=True)
                     candidates = [
-                        Path(f"/Users/bert/Library/LaunchAgents/{label}.plist"),
-                        Path(f"/Users/bert/Projects/sanctum-runtime/launchagents/{label}.plist"),
-                        Path(
-                            f"/Users/bert/Projects/Claude_Code/sanctum/launchagents/{label}.plist"
-                        ),
+                        Path.home() / f"Library/LaunchAgents/{label}.plist",
+                        Path.home() / f"Projects/sanctum-runtime/launchagents/{label}.plist",
+                        Path.home() / f"Projects/Claude_Code/sanctum/launchagents/{label}.plist",
                     ]
                     for src in candidates:
                         if src.exists():

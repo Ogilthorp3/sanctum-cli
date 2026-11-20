@@ -328,3 +328,63 @@ def test_wrapper_healed_run_resets_attempts(tmp_path: object) -> None:
     healed_line = f"✓ healed — flip_dhcp took. {HEAL_RESULT_HEALED}"
     attempts = _run_wrapper_once(tmp_path, healed_line)
     assert attempts == "0", f"expected attempts reset to 0, got {attempts!r}"
+
+
+def test_plan_heal_healthy_returns_execute_false_even_if_safe_true() -> None:
+    from sanctum_cli.net.heal import HealAction
+
+    diag = diagnose_posture(_p())
+    hp = plan_heal(diag, attempts=0, tailnet_ok=True)
+    assert hp.execute is False
+    assert hp.action is None
+
+    forced_safe = PostureDiagnosis(
+        verdict="HEALTHY",
+        detail="ok",
+        remedy="",
+        action=HealAction("none", safe=True, detail="no action"),
+        posture=_p(),
+    )
+    hp2 = plan_heal(forced_safe, attempts=0, tailnet_ok=True)
+    assert hp2.execute is False
+    assert hp2.action is None
+
+
+def test_wrapper_healthy_run_keeps_attempts_at_zero_across_cycles(tmp_path: object) -> None:
+    from sanctum_cli.net.heal import HEAL_RESULT_HEALTHY
+
+    for i in range(5):
+        sub = f"{tmp_path}/cycle_{i}"
+        attempts = _run_wrapper_once(sub, f"✓ healthy — nothing to heal. {HEAL_RESULT_HEALTHY}")
+        assert attempts == "0"
+
+
+def test_heal_wrapper_root_trust_rejects_user_owned_binary(tmp_path: object) -> None:
+    import subprocess
+    from pathlib import Path
+
+    from sanctum_cli.net.heal import HEAL_WRAPPER
+
+    assert "/usr/bin/stat" in HEAL_WRAPPER
+    assert "/bin/realpath" in HEAL_WRAPPER
+    assert "unset PYTHONPATH PYTHONHOME PYTHONUSERBASE PYTHONSTARTUP" in HEAL_WRAPPER
+    assert "ERROR sanctum-binary-untrusted" in HEAL_WRAPPER
+
+    # Extract _check_root_owner_perms and _is_root_trusted and verify it rejects
+    # a binary owned by the non-root test user (uid != 0).
+    lines = HEAL_WRAPPER.splitlines()
+    start = next(i for i, ln in enumerate(lines) if ln.startswith("_check_root_owner_perms()"))
+    end = next(i for i, ln in enumerate(lines) if ln.startswith("if [ \"$(/usr/bin/id -u)\""))
+    helper_src = "\n".join(lines[start:end])
+
+    tmp = Path(str(tmp_path))
+    user_bin = tmp / "sanctum"
+    user_bin.write_text("#!/bin/sh\necho pwn\n", encoding="utf-8")
+    user_bin.chmod(0o755)
+    proc = subprocess.run(
+        ["/bin/bash", "-c", f"{helper_src}\n_is_root_trusted {str(user_bin)!r}"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode != 0

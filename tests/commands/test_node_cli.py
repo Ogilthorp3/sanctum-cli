@@ -116,14 +116,24 @@ def test_render_bootstrap_script_field_semantics() -> None:
 
 
 def test_render_bootstrap_script_sudo_nopasswd_block() -> None:
-    """--sudo-nopasswd adds the sudoers drop-in with the remove-on-invalid guard."""
+    """--sudo-nopasswd adds a scoped, mktemp/visudo-validated sudoers drop-in."""
     script = node_cmd.render_bootstrap_script(PUBKEY, sudo_nopasswd=True)
     assert "/etc/sudoers.d/sanctum-automation" in script
-    assert "NOPASSWD: ALL" in script
-    assert "sudo chmod 0440 /etc/sudoers.d/sanctum-automation" in script
-    # visudo validates the drop-in; an invalid entry is REMOVED (never brick sudo).
-    assert "sudo visudo -c -f /etc/sudoers.d/sanctum-automation" in script
-    assert "sudo rm -f /etc/sudoers.d/sanctum-automation" in script
+    assert "NOPASSWD: ALL" not in script
+    for expected in (
+        "/usr/bin/true",
+        "/usr/sbin/systemsetup",
+        "/usr/bin/pmset",
+        "/usr/sbin/networksetup",
+        "/usr/sbin/ipconfig",
+    ):
+        assert expected in script
+    assert "sudo mktemp /etc/sudoers.d/.sanctum-automation.XXXXXX" in script
+    assert 'sudo chmod 0440 "$TMP_SUDO"' in script
+    # visudo validates the staged drop-in before atomic mv into /etc/sudoers.d/.
+    assert 'sudo visudo -c -f "$TMP_SUDO"' in script
+    assert 'sudo rm -f "$TMP_SUDO"' in script
+    assert 'sudo mv -f "$TMP_SUDO" /etc/sudoers.d/sanctum-automation' in script
 
 
 def test_render_bootstrap_script_refuses_quoted_pubkey() -> None:
@@ -516,12 +526,12 @@ def test_looks_like_tailscale_name() -> None:
 def test_parse_tailscale_peer_ips_maps_stems() -> None:
     raw = """
     {
-      "Self": {"HostName": "berts-mbp", "DNSName": "berts-mbp.tail7c6d11.ts.net.",
+      "Self": {"HostName": "berts-mbp", "DNSName": "berts-mbp.tailnet-abc.ts.net.",
                "TailscaleIPs": ["100.65.184.97"]},
       "Peer": {
-        "x": {"HostName": "manoir", "DNSName": "manoir.tail7c6d11.ts.net.",
+        "x": {"HostName": "manoir", "DNSName": "manoir.tailnet-abc.ts.net.",
               "Online": true, "TailscaleIPs": ["100.107.112.118"]},
-        "y": {"HostName": "chalet", "DNSName": "chalet.tail7c6d11.ts.net.",
+        "y": {"HostName": "chalet", "DNSName": "chalet.tailnet-abc.ts.net.",
               "Online": false, "TailscaleIPs": ["100.68.189.17"]}
       }
     }
@@ -661,7 +671,7 @@ def test_node_resolve_cli(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> No
         "_tailscale_status_json",
         lambda: (
             '{"Self":{},"Peer":{"a":{"HostName":"manoir",'
-            '"DNSName":"manoir.tail7c6d11.ts.net.","Online":true,'
+            '"DNSName":"manoir.tailnet-abc.ts.net.","Online":true,'
             '"TailscaleIPs":["100.107.112.118"]}}}'
         ),
     )
@@ -699,13 +709,16 @@ _DOTTED_QUAD = _re.compile(r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b")
 
 
 def test_render_postinstall_field_semantics() -> None:
-    """The pkg postinstall runs the field-validated bootstrap as root, into the console user."""
+    """The pkg postinstall validates $CU/$HD, rejects symlinks, and drops privileges via sudo -u."""
     code = node_cmd.pairing_code(PUBKEY)
     script = node_cmd.render_postinstall(PUBKEY, sudo_nopasswd=False, code=code)
-    # Runs as root via Installer — resolves the CONSOLE user, not root's home.
+    # Runs as root via Installer — validates non-root console user and $CU-owned home.
     assert "stat -f%Su /dev/console" in script
     assert 'dscl . -read /Users/"$CU" NFSHomeDirectory' in script
-    assert 'chown "$CU" "$HD/.ssh/authorized_keys"' in script
+    assert 'stat -f%Su "$HD"' in script
+    assert '[ -L "$HD/.ssh" ] || [ -L "$HD/.ssh/authorized_keys" ]' in script
+    assert 'sudo -u "$CU" -- /bin/sh -c' in script
+    assert 'chown "$CU"' not in script
     # The bootstrap steps, verbatim (no sudo — already root).
     assert "systemsetup -setremotelogin on" in script
     assert "pmset -a sleep 0 disksleep 0 powernap 0 womp 1" in script
@@ -720,12 +733,22 @@ def test_render_postinstall_field_semantics() -> None:
 
 
 def test_render_postinstall_sudo_nopasswd_block() -> None:
-    """--sudo-nopasswd adds a visudo-validated NOPASSWD drop-in for the console user."""
+    """--sudo-nopasswd adds a scoped, mktemp/visudo-validated sudoers drop-in."""
     script = node_cmd.render_postinstall(PUBKEY, sudo_nopasswd=True, code="000000")
     assert "/etc/sudoers.d/sanctum-automation" in script
-    assert "NOPASSWD: ALL" in script
-    assert "visudo -c -f /etc/sudoers.d/sanctum-automation" in script
-    assert "rm -f /etc/sudoers.d/sanctum-automation" in script  # remove-on-invalid guard
+    assert "NOPASSWD: ALL" not in script
+    for expected in (
+        "/usr/bin/true",
+        "/usr/sbin/systemsetup",
+        "/usr/bin/pmset",
+        "/usr/sbin/networksetup",
+        "/usr/sbin/ipconfig",
+    ):
+        assert expected in script
+    assert "mktemp /etc/sudoers.d/.sanctum-automation.XXXXXX" in script
+    assert 'visudo -c -f "$TMP_SUDO"' in script
+    assert 'rm -f "$TMP_SUDO"' in script
+    assert 'mv -f "$TMP_SUDO" /etc/sudoers.d/sanctum-automation' in script
 
 
 def test_render_postinstall_refuses_quoted_pubkey() -> None:
@@ -893,3 +916,138 @@ def test_bootstrap_script_format_still_works(monkeypatch: pytest.MonkeyPatch) ->
     assert result.exit_code == 0, result.stdout
     assert result.stdout.startswith("#!/bin/bash")
     assert PUBKEY in result.stdout
+
+
+def test_render_postinstall_refuses_unsafe_cu_and_symlink_hd(tmp_path: Path) -> None:
+    """Execute the $CU/$HD validation + symlink checks in bash against mocked commands."""
+    import os
+    import subprocess
+
+    script = node_cmd.render_postinstall(PUBKEY, sudo_nopasswd=False, code="123456")
+    # Extract lines from '# Resolve' through the 'KEY=' line and test in a sandboxed PATH.
+    head = "\n".join(script.splitlines()[:35])
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    (fake_bin / "dscl").write_text(f"#!/bin/sh\necho 'NFSHomeDirectory: {tmp_path}/hd'\n")
+    (fake_bin / "dscl").chmod(0o755)
+    (fake_bin / "id").write_text("#!/bin/sh\necho 501\n")
+    (fake_bin / "id").chmod(0o755)
+
+    # Case 1: stat reports root as console user -> exit 1
+    (fake_bin / "stat").write_text("#!/bin/sh\necho root\n")
+    (fake_bin / "stat").chmod(0o755)
+    (fake_bin / "ls").write_text("#!/bin/sh\necho 'crw------- 1 root wheel'\n")
+    (fake_bin / "ls").chmod(0o755)
+    res_root = subprocess.run(
+        ["/bin/bash", "-c", head],
+        env={**os.environ, "PATH": f"{fake_bin}:/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res_root.returncode == 1
+    assert "refusing" in res_root.stderr
+
+    # Case 2: real non-root user + symlinked .ssh -> exit 1
+    hd = tmp_path / "hd"
+    hd.mkdir()
+    (tmp_path / "target").mkdir()
+    (hd / ".ssh").symlink_to(tmp_path / "target")
+    (fake_bin / "stat").write_text("#!/bin/sh\necho alice\n")
+    res_sym = subprocess.run(
+        ["/bin/bash", "-c", head],
+        env={**os.environ, "PATH": f"{fake_bin}:/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res_sym.returncode == 1
+    assert "refusing symlink" in res_sym.stderr
+
+
+def test_generate_automation_key_uses_keychain_and_askpass(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import subprocess
+
+    priv = tmp_path / "ssh" / "sanctum_automation"
+    stored: list[str] = []
+    seen: dict[str, object] = {}
+
+    monkeypatch.setattr(node_cmd, "_store_automation_passphrase", stored.append)
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        seen["argv"] = argv
+        seen["env"] = dict(kwargs["env"])  # type: ignore[arg-type]
+        seen["stdin"] = kwargs.get("stdin")
+        priv.write_text("PRIVATE", encoding="utf-8")
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(node_cmd.subprocess, "run", fake_run)
+    node_cmd._generate_automation_key(priv)
+
+    assert len(stored) == 1 and len(stored[0]) >= 20
+    argv = seen["argv"]
+    assert "-N" not in argv  # type: ignore[operator]
+    assert stored[0] not in argv  # type: ignore[operator]
+    env = seen["env"]
+    assert env["SSH_ASKPASS_REQUIRE"] == "force"  # type: ignore[index]
+    assert "SSH_ASKPASS" in env  # type: ignore[operator]
+    assert seen["stdin"] == subprocess.DEVNULL
+    assert (priv.stat().st_mode & 0o777) == 0o600
+
+
+def test_run_ssh_uses_askpass_when_passphrase_present_else_batchmode(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import subprocess
+
+    monkeypatch.setattr(node_cmd, "_automation_key_path", lambda: tmp_path / "k")
+    calls: list[tuple[list[str], dict[str, str] | None]] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        env = kwargs.get("env")
+        calls.append((list(argv), dict(env) if isinstance(env, dict) else None))
+        return subprocess.CompletedProcess(argv, 0, stdout="ok\n", stderr="")
+
+    monkeypatch.setattr(node_cmd.subprocess, "run", fake_run)
+
+    monkeypatch.setattr(node_cmd, "_read_automation_passphrase", lambda: "pass-123")
+    rc1, out1 = node_cmd._run_ssh("host", "u", "echo ok")
+    assert (rc1, out1) == (0, "ok\n")
+    assert "BatchMode=yes" not in calls[0][0]
+    assert calls[0][1] is not None and calls[0][1]["SSH_ASKPASS_REQUIRE"] == "force"
+
+    monkeypatch.setattr(node_cmd, "_read_automation_passphrase", lambda: None)
+    rc2, _ = node_cmd._run_ssh("host", "u", "echo ok")
+    assert rc2 == 0
+    assert "BatchMode=yes" in calls[1][0]
+
+
+def test_probe_key_hygiene_rejects_malformed_blob_and_uses_double_dash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ssh_calls: list[str] = []
+    monkeypatch.setattr(
+        node_cmd,
+        "_run_ssh",
+        lambda _h, _u, cmd: ssh_calls.append(cmd) or (0, "700\n600\nkey-present\n"),
+    )
+
+    for bad_key in ("ssh-ed25519 ';id;'", "ssh-ed25519 -e", "ssh-ed25519 $(whoami)"):
+        res = node_cmd._probe_key_hygiene("h", "u", bad_key)
+        assert res.status == node_cmd.LayerStatus.FAIL
+    assert ssh_calls == []
+
+    ok = node_cmd._probe_key_hygiene("h", "u", PUBKEY)
+    assert ok.status == node_cmd.LayerStatus.PASS
+    assert len(ssh_calls) == 1
+    assert "grep -qF -- " in ssh_calls[0]
+
+
+def test_node_source_has_no_personal_leaks() -> None:
+    from pathlib import Path
+
+    src = Path(node_cmd.__file__).read_text(encoding="utf-8")
+    for leak in ("manoir", "chalet", "berts-mbp", "tail7c6d11", "/Users/bert"):
+        assert leak not in src

@@ -6,7 +6,7 @@ One terminal binary, `sanctum`, that is the unified front door to a Sanctum host
 
 ## Status
 
-**v0.15.4 — public beta.** Installable from the public Homebrew tap. A person
+**v0.15.5 — public beta.** Installable from the public Homebrew tap. A person
 who isn't the author can go from a fresh Mac to encrypted, verified cloud backups
 in minutes with a single command.
 
@@ -25,7 +25,7 @@ The beta-safe command set runs on any Mac:
 | `sanctum config validate` | Schema-check `instance.yaml` with a precise pointer | ✅ |
 | `sanctum keychain` / `keys backup` | Inspect/rotate + export Keychain-only credentials | ✅ |
 | `sanctum module` / `logs` / `update` | Module manifests, log tail, brew-gated self-update | ✅ |
-| Sigstore release signing | Release artifact signing | ⏳ roadmap |
+| Sigstore release signing | Release artifact signing | ⏳ roadmap (v1.0) |
 
 Some commands need a **full Sanctum haus** (the Mini + Firewalla + council) and
 are not part of the beta — `brainstorm`, `council`, `chat`, `code`, `bridge`,
@@ -197,10 +197,10 @@ Scripts can branch on `$?` without parsing output.
 
 ## License
 
-FSL-1.1-MIT (converts to MIT after 2 years) — see [`LICENSE`](./LICENSE). The
+FSL-1.1-Apache-2.0 (converts to Apache License, Version 2.0 after 2 years) — see [`LICENSE`](./LICENSE). The
 Functional Source License lets you use, modify, and redistribute the software
 for any purpose except a competing commercial product; two years after each
-release that version is additionally available under the MIT License.
+release that version is additionally available under the Apache License, Version 2.0.
 
 ## Security
 

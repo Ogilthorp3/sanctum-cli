@@ -411,3 +411,31 @@ def test_live_ha_green_read_only_api() -> None:
     finally:
         p.disconnect()
     assert info and "API running." in info, "live HA Green returned an unexpected /api/ body"
+
+
+def test_fetch_and_strict_reject_bad_url_and_strip_trailing_slash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import httpx
+
+    from sanctum_cli.devices import ha_green as hg
+
+    seen_urls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_urls.append(str(request.url))
+        return httpx.Response(200, request=request, json={"message": "API running."})
+
+    monkeypatch.setattr(hg, "_ha_transport", lambda: httpx.MockTransport(handler))
+    monkeypatch.setattr(hg, "_read_ha_token", lambda: "tok")
+
+    for bad_url in ("file:///etc/passwd", "http://user:pw@10.0.0.3:8123", "http://10.0.0.3:8123?q=1"):
+        assert hg._fetch_api_json("/api/", url=bad_url, token="tok") is None
+        monkeypatch.setattr(hg, "_ha_url", lambda u=bad_url: u)
+        with pytest.raises(DeviceError):
+            hg._get_api_json_strict("/api/")
+    assert seen_urls == []
+
+    res = hg._fetch_api_json("/api/", url="http://10.0.0.3:8123/", token="tok")
+    assert res == {"message": "API running."}
+    assert seen_urls == ["http://10.0.0.3:8123/api/"]

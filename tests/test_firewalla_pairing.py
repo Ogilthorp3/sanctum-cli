@@ -95,3 +95,26 @@ def test_set_firewalla_bridge_writes_only_on_paired(tmp_path: Path) -> None:
     assert "t0ken" not in inst.read_text(encoding="utf-8")
     assert secrets.read_text(encoding="utf-8").strip() == "t0ken"
     assert (secrets.stat().st_mode & 0o777) == 0o600
+
+
+def test_pairing_rejects_non_http_and_userinfo_and_disables_redirects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen_kwargs: list[dict[str, object]] = []
+
+    def fake_get(url, **kwargs):  # type: ignore[no-untyped-def]
+        seen_kwargs.append(dict(kwargs))
+        req = httpx.Request("GET", url)
+        return httpx.Response(200, request=req, json=[])
+
+    monkeypatch.setattr("httpx.get", fake_get)
+
+    for bad_url in ("file:///etc/passwd", "ftp://127.0.0.1:1984", "http://u:p@127.0.0.1:1984"):
+        r = screen_time.validate_firewalla_pairing(bad_url, "tok")
+        assert r.ok is False
+        assert r.state == "bad_response"
+    assert seen_kwargs == []
+
+    r_ok = screen_time.validate_firewalla_pairing("http://127.0.0.1:1984/", "tok")
+    assert r_ok.ok is True
+    assert seen_kwargs == [{"headers": {"Authorization": "Bearer tok"}, "timeout": 10.0, "follow_redirects": False}]

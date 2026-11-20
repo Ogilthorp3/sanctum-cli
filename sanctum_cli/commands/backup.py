@@ -9,7 +9,6 @@ restore — so operators don't have to remember the restic incantations.
 from __future__ import annotations
 
 import json
-import os
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -22,6 +21,7 @@ from rich.table import Table
 
 from sanctum_cli import config, keychain, recipes
 from sanctum_cli.errors import LocalError, UserError
+from sanctum_cli.restic import restic_env_for_repo, restic_env_for_repo_path
 
 console = Console()
 err = Console(stderr=True)
@@ -40,6 +40,7 @@ RepoFilter = Literal["primary", "secondary", "all"]
 class _Repo:
     label: str
     path: str
+    repo_cfg: config.CloudBackupRepo | None = None
 
 
 def _resolve_recipe_target(cfg: config.Config, recipe: config.Recipe) -> _Repo:
@@ -55,7 +56,7 @@ def _resolve_recipe_target(cfg: config.Config, recipe: config.Recipe) -> _Repo:
     if repo_cfg is None:
         msg = f"recipe targets cloud_backup.{slot}, but it's not configured"
         raise UserError(msg, fix=f"run `sanctum cloud setup` to populate the {slot} slot")
-    return _Repo(label=slot, path=repo_cfg.path if False else repo_cfg.repo)
+    return _Repo(label=slot, path=repo_cfg.repo, repo_cfg=repo_cfg)
 
 
 def _resolve_repos(cfg: config.Config, repo_filter: RepoFilter) -> list[_Repo]:
@@ -68,9 +69,9 @@ def _resolve_repos(cfg: config.Config, repo_filter: RepoFilter) -> list[_Repo]:
         )
     repos: list[_Repo] = []
     if repo_filter in ("primary", "all") and cb.primary is not None:
-        repos.append(_Repo(label="primary", path=cb.primary.repo))
+        repos.append(_Repo(label="primary", path=cb.primary.repo, repo_cfg=cb.primary))
     if repo_filter in ("secondary", "all") and cb.secondary is not None:
-        repos.append(_Repo(label="secondary", path=cb.secondary.repo))
+        repos.append(_Repo(label="secondary", path=cb.secondary.repo, repo_cfg=cb.secondary))
     if not repos:
         msg = f"no {repo_filter} repo configured"
         raise UserError(msg, fix="check instance.yaml cli.cloud_backup")
@@ -87,35 +88,12 @@ def _load_password(cfg: config.Config) -> str:
     )
 
 
-def _restic_env(cfg: config.Config, repo: _Repo) -> dict[str, str]:
-    """Env for a restic invocation against ``repo``: RESTIC_PASSWORD plus the
-    cloud-backend credentials restic needs to actually reach the repo. Without
-    the cloud creds, run/verify/restore/snapshots against b2:/s3:/r2: repos
-    fail with an auth error even though the passphrase is present.
-    Credentials come from the same Keychain entries the wizard wrote (constants
-    imported from the backends, not re-hardcoded)."""
-    from sanctum_cli.backends import b2 as _b2
-    from sanctum_cli.backends import r2 as _r2
-
-    env = dict(os.environ)
-    env["RESTIC_PASSWORD"] = _load_password(cfg)
-    path = repo.path
-    if path.startswith("b2:"):
-        env["B2_ACCOUNT_ID"] = keychain.read(
-            account=_b2.KEYCHAIN_ACCOUNT, service=_b2.KEYCHAIN_SERVICE_KEY_ID
-        )
-        env["B2_ACCOUNT_KEY"] = keychain.read(
-            account=_b2.KEYCHAIN_ACCOUNT, service=_b2.KEYCHAIN_SERVICE_APP_KEY
-        )
-    elif path.startswith(("s3:", "r2:")):
-        env["AWS_ACCESS_KEY_ID"] = keychain.read(
-            account=_b2.KEYCHAIN_ACCOUNT, service=_r2.KEYCHAIN_SERVICE_R2_ACCESS_KEY
-        )
-        env["AWS_SECRET_ACCESS_KEY"] = keychain.read(
-            account=_b2.KEYCHAIN_ACCOUNT, service=_r2.KEYCHAIN_SERVICE_R2_SECRET
-        )
-        env["AWS_DEFAULT_REGION"] = "auto"
-    return env
+def _restic_env(cfg: config.Config | None, repo: _Repo) -> dict[str, str]:
+    """Env for a restic invocation against ``repo`` via shared ``restic_env_for_repo``."""
+    if repo.repo_cfg is not None:
+        return restic_env_for_repo(repo.repo_cfg)
+    password = _load_password(cfg)  # type: ignore[arg-type]
+    return restic_env_for_repo_path(repo.path, password=password)
 
 
 # ─── run ────────────────────────────────────────────────────────────

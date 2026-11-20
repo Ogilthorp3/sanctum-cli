@@ -207,15 +207,13 @@ def test_device_creds_falls_back_to_per_kind_default_when_unset(
 def test_keychain_write_passes_hostile_value_as_single_argv_element(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The GUARANTEED tier: a hostile password rides as ONE argv element after ``-w``.
+    """The GUARANTEED tier: hostile secrets NEVER ride argv — they ride ``security -i`` stdin.
 
-    Drives the REAL ``_keychain_write`` (cheap subprocess boundary — exercised for
-    real per CLAUDE.md) with ONLY ``subprocess.run`` mocked. The contract: no shell
-    (``security`` is invoked argv-style, so ``;``/``$``/backticks cannot inject) and
-    the value cannot be misread as a flag (it is the element immediately after
-    ``-w``; even a value of ``--update`` is consumed as the password, not a flag).
-    The expectation is derived from the boundary's own shape (``-w`` then the
-    value), not by re-reading the production string.
+    Drives the REAL ``_keychain_write`` -> ``keychain.write`` with ONLY
+    ``subprocess.run`` mocked. The contract: ``security`` is invoked as
+    ``["/usr/bin/security", "-i"]`` (never ``shell=True``), the hostile
+    password is never present in ``argv``, and the UTF-8 hex payload rides
+    ``input`` after ``-X``.
     """
     captured: dict[str, Any] = {}
 
@@ -225,7 +223,7 @@ def test_keychain_write_passes_hostile_value_as_single_argv_element(
 
     def fake_run(argv: list[str], *a: Any, **k: Any) -> _Ok:
         captured["argv"] = argv
-        # argv-style invocation: shell=True would be the footgun this guards.
+        captured["input"] = k.get("input", "")
         assert k.get("shell", False) is False
         return _Ok()
 
@@ -235,14 +233,14 @@ def test_keychain_write_passes_hostile_value_as_single_argv_element(
     onboard._keychain_write(account="admin", service="bell-hub-admin", value=HOSTILE_PASSWORD)
 
     argv = captured["argv"]
-    # The value is exactly the single element following ``-w`` — verbatim, unsplit.
-    w_idx = argv.index("-w")
-    assert argv[w_idx + 1] == HOSTILE_PASSWORD
-    # And it appears EXACTLY once as its own element (never split on spaces/metachars).
-    assert argv.count(HOSTILE_PASSWORD) == 1
-    # The shell metacharacters are NOT expanded into separate argv tokens.
+    assert argv == ["/usr/bin/security", "-i"]
+    assert HOSTILE_PASSWORD not in argv
     assert "rm" not in argv
-    assert "$HOME" not in argv  # the literal token never becomes its own argv element
+    assert "$HOME" not in argv
+    stdin_cmd = str(captured["input"])
+    assert f"-X {HOSTILE_PASSWORD.encode('utf-8').hex()}" in stdin_cmd
+    assert '-a "admin" -s "bell-hub-admin"' in stdin_cmd
+    assert " -U\n" in stdin_cmd
 
 
 def test_op_mirror_keeps_hostile_value_off_argv_and_in_stdin(

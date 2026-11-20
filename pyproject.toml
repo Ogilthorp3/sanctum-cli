@@ -8,7 +8,7 @@ version = "0.15.5"
 description = "Unified terminal binary for Sanctum hosts — router, wizard, doctor."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "FSL-1.1-MIT" }
+license = { text = "FSL-1.1-Apache-2.0" }
 license-files = ["LICENSE"]
 authors = [{ name = "Bertrand Nepveu" }]
 keywords = ["sanctum", "cli", "backup", "claude", "gemini"]

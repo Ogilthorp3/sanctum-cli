@@ -2296,31 +2296,14 @@ def set_device_reference(
 
 
 def _keychain_write(account: str, service: str, value: str) -> None:
-    """Write a generic-password entry to the login Keychain via ``security``.
+    """Write a generic-password entry to the login Keychain via ``security -i``.
 
-    The guaranteed secrets tier (CLAUDE.md secrets-trifecta): the Keychain is
-    always present on macOS, so this is the one write that MUST succeed for the
-    pairing to be usable. Mirrors ``keychain_cmd``'s ``add-generic-password -U``
-    (update-or-create). Raises ``LocalError`` on a genuine failure so the caller
-    can surface it — a paired device whose password did not land is worse than a
-    loud failure. The seam tests monkeypatch so no real Keychain entry is created.
+    Delegates to :func:`sanctum_cli.keychain.write` so the secret rides stdin
+    (hex-encoded via ``-X``) and never appears on subprocess ``argv``.
     """
-    import subprocess
+    from sanctum_cli import keychain
 
-    from sanctum_cli.keychain import SECURITY_BIN
-
-    if not shutil.which(SECURITY_BIN):
-        msg = f"missing required binary: {SECURITY_BIN}"
-        raise LocalError(msg, fix="install Xcode Command Line Tools: xcode-select --install")
-    proc = subprocess.run(
-        [SECURITY_BIN, "add-generic-password", "-a", account, "-s", service, "-w", value, "-U"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if proc.returncode != 0:
-        msg = f"Keychain write failed: {proc.stderr.strip() or 'unknown error'}"
-        raise LocalError(msg)
+    keychain.write(account=account, service=service, value=value, update=True)
 
 
 # ── Trifecta cred-capture seam (1P / SOPS / Keychain) ────────────────
@@ -2916,7 +2899,6 @@ def _run_canary() -> CanaryOutcome:
     NON-BLOCKING: this never raises; onboarding continues regardless of the outcome.
     """
     import hashlib
-    import os
     import subprocess
     import tempfile
     from pathlib import Path
@@ -2935,12 +2917,13 @@ def _run_canary() -> CanaryOutcome:
     live_sha = hashlib.sha256(probe.read_bytes()).hexdigest()
     console.print(f"  live ~/.zshrc sha256={live_sha[:16]}…")
 
-    from sanctum_cli import keychain
+    from sanctum_cli.restic import restic_env_for_repo
 
-    env = dict(os.environ)
-    env["RESTIC_PASSWORD"] = keychain.read(
-        account=cb.primary.keychain.account, service=cb.primary.keychain.service
-    )
+    try:
+        env = restic_env_for_repo(cb.primary)
+    except LocalError as exc:
+        console.print(f"  [red]✗[/] keychain unavailable: {exc.message[:160]}")
+        return CanaryOutcome.FAILED
     with tempfile.TemporaryDirectory(prefix="sanctum-onboard-canary-") as tmp:
         proc = subprocess.run(
             [

@@ -87,9 +87,12 @@ def install_cmd(
     ] = False,
 ) -> None:
     if dry_run:
-        dest = su.materialize_assets()
+        rc = su.run_install(dry_run=True)
+        if rc != 0:
+            raise LocalError(f"service-user dry-run exited {rc}")
+        dest = su.operator_home() / ".sanctum" / "launchdaemons"
         console.print(
-            f"[dim]dry-run:[/] packaged plists → {dest}\n"
+            f"[dim]dry-run:[/] would materialize packaged plists → {dest}\n"
             f"[dim]would run as root:[/] create user sanctum + bootstrap LaunchDaemons"
         )
         return

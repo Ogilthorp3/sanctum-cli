@@ -64,7 +64,7 @@ def read(account: str, service: str) -> str:
         msg = f"Keychain entry missing: account={account!r}, service={service!r}"
         raise KeychainEntryMissingError(
             msg,
-            fix=f'security add-generic-password -a "{account}" -s "{service}" -w "<value>"',
+            fix=f'security add-generic-password -a "{account}" -s "{service}" -w',
         )
     if result.returncode == 36:  # errSecAuthFailed / locked
         msg = "Keychain is locked"
@@ -74,6 +74,50 @@ def read(account: str, service: str) -> str:
         )
     stderr = result.stderr.strip() or "unknown error"
     msg = f"security CLI failed (rc={result.returncode}): {stderr}"
+    raise LocalError(msg)
+
+
+def _escape_security_interactive_arg(text: str) -> str:
+    """Validate and quote an argument for ``security -i`` stdin commands."""
+    if any(ch in text for ch in ("\r", "\n", "\0")):
+        msg = "keychain account/service must not contain newlines or NUL"
+        raise LocalError(msg)
+    escaped = text.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def write(account: str, service: str, value: str, *, update: bool = True) -> None:
+    """Write a generic-password entry via ``security -i`` (never puts secret in argv)."""
+    _ensure_security_bin()
+    acct_tok = _escape_security_interactive_arg(account)
+    svc_tok = _escape_security_interactive_arg(service)
+    hex_val = value.encode("utf-8").hex()
+    val_flag = f"-X {hex_val}" if hex_val else '-w ""'
+    update_flag = " -U" if update else ""
+    cmd_line = f"add-generic-password -a {acct_tok} -s {svc_tok} {val_flag}{update_flag}\n"
+    try:
+        result = subprocess.run(
+            [SECURITY_BIN, "-i"],
+            input=cmd_line,
+            capture_output=True,
+            text=True,
+            timeout=TIMEOUT_S,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        msg = "security CLI timed out writing Keychain"
+        raise LocalError(msg, fix="retry; if persistent, restart securityd") from exc
+
+    if result.returncode == 0:
+        return
+    if result.returncode == 36:
+        msg = "Keychain is locked"
+        raise KeychainLockedError(
+            msg,
+            fix='unlock with: security unlock-keychain "$HOME/Library/Keychains/login.keychain-db"',
+        )
+    stderr = result.stderr.strip() or "unknown error"
+    msg = f"Keychain write failed: {stderr}"
     raise LocalError(msg)
 
 

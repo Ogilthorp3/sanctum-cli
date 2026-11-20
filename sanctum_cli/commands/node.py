@@ -24,12 +24,16 @@ zero live network, zero keygen, and zero SSH.
 from __future__ import annotations
 
 import concurrent.futures
+import contextlib
 import enum
 import getpass
 import hashlib
 import ipaddress
 import json
+import os
 import re
+import secrets
+import shlex
 import socket
 import subprocess
 import tempfile
@@ -45,7 +49,7 @@ from rich.console import Console
 from rich.markup import escape
 from rich.table import Table
 
-from sanctum_cli import config
+from sanctum_cli import config, keychain
 from sanctum_cli.errors import LocalError, NetworkError, SanctumError
 from sanctum_cli.hive.capabilities import NodeCapability, capabilities_of, normalize_capability
 from sanctum_cli.hive.export_council import overlay_hosts
@@ -57,9 +61,10 @@ from sanctum_cli.hive.naming import (
 )
 from sanctum_cli.hive.route import pick_node
 from sanctum_cli.hive.sot import peers_of, primary_node_name, validate_roster
+from sanctum_cli.keychain import KeychainEntryMissingError
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable, Iterator, Mapping
 
 console = Console()
 err_console = Console(stderr=True)
@@ -131,29 +136,109 @@ def _probe_tcp(host: str, port: int, timeout: float = _PROBE_TIMEOUT_S) -> bool:
         return False
 
 
+_AUTOMATION_KEYCHAIN_SERVICE = "sanctum-automation-ssh"
+_AUTOMATION_KEYCHAIN_ACCOUNT = "sanctum-automation"
+_SSH_PUBKEY_RE = re.compile(
+    r"^(?:ssh-(?:ed25519|rsa|dss)|ecdsa-sha2-\S+|sk-\S+)\s+[A-Za-z0-9+/=]+(?:\s+[^\r\n']*)?$"
+)
+_BASE64_BLOB_RE = re.compile(r"^[A-Za-z0-9+/=]+$")
+
+
+def _store_automation_passphrase(passphrase: str) -> None:
+    """Persist the automation key passphrase in Keychain via ``security -i`` stdin."""
+    keychain.write(
+        account=_AUTOMATION_KEYCHAIN_ACCOUNT,
+        service=_AUTOMATION_KEYCHAIN_SERVICE,
+        value=passphrase,
+        update=True,
+    )
+
+
+def _read_automation_passphrase() -> str | None:
+    """Read the automation key passphrase from Keychain, or None if absent."""
+    try:
+        return keychain.read(
+            account=_AUTOMATION_KEYCHAIN_ACCOUNT,
+            service=_AUTOMATION_KEYCHAIN_SERVICE,
+        )
+    except KeychainEntryMissingError:
+        return None
+
+
+@contextlib.contextmanager
+def _askpass_env(passphrase: str) -> Iterator[dict[str, str]]:
+    """Create an ephemeral 0700/0600 SSH_ASKPASS helper without exposing secrets on argv."""
+    with tempfile.TemporaryDirectory(prefix="sanctum-askpass-") as tmp_dir:
+        tmp_path = Path(tmp_dir)
+        tmp_path.chmod(0o700)
+        pass_file = tmp_path / "pass.txt"
+        pass_file.write_text(passphrase, encoding="utf-8")
+        pass_file.chmod(0o600)
+        askpass = tmp_path / "askpass.sh"
+        askpass.write_text(
+            f"#!/bin/sh\ncat {shlex.quote(str(pass_file))}\n",
+            encoding="utf-8",
+        )
+        askpass.chmod(0o700)
+        env = dict(os.environ)
+        env["SSH_ASKPASS"] = str(askpass)
+        env["SSH_ASKPASS_REQUIRE"] = "force"
+        env["DISPLAY"] = ":0"
+        yield env
+
+
 def _run_ssh(host: str, user: str, command: str, *, timeout: int = _SSH_COMMAND_TIMEOUT_S) -> tuple[int, str]:
     """Run one command on the satellite over SSH; return ``(returncode, stdout)``.
 
-    Hardened transport mirroring ``net._firewalla_guardian_epoch``: BatchMode (a
-    password prompt must fail, never hang), publickey-only, accept-new host keys,
-    bounded connect — plus ``IdentitiesOnly`` pinned to the sanctum automation
-    key so an agent full of other identities can't shadow the probe. Never
-    raises; any transport failure reads as ``(255, "")`` (the ssh convention).
+    Uses Keychain-backed ``SSH_ASKPASS`` (with password/kbd-interactive auth
+    disabled) when a passphrase exists for the automation key, and falls back
+    to ``BatchMode=yes`` otherwise. Never raises; transport failure reads as
+    ``(255, "")``.
     """
-    argv = [
+    base_argv = [
         "ssh",
         "-i",
         str(_automation_key_path()),
         "-o",
         "IdentitiesOnly=yes",
         "-o",
-        "BatchMode=yes",
-        "-o",
         "PreferredAuthentications=publickey",
+        "-o",
+        "PasswordAuthentication=no",
+        "-o",
+        "KbdInteractiveAuthentication=no",
         "-o",
         "StrictHostKeyChecking=accept-new",
         "-o",
         "ConnectTimeout=5",
+    ]
+    passphrase: str | None = None
+    with contextlib.suppress(LocalError):
+        passphrase = _read_automation_passphrase()
+
+    if passphrase is not None:
+        argv = [*base_argv, f"{user}@{host}", command]
+        try:
+            with _askpass_env(passphrase) as env:
+                proc = subprocess.run(
+                    argv,
+                    env=env,
+                    stdin=subprocess.DEVNULL,
+                    capture_output=True,
+                    text=True,
+                    errors="replace",
+                    timeout=timeout,
+                    start_new_session=True,
+                    check=False,
+                )
+        except (OSError, subprocess.SubprocessError):
+            return (255, "")
+        return (proc.returncode, proc.stdout)
+
+    argv = [
+        *base_argv,
+        "-o",
+        "BatchMode=yes",
         f"{user}@{host}",
         command,
     ]
@@ -179,22 +264,33 @@ def _automation_key_path() -> Path:
 
 
 def _generate_automation_key(priv: Path) -> None:
-    """Generate the ed25519 automation pair at ``priv`` / ``priv.pub`` — a seam.
-
-    First-run only (``bootstrap-script`` calls it when no ``.pub`` exists). The
-    comment names the console + date so a satellite's authorized_keys reads as an
-    audit trail. Raises ``LocalError`` when ssh-keygen fails — a bootstrap script
-    with no key to embed is useless, so this is not best-effort.
-    """
+    """Generate a Keychain-passphrase-protected ed25519 pair at ``priv`` / ``priv.pub``."""
     host = (socket.gethostname() or "console").split(".")[0]
     comment = f"sanctum-automation-{host}-{date.today().isoformat()}"
     priv.parent.mkdir(parents=True, exist_ok=True)
-    rc, _out = _run_local(
-        ["ssh-keygen", "-t", "ed25519", "-N", "", "-f", str(priv), "-C", comment]
-    )
-    if rc != 0:
+    priv.parent.chmod(0o700)
+    passphrase = secrets.token_urlsafe(32)
+    _store_automation_passphrase(passphrase)
+    with _askpass_env(passphrase) as env:
+        try:
+            proc = subprocess.run(
+                ["ssh-keygen", "-t", "ed25519", "-f", str(priv), "-C", comment],
+                env=env,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=15,
+                start_new_session=True,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            msg = f"ssh-keygen failed generating the automation key at {priv}"
+            raise LocalError(msg, fix="check ~/.ssh exists and is writable, then re-run") from exc
+    if proc.returncode != 0:
         msg = f"ssh-keygen failed generating the automation key at {priv}"
         raise LocalError(msg, fix="check ~/.ssh exists and is writable, then re-run")
+    with contextlib.suppress(OSError):
+        priv.chmod(0o600)
 
 
 def _ensure_automation_pubkey() -> str:
@@ -442,26 +538,44 @@ def node_scan() -> None:
 
 # ─── bootstrap-script (the one run at the new Mac's keyboard) ─────────
 
-# The script below is the FIELD-VALIDATED procedure (chalet M1 Mini bring-up):
+# The script below is the FIELD-VALIDATED procedure (satellite Mac Mini bring-up):
 #   a. Remote Login on            — the console's way in
 #   b. authorized_keys append     — idempotent (grep -qF guard), 700/600 perms
 #   c. headless reliability       — restart-on-power-failure, never sleep,
 #                                   pmset sleep/disksleep/powernap 0 + womp 1
-#   d. passwordless sudo          — ONLY with --sudo-nopasswd; sudoers.d
-#                                   drop-in, 0440, visudo-validated with a
-#                                   remove-on-invalid guard (never brick sudo)
+#   d. passwordless sudo          — ONLY with --sudo-nopasswd; scoped sudoers.d
+#                                   drop-in, 0440, visudo-validated via mktemp
+#                                   staging (never brick sudo)
 # Keep the semantics; the wrapper text may evolve, the commands must not.
 # bash-3.2-safe on purpose: /bin/bash on macOS is 3.2 and always present.
 
-_SUDO_NOPASSWD_STEP = """\
-echo "[4/4] passwordless sudo for automation (--sudo-nopasswd)"
-printf '%s ALL=(ALL) NOPASSWD: ALL\\n' "$(whoami)" | sudo tee /etc/sudoers.d/sanctum-automation >/dev/null
-sudo chmod 0440 /etc/sudoers.d/sanctum-automation
-if ! sudo visudo -c -f /etc/sudoers.d/sanctum-automation >/dev/null; then
-  sudo rm -f /etc/sudoers.d/sanctum-automation
+_SUDO_SCOPED_CMDS = (
+    "/usr/bin/true, "
+    "/usr/sbin/systemsetup -getrestartpowerfailure, "
+    "/usr/sbin/systemsetup -setrestartpowerfailure on, "
+    "/usr/sbin/systemsetup -setcomputersleep Never, "
+    "/usr/sbin/systemsetup -setremotelogin on, "
+    "/usr/bin/pmset -a sleep 0 disksleep 0 powernap 0 womp 1, "
+    "/usr/sbin/networksetup -setdhcp Wi-Fi, "
+    "/usr/sbin/ipconfig set en[0-9] DHCP"
+)
+
+_SUDO_NOPASSWD_STEP = f"""\
+echo "[4/4] scoped passwordless sudo for automation (--sudo-nopasswd)"
+TMP_SUDO=$(sudo mktemp /etc/sudoers.d/.sanctum-automation.XXXXXX)
+printf '%s ALL=(root) NOPASSWD: {_SUDO_SCOPED_CMDS}\\n' "$(whoami)" | sudo tee "$TMP_SUDO" >/dev/null
+sudo chmod 0440 "$TMP_SUDO"
+if ! sudo visudo -c -f "$TMP_SUDO" >/dev/null; then
+  sudo rm -f "$TMP_SUDO"
   echo "sudoers entry failed validation - removed, sudo unchanged" >&2
   exit 1
 fi
+if [ -L /etc/sudoers.d/sanctum-automation ]; then
+  sudo rm -f "$TMP_SUDO"
+  echo "refusing symlink /etc/sudoers.d/sanctum-automation" >&2
+  exit 1
+fi
+sudo mv -f "$TMP_SUDO" /etc/sudoers.d/sanctum-automation
 """
 
 _SUDO_SKIPPED_STEP = """\
@@ -469,17 +583,16 @@ echo "[4/4] passwordless sudo: skipped (re-generate with --sudo-nopasswd to enab
 """
 
 
-def render_bootstrap_script(pubkey: str, *, sudo_nopasswd: bool) -> str:
-    """Render the one-run bootstrap script with ``pubkey`` embedded.
-
-    Pure (string in → string out) so tests pin the exact field-validated
-    semantics without touching a key pair or a filesystem. The pubkey line is
-    embedded single-quoted; ssh public keys are base64 + a plain comment, so a
-    quote in one would mean a corrupted key — refuse rather than mis-embed.
-    """
-    if "'" in pubkey:
-        msg = "automation public key contains a quote — refusing to embed it"
+def _validate_pubkey(pubkey: str) -> None:
+    clean = pubkey.strip()
+    if "'" in pubkey or "\n" in pubkey or "\r" in pubkey or not _SSH_PUBKEY_RE.fullmatch(clean):
+        msg = "automation public key is malformed or contains unsafe characters — refusing to embed it"
         raise LocalError(msg, fix="regenerate the key: delete the pair and re-run")
+
+
+def render_bootstrap_script(pubkey: str, *, sudo_nopasswd: bool) -> str:
+    """Render the one-run bootstrap script with ``pubkey`` embedded."""
+    _validate_pubkey(pubkey)
     sudo_step = _SUDO_NOPASSWD_STEP if sudo_nopasswd else _SUDO_SKIPPED_STEP
     return f"""\
 #!/bin/bash
@@ -551,14 +664,22 @@ def pairing_code(pubkey: str) -> str:
     return f"{int.from_bytes(digest[:4], 'big') % 1_000_000:06d}"
 
 
-_PKG_POSTINSTALL_SUDO = """\
-echo "[4/4] passwordless sudo for automation (--sudo-nopasswd)"
-printf '%s ALL=(ALL) NOPASSWD: ALL\\n' "$CU" > /etc/sudoers.d/sanctum-automation
-chmod 0440 /etc/sudoers.d/sanctum-automation
-if ! visudo -c -f /etc/sudoers.d/sanctum-automation >/dev/null 2>&1; then
-  rm -f /etc/sudoers.d/sanctum-automation
+_PKG_POSTINSTALL_SUDO = f"""\
+echo "[4/4] scoped passwordless sudo for automation (--sudo-nopasswd)"
+TMP_SUDO=$(mktemp /etc/sudoers.d/.sanctum-automation.XXXXXX)
+printf '%s ALL=(root) NOPASSWD: {_SUDO_SCOPED_CMDS}\\n' "$CU" > "$TMP_SUDO"
+chmod 0440 "$TMP_SUDO"
+if ! visudo -c -f "$TMP_SUDO" >/dev/null 2>&1; then
+  rm -f "$TMP_SUDO"
   echo "sudoers entry failed validation - removed, sudo unchanged" >&2
+  exit 1
 fi
+if [ -L /etc/sudoers.d/sanctum-automation ]; then
+  rm -f "$TMP_SUDO"
+  echo "refusing symlink /etc/sudoers.d/sanctum-automation" >&2
+  exit 1
+fi
+mv -f "$TMP_SUDO" /etc/sudoers.d/sanctum-automation
 """
 
 _PKG_POSTINSTALL_NOSUDO = """\
@@ -567,19 +688,8 @@ echo "[4/4] passwordless sudo: skipped (rebuild with --sudo-nopasswd to enable)"
 
 
 def render_postinstall(pubkey: str, *, sudo_nopasswd: bool, code: str) -> str:
-    """Render the ``.pkg`` ``postinstall`` script — runs as ROOT via the Installer.
-
-    The double-click path: no Terminal, no typed sudo. Same field-validated steps
-    as :func:`render_bootstrap_script`, adapted for a root postinstall — it resolves
-    the logged-in **console user** (``stat -f%Su /dev/console`` with a root
-    fallback) and that user's home (``dscl``), so the key lands in the human's
-    ``~/.ssh`` (``chown``'d to them), never in root's home. ``code`` is stamped in a
-    header marker so the artifact is tied to THIS console's key (the console prints
-    the same pairing code). Idempotent, bash-3.2-safe, embeds no IP.
-    """
-    if "'" in pubkey:
-        msg = "automation public key contains a quote — refusing to embed it"
-        raise LocalError(msg, fix="regenerate the key: delete the pair and re-run")
+    """Render the ``.pkg`` ``postinstall`` script — runs as ROOT via the Installer."""
+    _validate_pubkey(pubkey)
     sudo_step = _PKG_POSTINSTALL_SUDO if sudo_nopasswd else _PKG_POSTINSTALL_NOSUDO
     return f"""\
 #!/bin/bash
@@ -588,20 +698,55 @@ def render_postinstall(pubkey: str, *, sudo_nopasswd: bool, code: str) -> str:
 # Generated by `sanctum node bootstrap-script --format pkg`. No Terminal needed.
 set -uo pipefail
 
-# Resolve the logged-in console user — the key must NOT land in root's home.
-CU=$(stat -f%Su /dev/console); [ -z "$CU" -o "$CU" = root ] && CU=$(ls -l /dev/console | awk '{{print $3}}')
-HD=$(dscl . -read /Users/"$CU" NFSHomeDirectory 2>/dev/null | awk '{{print $2}}')
+# Resolve and strictly validate the logged-in console user + home directory.
+CU=$(stat -f%Su /dev/console || true)
+if [ -z "$CU" ] || [ "$CU" = root ]; then
+  CU=$(ls -ld /dev/console 2>/dev/null | awk '{{print $3}}' || true)
+fi
+case "$CU" in
+  ""|root|_*|*[!A-Za-z0-9._-]*)
+    echo "refusing unsafe or non-interactive console user: '$CU'" >&2
+    exit 1
+    ;;
+esac
+CU_UID=$(id -u "$CU" 2>/dev/null || true)
+if [ -z "$CU_UID" ] || [ "$CU_UID" -eq 0 ]; then
+  echo "refusing console user '$CU' (uid=$CU_UID)" >&2
+  exit 1
+fi
+HD=$(dscl . -read /Users/"$CU" NFSHomeDirectory 2>/dev/null | sed -n 's/^NFSHomeDirectory: //p')
+if [ -z "$HD" ] || [ -L "$HD" ] || [ ! -d "$HD" ] || [ "$(stat -f%Su "$HD")" != "$CU" ]; then
+  echo "refusing invalid or untrusted home directory '$HD' for user '$CU'" >&2
+  exit 1
+fi
+if [ -L "$HD/.ssh" ] || [ -L "$HD/.ssh/authorized_keys" ]; then
+  echo "refusing symlink in $HD/.ssh" >&2
+  exit 1
+fi
 KEY='{pubkey}'
 
 echo "[1/4] Remote Login (SSH) on"
 systemsetup -setremotelogin on 2>/dev/null || true
 
 echo "[2/4] authorize the console's sanctum automation key (user $CU)"
-sudo -u "$CU" mkdir -p "$HD/.ssh"
-chmod 700 "$HD/.ssh"
-grep -qF "$KEY" "$HD/.ssh/authorized_keys" 2>/dev/null || echo "$KEY" >> "$HD/.ssh/authorized_keys"
-chown "$CU" "$HD/.ssh/authorized_keys"
-chmod 600 "$HD/.ssh/authorized_keys"
+sudo -u "$CU" -- /bin/sh -c '
+  set -eu
+  hd=$1
+  key=$2
+  if [ -L "$hd/.ssh" ] || [ -L "$hd/.ssh/authorized_keys" ]; then
+    echo "refusing symlink in $hd/.ssh" >&2
+    exit 1
+  fi
+  mkdir -p "$hd/.ssh"
+  chmod 700 "$hd/.ssh"
+  if [ -L "$hd/.ssh/authorized_keys" ]; then
+    echo "refusing symlink authorized_keys" >&2
+    exit 1
+  fi
+  touch "$hd/.ssh/authorized_keys"
+  chmod 600 "$hd/.ssh/authorized_keys"
+  grep -qF -- "$key" "$hd/.ssh/authorized_keys" 2>/dev/null || printf "%s\\n" "$key" >> "$hd/.ssh/authorized_keys"
+' _ "$HD" "$KEY"
 
 echo "[3/4] headless reliability (restart on power failure, never sleep, wake-on-LAN)"
 systemsetup -setrestartpowerfailure on 2>/dev/null || true
@@ -910,15 +1055,15 @@ def _probe_identity(host: str, user: str) -> tuple[LayerResult, str]:
 def _probe_key_hygiene(host: str, user: str, pubkey: str) -> LayerResult:
     """L4: authorized_keys perms + our key actually present (not just "auth worked").
 
-    Greps for the key's base64 blob (field 2 — no shell metacharacters by
-    construction), so a satellite that let us in via some OTHER identity still
-    fails honestly here.
+    Validates the key's base64 blob and quotes it safely before SSH execution.
     """
     parts = pubkey.split()
     blob = parts[1] if len(parts) >= 2 else pubkey
+    if not _BASE64_BLOB_RE.fullmatch(blob):
+        return LayerResult("L4", "key hygiene", LayerStatus.FAIL, "invalid automation public key blob")
     cmd = (
         'stat -f%Lp "$HOME/.ssh"; stat -f%Lp "$HOME/.ssh/authorized_keys"; '
-        f"grep -qF '{blob}' \"$HOME/.ssh/authorized_keys\" && echo key-present || echo key-absent"
+        f'grep -qF -- {shlex.quote(blob)} "$HOME/.ssh/authorized_keys" && echo key-present || echo key-absent'
     )
     rc, out = _run_ssh(host, user, cmd)
     lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
@@ -999,7 +1144,7 @@ def ssh_user_of(node: Mapping[str, Any] | dict[str, Any]) -> str:
 
 
 def looks_like_tailscale_name(host: str) -> bool:
-    """True for simple MagicDNS stems (``manoir``, ``chalet``, ``mbp``), not IPs or FQDNs.
+    """True for simple MagicDNS stems (``home``, ``studio``, ``mbp``), not IPs or FQDNs.
 
     Prefers the hive naming contract (:func:`is_valid_hive_name`) but still
     accepts legacy stems so resolve can map them via ``aliases`` / LEGACY_ALIASES.
@@ -1049,8 +1194,8 @@ def read_node_id(path: Path | None = None) -> str | None:
 def parse_tailscale_peer_ips(status_json: str) -> dict[str, dict[str, Any]]:
     """Map MagicDNS stem / HostName → {online, ips} from ``tailscale status --json``.
 
-    Pure parser (tests inject JSON). Keys are lowercased stems (``manoir``,
-    ``chalet``) plus HostName lowercased when present.
+    Pure parser (tests inject JSON). Keys are lowercased stems (``home``,
+    ``studio``) plus HostName lowercased when present.
     """
     out: dict[str, dict[str, Any]] = {}
     try:
@@ -1063,7 +1208,7 @@ def parse_tailscale_peer_ips(status_json: str) -> dict[str, dict[str, Any]]:
         if host_name:
             stems.append(host_name.strip().lower())
         if dns:
-            # manoir.tail7c6d11.ts.net → manoir
+            # hub.tailnet-abc.ts.net → hub
             stem = dns.strip().lower().split(".")[0]
             if stem:
                 stems.append(stem)
@@ -1093,7 +1238,7 @@ def resolve_node_address(
 ) -> dict[str, Any]:
     """Resolve a hive node name to a reachable address preference.
 
-    Accepts preferred names (``mbp``) or legacy aliases (``berts-mbp``).
+    Accepts preferred names (``mbp``) or legacy aliases (``alice-mbp``).
     Order: online Tailscale peer for preferred + aliases → literal non-TS host
     → host string when tailscale status is empty.
     Fail-closed when the only known address is an offline tailnet peer.
@@ -1336,7 +1481,7 @@ def node_whoami() -> None:
     if not nid:
         exc = LocalError(
             "no ~/.sanctum/.node_id — this machine has no hive name",
-            fix="write the node key (e.g. manoir or chalet) to ~/.sanctum/.node_id",
+            fix="write the node key (e.g. home or studio) to ~/.sanctum/.node_id",
         )
         _report(exc)
         raise typer.Exit(code=int(exc.exit_code))
@@ -1504,7 +1649,7 @@ def node_vault_host() -> None:
     resolved = resolve_node_address(str(primary), nodes, peers)
     console.print(f"vault_authority → [bold]{escape(str(primary))}[/]")
     if resolved.get("ok") and resolved.get("address"):
-        user = resolved.get("ssh_user") or "bert"
+        user = resolved.get("ssh_user") or getpass.getuser()
         console.print(f"  hop {escape(str(user))}@{escape(str(resolved['address']))}")
         console.print("  [dim]always use node name in scripts; resolve at call time[/]")
     else:
@@ -1522,7 +1667,7 @@ def node_declare_peer(
         str | None,
         typer.Option("--tailscale-name", help="MagicDNS stem (default: same as name)"),
     ] = None,
-    ssh_user: Annotated[str, typer.Option("--ssh-user")] = "bert",
+    ssh_user: Annotated[str | None, typer.Option("--ssh-user")] = None,
     site: Annotated[
         str | None,
         typer.Option("--site", help="Design-map site id (default: same as name)"),
@@ -1532,6 +1677,7 @@ def node_declare_peer(
     """Add ``type: hub, tier: peer`` — same body map, hive by name. No L3 merge."""
     ts = (tailscale_name or name).strip()
     site_id = (site or name).strip()
+    resolved_ssh_user = (ssh_user or getpass.getuser()).strip()
     if not is_valid_hive_name(name):
         exc = LocalError(
             f"invalid hive name {name!r}",
@@ -1568,7 +1714,7 @@ def node_declare_peer(
         "site": site_id,
         "display_name": display_name or name.title(),
         "tailscale_name": ts,
-        "ssh_user": ssh_user,
+        "ssh_user": resolved_ssh_user,
         "capabilities": [
             "inference",
             "inference_heavy",
@@ -1577,7 +1723,7 @@ def node_declare_peer(
             "mesh_seed",
             "council",
         ],
-        "sync": {"hub": primary_node_name(nodes) or "manoir"},
+        "sync": {"hub": primary_node_name(nodes) or read_node_id() or "home"},
     }
     if not data.get("topology"):
         data["topology"] = {
@@ -1605,11 +1751,13 @@ def node_declare_peer(
     help="Ensure the primary hub row exists in the roster (idempotent).",
 )
 def node_ensure_hub(
-    name: Annotated[str, typer.Option("--name")] = "manoir",
+    name: Annotated[str | None, typer.Option("--name")] = None,
     tailscale_name: Annotated[str | None, typer.Option("--tailscale-name")] = None,
-    ssh_user: Annotated[str, typer.Option("--ssh-user")] = "bert",
+    ssh_user: Annotated[str | None, typer.Option("--ssh-user")] = None,
 ) -> None:
     """Idempotent primary hub declaration (does not clobber richer existing rows)."""
+    hub_name = (name or read_node_id() or "home").strip()
+    resolved_ssh_user = (ssh_user or getpass.getuser()).strip()
     target = config.instance_path()
     data: dict[str, Any] = {}
     if target.exists():
@@ -1619,13 +1767,13 @@ def node_ensure_hub(
     nodes = data.get("nodes")
     if not isinstance(nodes, dict):
         nodes = data["nodes"] = {}
-    existing = dict(nodes.get(name) or {})
+    existing = dict(nodes.get(hub_name) or {})
     existing.setdefault("type", "hub")
     existing.setdefault("tier", "primary")
-    existing.setdefault("site", name)
-    existing.setdefault("display_name", name.title())
-    existing.setdefault("tailscale_name", tailscale_name or name)
-    existing.setdefault("ssh_user", ssh_user)
+    existing.setdefault("site", hub_name)
+    existing.setdefault("display_name", hub_name.title())
+    existing.setdefault("tailscale_name", tailscale_name or hub_name)
+    existing.setdefault("ssh_user", resolved_ssh_user)
     existing.setdefault(
         "capabilities",
         [
@@ -1642,7 +1790,7 @@ def node_ensure_hub(
     # Force primary semantics
     existing["type"] = "hub"
     existing["tier"] = "primary"
-    nodes[name] = existing
+    nodes[hub_name] = existing
     data.setdefault(
         "topology",
         {
@@ -1656,7 +1804,7 @@ def node_ensure_hub(
         bak.write_text(target.read_text(encoding="utf-8"), encoding="utf-8")
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True), encoding="utf-8")
-    console.print(f"[green]primary hub[/] nodes.{escape(name)} ensured")
+    console.print(f"[green]primary hub[/] nodes.{escape(hub_name)} ensured")
 
 
 @node_app.command(
@@ -1714,7 +1862,7 @@ def node_validate() -> None:
 
 @node_app.command(
     "ha-check",
-    help="Check manoir-ha (HA Green) reachability over Tailscale + LAN.",
+    help="Check HA Green reachability over Tailscale + LAN.",
 )
 def node_ha_check() -> None:
     script = Path.home() / ".sanctum" / "tailnet" / "tools" / "ha-check.sh"
@@ -1825,15 +1973,15 @@ def node_names() -> None:
     table.add_column("Kind")
     table.add_column("Pattern")
     table.add_column("Examples")
-    table.add_row("Site brain", "{place}", "manoir, chalet, montreal")
-    table.add_row("Mobile", "{device}", "mbp  (not berts-mbp)")
-    table.add_row("Site infra", "{place}-{role}", "manoir-fw, manoir-ha, chalet-fw")
+    table.add_row("Site brain", "{place}", "home, studio, montreal")
+    table.add_row("Mobile", "{device}", "mbp  (not alice-mbp)")
+    table.add_row("Site infra", "{place}-{role}", "home-fw, home-ha, studio-fw")
     table.add_row("Agent", "{jedi}", "yoda, ahsoka  (never a TS host)")
     console.print(table)
     console.print("\n[bold]Same three places:[/] roster key · ~/.sanctum/.node_id · MagicDNS stem")
     console.print("[bold]Forbidden:[/] owner prefixes, MM64/MBP128 codes, dual names without aliases:")
-    console.print("  mbp:\n    tailscale_name: mbp\n    aliases: [berts-mbp]   # until Tailscale machine renamed\n")
-    console.print(f"  infra example: {suggest_infra_name('manoir', 'fw')}")
+    console.print("  mbp:\n    tailscale_name: mbp\n    aliases: [alice-mbp]   # until Tailscale machine renamed\n")
+    console.print(f"  infra example: {suggest_infra_name('home', 'fw')}")
     nodes = load_nodes_map()
     if nodes:
         console.print("\n[bold]Live roster stems[/]")

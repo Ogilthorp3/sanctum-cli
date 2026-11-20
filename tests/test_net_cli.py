@@ -789,3 +789,33 @@ def test_parse_daemon_heartbeat_empty_is_none() -> None:
 
     last, age, fresh = _parse_daemon_heartbeat("", now=datetime(2026, 7, 2, 14, 0, 0))
     assert last is None and age is None and fresh is None
+
+
+def test_net_heal_apply_healthy_as_root_never_calls_runner_empty_and_emits_healthy() -> None:
+    """H-CLI-2: healthy node under `--apply` as root must NOT call runner([]) and
+    must emit NET_HEAL_RESULT=healthy (not noop/healed)."""
+    fake = _HealFakeRunner(_STATIC_DRIFT_AFTER)
+    with (
+        patch("sanctum_cli.commands.net._build_heal_runner", return_value=fake),
+        patch("sanctum_cli.commands.net.os.getuid", return_value=0),
+    ):
+        result = runner.invoke(app, ["net", "heal", "--apply"])
+    assert result.exit_code == 0, result.stdout
+    assert [] not in fake.calls
+    assert heal.HEAL_RESULT_HEALTHY in result.stdout
+    assert heal.HEAL_RESULT_HEALED not in result.stdout
+    assert heal.HEAL_RESULT_NOOP not in result.stdout
+
+
+def test_net_heal_apply_empty_argv_guard_never_invokes_runner() -> None:
+    """Defensive boundary: if heal_action_argv returns [], runner([]) is never called."""
+    fake = _HealFakeRunner(_STATIC_DRIFT_BEFORE)
+    with (
+        patch("sanctum_cli.commands.net._build_heal_runner", return_value=fake),
+        patch("sanctum_cli.commands.net.os.getuid", return_value=0),
+        patch("sanctum_cli.net.heal.heal_action_argv", return_value=[]),
+    ):
+        result = runner.invoke(app, ["net", "heal", "--apply"])
+    assert result.exit_code == 0, result.stdout
+    assert [] not in fake.calls
+    assert heal.HEAL_RESULT_NOOP in result.stdout

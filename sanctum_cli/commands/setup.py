@@ -22,9 +22,11 @@ or echoes them. Everything is stdlib (``http.server``) — no web framework is a
 from __future__ import annotations
 
 import contextlib
+import hmac
 import json
 import os
 import re
+import secrets
 import shlex
 import shutil
 import socket
@@ -36,11 +38,12 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from rich.console import Console
 
 from sanctum_cli import config, keychain
-from sanctum_cli.commands.setup_page import PAGE
+from sanctum_cli.commands.setup_page import render_page
 
 console = Console()
 
@@ -50,12 +53,13 @@ _KC_ACCOUNT = "sanctum"
 _KC_OAUTH_ID = "tailscale-oauth-client-id"
 _KC_OAUTH_SECRET = "tailscale-oauth-secret"
 _TS_APP = Path("/Applications/Tailscale.app/Contents/MacOS/Tailscale")
-_PEER = "berts-mbp"
 
 _OAUTH_URL = "https://login.tailscale.com/admin/settings/oauth"
 # The single literal Settings deep-link anchor in the codebase (sanctum-grant-tcc.sh).
 _FDA_ANCHOR = "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"
 _AUTOMATION_ANCHOR = "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation"
+_ALLOWED_OPEN_URLS = frozenset({_OAUTH_URL, _FDA_ANCHOR, _AUTOMATION_ANCHOR})
+_MAX_BODY_BYTES = 1_048_576  # 1 MiB cap for local setup JSON payloads
 
 # node identity that holds the 13 haus TCC grants (self_test.probe_tcc_grants).
 _TCC_CLIENT = "/usr/local/bin/node"
@@ -363,14 +367,67 @@ def gather_state() -> dict[str, Any]:
     return {"tier": tier, "binary": _sanctum_bin(), "version": _version(), "steps": steps}
 
 
+def _resolve_tailnet_peer() -> str | None:
+    """Resolve an optional tailnet peer hostname without hardcoding an author host."""
+    env_peer = os.environ.get("SANCTUM_TAILNET_PEER", "").strip()
+    if env_peer:
+        return env_peer
+    cfg_peer = config.instance_value("tailnet.peer", default=None)
+    if isinstance(cfg_peer, str) and cfg_peer.strip():
+        return cfg_peer.strip()
+    try:
+        from sanctum_cli.commands import tailnet as tn
+
+        ts_bin = tn._tailscale_bin()
+    except Exception:
+        return None
+    if not ts_bin:
+        return None
+    try:
+        proc = subprocess.run(
+            [ts_bin, "status", "--json"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0 or not proc.stdout:
+        return None
+    try:
+        data = json.loads(proc.stdout)
+    except ValueError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    peers = data.get("Peer")
+    if not isinstance(peers, dict):
+        return None
+    self_node = data.get("Self")
+    self_id = self_node.get("ID") if isinstance(self_node, dict) else None
+    for peer_info in peers.values():
+        if not isinstance(peer_info, dict):
+            continue
+        if self_id and peer_info.get("ID") == self_id:
+            continue
+        raw_host = peer_info.get("HostName")
+        if peer_info.get("Online") and isinstance(raw_host, str):
+            host = raw_host.strip()
+            if host:
+                return host
+    return None
+
+
 def _probe_tailnet() -> dict[str, Any]:
     """Live tailnet health — reuses the exact seams behind ``sanctum tailnet doctor``."""
     from sanctum_cli.commands import tailnet as tn
     from sanctum_cli.net.tailnet import build_tailnet_report
 
+    peer_name = _resolve_tailnet_peer()
     report = build_tailnet_report(
         spine=tn._safe_probe(tn._probe_spine),
-        peer=tn._safe_probe(lambda: tn._probe_peer(_PEER)),
+        peer=tn._safe_probe(lambda: tn._probe_peer(peer_name)) if peer_name else None,
         cred=tn._safe_probe(tn._probe_cred),
         drift=tn._safe_probe(tn._probe_drift),
         trifecta=tn._safe_probe(tn._probe_trifecta),
@@ -753,16 +810,51 @@ def _act_family(payload: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "detail": f"saved {len(parsed)} member(s), {total} device(s)"}
 
 
+def _normalize_http_origin(raw_url: str) -> tuple[str, str, int] | None:
+    """Validate and normalize an http(s) origin; reject userinfo, query, and fragment."""
+    raw = (raw_url or "").strip()
+    if not raw:
+        return None
+    parts = urlsplit(raw)
+    scheme = parts.scheme.lower()
+    if scheme not in ("http", "https"):
+        return None
+    if not parts.hostname or parts.username is not None or parts.password is not None:
+        return None
+    if parts.query or parts.fragment:
+        return None
+    try:
+        port = parts.port
+    except ValueError:
+        return None
+    if port is None:
+        port = 443 if scheme == "https" else 80
+    return (scheme, parts.hostname.lower(), port)
+
+
 def _act_firewalla(payload: dict[str, Any]) -> dict[str, Any]:
     """Verify-before-store bridge pairing — the exact fail-closed contract of the
     onboard firewalla-pairing gate, minus the terminal prompts. A blank token
-    re-verifies the one already on this Mac; nothing persists unless the
-    authenticated probe answers."""
+    re-verifies the one already on this Mac (same origin only); nothing persists
+    unless the authenticated probe answers."""
     from sanctum_cli.commands import onboard, screen_time
     from sanctum_cli.devices import firewalla
 
-    url = str(payload.get("url", "")).strip() or firewalla._bridge_url()
-    token = str(payload.get("token", "")).strip() or (firewalla._read_bridge_token() or "")
+    default_url = firewalla._bridge_url()
+    url = str(payload.get("url", "")).strip() or default_url
+    target_origin = _normalize_http_origin(url)
+    if target_origin is None:
+        return {"ok": False, "detail": "invalid bridge URL — must be http:// or https://"}
+    explicit_token = str(payload.get("token", "")).strip()
+    if explicit_token:
+        token = explicit_token
+    else:
+        if target_origin != _normalize_http_origin(default_url):
+            return {
+                "ok": False,
+                "detail": "bridge URL changed — enter the bridge token for this address",
+            }
+        token = firewalla._read_bridge_token() or ""
     if not token:
         return {"ok": False, "detail": "paste the bridge token — none is stored on this Mac yet"}
     result = screen_time.validate_firewalla_pairing(url, token)
@@ -780,15 +872,26 @@ def _act_firewalla(payload: dict[str, Any]) -> dict[str, Any]:
 def _act_ha(payload: dict[str, Any]) -> dict[str, Any]:
     """Verify-before-store HA Green pairing — mirrors the onboard ha-green gate:
     persist ONLY after the live "API running." marker answers for the candidate
-    (or already-stored) token. A blank token means "re-verify the stored one"."""
+    (or already-stored, same-origin) token. A blank token means "re-verify the stored one"."""
     from sanctum_cli.commands import onboard
     from sanctum_cli.devices import ha_green
 
-    url = str(payload.get("url", "")).strip() or ha_green._ha_url()
-    token = str(payload.get("token", "")).strip()
-    if not token and ha_green._read_ha_token() is None:
-        return {"ok": False, "detail": "paste the long-lived owner token — none is stored yet"}
-    if not ha_green.api_running(url=url, token=token or None):
+    default_url = ha_green._ha_url()
+    url = str(payload.get("url", "")).strip() or default_url
+    target_origin = _normalize_http_origin(url)
+    if target_origin is None:
+        return {"ok": False, "detail": "invalid Home Assistant URL — must be http:// or https://"}
+    explicit_token = str(payload.get("token", "")).strip()
+    if not explicit_token:
+        if target_origin != _normalize_http_origin(default_url):
+            return {
+                "ok": False,
+                "detail": "Home Assistant URL changed — enter the owner token for this address",
+            }
+        if ha_green._read_ha_token() is None:
+            return {"ok": False, "detail": "paste the long-lived owner token — none is stored yet"}
+    token_arg = explicit_token or None
+    if not ha_green.api_running(url=url, token=token_arg):
         return {
             "ok": False,
             "detail": (
@@ -798,22 +901,24 @@ def _act_ha(payload: dict[str, Any]) -> dict[str, Any]:
         }
     host, port = ha_green._url_host_port(url)
     onboard.set_ha_green(
-        token=token or None,
+        token=token_arg,
         host=host,
         port=port,
         device_mac=onboard._HA_GREEN_MAC,
         tailnet_node=ha_green._TAILNET_NODE,
     )
-    version = ha_green.ha_version(url=url, token=token or None)
+    version = ha_green.ha_version(url=url, token=token_arg)
     suffix = f" {version}" if version else ""
     return {"ok": True, "detail": f"verified ✓ — Home Assistant{suffix} is running"}
 
 
-def _os_open(url: str) -> None:
-    """Open any URL scheme through macOS ``open`` (handles https AND the
-    ``x-apple.systempreferences:`` Settings deep-links a browser would refuse)."""
+def _os_open(url: str) -> bool:
+    """Open strictly allowlisted setup URLs through macOS ``open``."""
+    if url.startswith("-") or url not in _ALLOWED_OPEN_URLS:
+        return False
     with contextlib.suppress(Exception):
         subprocess.run(["open", url], check=False)
+    return True
 
 
 def do_action(step: str, action: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -835,7 +940,8 @@ def do_action(step: str, action: str, payload: dict[str, Any]) -> dict[str, Any]
     if key == "ha.save":
         return _act_ha(payload)
     if key == "open.url":
-        _os_open(str(payload.get("url", "")))
+        if not _os_open(str(payload.get("url", ""))):
+            return {"ok": False, "detail": "blocked disallowed URL"}
         return {"ok": True}
     return {"ok": False, "detail": f"unknown action: {key}"}
 
@@ -844,61 +950,152 @@ def do_action(step: str, action: str, payload: dict[str, Any]) -> dict[str, Any]
 
 
 class _Session:
-    def __init__(self) -> None:
+    def __init__(self, *, token: str | None = None) -> None:
         self.shutdown = threading.Event()
+        self.token = token or secrets.token_urlsafe(32)
 
 
 def _make_handler(session: _Session) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
+        def _server_port(self) -> int:
+            return int(getattr(self.server, "server_port", 0))
+
+        def _valid_host(self) -> bool:
+            port = self._server_port()
+            host = (self.headers.get("Host") or "").strip().lower()
+            return host in {f"127.0.0.1:{port}", f"localhost:{port}", f"[::1]:{port}"}
+
+        def _valid_origin(self, *, require_on_post: bool) -> bool:
+            sfs = (self.headers.get("Sec-Fetch-Site") or "").strip().lower()
+            if sfs and sfs not in ("same-origin", "none"):
+                return False
+            origin = self.headers.get("Origin")
+            port = self._server_port()
+            allowed_origins = {
+                f"http://127.0.0.1:{port}",
+                f"http://localhost:{port}",
+                f"http://[::1]:{port}",
+            }
+            if origin is not None:
+                return origin.strip().lower() in allowed_origins
+            return not require_on_post
+
+        def _valid_token(self) -> bool:
+            got = self.headers.get("X-Sanctum-Setup-Token", "")
+            return bool(got) and hmac.compare_digest(got, session.token)
+
         def _write_json(self, payload: dict[str, Any], status: HTTPStatus = HTTPStatus.OK) -> None:
             body = json.dumps(payload).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
 
-        def _write_html(self, html: str) -> None:
-            body = html.encode("utf-8")
+        def _write_html(self, html_body: str) -> None:
+            body = html_body.encode("utf-8")
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
 
         def do_GET(self) -> None:
-            if self.path == "/" or self.path.startswith("/?"):
-                self._write_html(PAGE)
+            if not self._valid_host() or not self._valid_origin(require_on_post=False):
+                self._write_json({"ok": False, "detail": "forbidden"}, HTTPStatus.FORBIDDEN)
                 return
-            if self.path == "/state":
+            path = urlsplit(self.path).path
+            if path == "/":
+                self._write_html(render_page(session.token))
+                return
+            if path == "/state":
+                if not self._valid_token():
+                    self._write_json({"ok": False, "detail": "unauthorized"}, HTTPStatus.FORBIDDEN)
+                    return
                 self._write_json(gather_state())
                 return
-            if self.path.startswith("/probe/"):
-                self._write_json(probe(self.path[len("/probe/") :]))
+            if path.startswith("/probe/"):
+                if not self._valid_token():
+                    self._write_json({"ok": False, "detail": "unauthorized"}, HTTPStatus.FORBIDDEN)
+                    return
+                self._write_json(probe(path[len("/probe/") :]))
                 return
             self.send_error(HTTPStatus.NOT_FOUND)
 
         def do_POST(self) -> None:
-            if self.path == "/action":
-                length = int(self.headers.get("Content-Length", "0"))
-                raw = self.rfile.read(length).decode("utf-8") if length else "{}"
-                try:
-                    data = json.loads(raw or "{}")
-                except json.JSONDecodeError:
-                    data = {}
+            if (
+                not self._valid_host()
+                or not self._valid_origin(require_on_post=True)
+                or not self._valid_token()
+            ):
+                self._write_json({"ok": False, "detail": "forbidden"}, HTTPStatus.FORBIDDEN)
+                return
+            path = urlsplit(self.path).path
+            if path not in ("/action", "/done"):
+                self.send_error(HTTPStatus.NOT_FOUND)
+                return
+            ctype = (self.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+            if ctype != "application/json":
+                self._write_json(
+                    {"ok": False, "detail": "unsupported media type"},
+                    HTTPStatus.UNSUPPORTED_MEDIA_TYPE,
+                )
+                return
+            if self.headers.get("Transfer-Encoding") is not None:
+                self._write_json(
+                    {"ok": False, "detail": "transfer-encoding not supported"},
+                    HTTPStatus.BAD_REQUEST,
+                )
+                return
+            raw_len = self.headers.get("Content-Length")
+            if raw_len is None:
+                self._write_json({"ok": False, "detail": "missing Content-Length"}, HTTPStatus.BAD_REQUEST)
+                return
+            try:
+                length = int(raw_len.strip())
+            except ValueError:
+                self._write_json({"ok": False, "detail": "invalid Content-Length"}, HTTPStatus.BAD_REQUEST)
+                return
+            if length < 0:
+                self._write_json({"ok": False, "detail": "negative Content-Length"}, HTTPStatus.BAD_REQUEST)
+                return
+            if length > _MAX_BODY_BYTES:
+                self._write_json(
+                    {"ok": False, "detail": "payload too large"},
+                    HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                )
+                return
+            raw_bytes = self.rfile.read(length) if length else b"{}"
+            try:
+                data = json.loads(raw_bytes.decode("utf-8") or "{}")
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                self._write_json({"ok": False, "detail": "invalid JSON"}, HTTPStatus.BAD_REQUEST)
+                return
+            if not isinstance(data, dict):
+                self._write_json({"ok": False, "detail": "JSON body must be an object"}, HTTPStatus.BAD_REQUEST)
+                return
+            if path == "/action":
+                payload = data.get("payload")
+                if payload is None:
+                    payload = {}
+                if not isinstance(payload, dict):
+                    self._write_json(
+                        {"ok": False, "detail": "payload must be an object"},
+                        HTTPStatus.BAD_REQUEST,
+                    )
+                    return
                 self._write_json(
                     do_action(
                         str(data.get("step", "")),
                         str(data.get("action", "")),
-                        data.get("payload") or {},
+                        payload,
                     )
                 )
                 return
-            if self.path == "/done":
-                self._write_json({"ok": True})
-                session.shutdown.set()
-                return
-            self.send_error(HTTPStatus.NOT_FOUND)
+            self._write_json({"ok": True})
+            session.shutdown.set()
 
         def log_message(self, *args: Any) -> None:  # noqa: ARG002 - silence access logging
             return

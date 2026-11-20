@@ -412,16 +412,30 @@ def validate_firewalla_pairing(url: str, token: str, *, timeout: float = 10.0) -
     timeout), or a 200 that isn't the expected host list all return ``ok=False``
     with a precise, actionable ``state`` — never a silent "looks fine".
     """
+    from urllib.parse import urlsplit
+
     import httpx
 
     token = (token or "").strip()
     if not token:
         return PairingResult("no_token", False, "no token provided — cannot authenticate")
+    clean_url = (url or "").strip()
+    parts = urlsplit(clean_url)
+    if (
+        parts.scheme.lower() not in ("http", "https")
+        or not parts.hostname
+        or parts.username is not None
+        or parts.password is not None
+        or bool(parts.query)
+        or bool(parts.fragment)
+    ):
+        return PairingResult("bad_response", False, f"invalid bridge URL: {url}")
     try:
         resp = httpx.get(
-            f"{url.rstrip('/')}/hosts",
+            f"{clean_url.rstrip('/')}/hosts",
             headers={"Authorization": f"Bearer {token}"},
             timeout=timeout,
+            follow_redirects=False,
         )
     except httpx.HTTPError as exc:
         return PairingResult("unreachable", False, f"bridge unreachable at {url}: {exc}")
