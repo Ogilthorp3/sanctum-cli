@@ -15,6 +15,7 @@ from typing import Annotated
 
 import typer
 from rich.console import Console
+from rich.text import Text
 
 from sanctum_cli import __version__, haus
 from sanctum_cli.commands import agent as agent_cmd
@@ -762,19 +763,39 @@ def deadman_beat_top(
 
 @app.command(
     "init",
-    help="Create a minimal ~/.sanctum/instance.yaml so a fresh machine can run the CLI.",
+    help="Create ~/.sanctum/instance.yaml, or add/update its instance: block (name, role) in place.",
 )
 def init_top(
     name: Annotated[
-        str | None, typer.Option("--name", help="Instance name (skips the prompt).")
+        str | None,
+        typer.Option(
+            "--name",
+            help="Instance name (skips the prompt). Renames an existing instance: block; "
+            "its slug stays.",
+        ),
     ] = None,
     yes: Annotated[
         bool, typer.Option("--yes", "-y", help="Accept the hostname-derived default; no prompts.")
     ] = False,
-    force: Annotated[bool, typer.Option("--force", help="Overwrite an existing instance.yaml.")] = False,
+    force: Annotated[
+        bool,
+        typer.Option(
+            "--force",
+            help="Replace the whole instance.yaml, dropping its other blocks "
+            "(the old file is saved to instance.yaml.bak).",
+        ),
+    ] = False,
+    role: Annotated[
+        init_cmd.Role | None,
+        typer.Option(
+            "--role",
+            help="Node role: satellite (contained remote site) or hub. "
+            "Updates an existing instance: block in place.",
+        ),
+    ] = None,
 ) -> None:
     try:
-        init_cmd.init_command(name=name, yes=yes, force=force)
+        init_cmd.init_command(name=name, yes=yes, force=force, role=role)
     except SanctumError as exc:
         _report(exc)
         raise typer.Exit(code=int(exc.exit_code)) from exc
@@ -1308,10 +1329,15 @@ def soak_top(
 
 
 def _report(exc: SanctumError) -> None:
-    """Pretty-print a SanctumError to stderr with optional fix suggestion."""
-    err_console.print(f"[bold red]error:[/] {exc.message}")
+    """Pretty-print a SanctumError to stderr with optional fix suggestion.
+
+    Printed as Text, never parsed as Rich markup, so a value in brackets (a path,
+    a YAML value such as ``[bold]``) shows exactly as written; soft-wrapped, so a
+    long path stays whole on its line.
+    """
+    err_console.print(Text.assemble(("error:", "bold red"), f" {exc.message}"), soft_wrap=True)
     if exc.fix:
-        err_console.print(f"[dim]fix:[/] {exc.fix}")
+        err_console.print(Text.assemble(("fix:", "dim"), f" {exc.fix}"), soft_wrap=True)
 
 
 def _excepthook(

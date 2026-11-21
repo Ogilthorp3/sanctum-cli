@@ -12,15 +12,15 @@ from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import httpx
+import pytest
 from typer.testing import CliRunner
 
+from sanctum_cli import config
 from sanctum_cli.backends import r2
 from sanctum_cli.cli import app
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-    import pytest
 
 runner = CliRunner()
 
@@ -249,6 +249,107 @@ def test_full_wizard_happy_path(
     assert result.exit_code == 0, result.stdout + (result.stderr or "")
     assert "done" in result.stdout.lower() or "cloud_backup" in result.stdout.lower()
     assert "r2.cloudflarestorage.com" in result.stdout
+
+
+def test_wizard_reports_a_file_that_broke_before_the_persist_step(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """instance.yaml gains an impossible date while the wizard runs: exit 5, never a traceback.
+
+    The file loaded when the wizard started; by the persist step it no longer does. It is
+    reported by file and line and left exactly as it is, with no ``.bak`` written.
+    """
+    target = tmp_path / "instance.yaml"
+    target.write_text("instance:\n  name: T\n  slug: t\n", encoding="utf-8")
+    monkeypatch.setenv("SANCTUM_INSTANCE_FILE", str(target))
+    broken = "instance:\n  name: T\n  slug: t\nsince: 2026-02-30\n"
+
+    def edit_during_the_canary(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        target.write_text(broken, encoding="utf-8")
+
+    list_body = "<ListAllMyBucketsResult><Buckets></Buckets></ListAllMyBucketsResult>"
+
+    def fake_prompt(label, *, validator, hint, password=False, max_attempts=3):  # type: ignore[no-untyped-def]
+        if "account ID" in label:
+            return VALID_ACCOUNT_ID
+        return VALID_ACCESS_KEY if "access key" in label else VALID_SECRET_KEY
+
+    with (
+        patch(
+            "sanctum_cli.backends.r2.httpx.get",
+            return_value=httpx.Response(
+                200, text=list_body, request=httpx.Request("GET", "https://x")
+            ),
+        ),
+        patch(
+            "sanctum_cli.backends.r2.httpx.put",
+            return_value=httpx.Response(200, text="", request=httpx.Request("PUT", "https://x")),
+        ),
+        patch("sanctum_cli.backends.r2.subprocess.run", return_value=_completed()),
+        patch("sanctum_cli.backends.r2.shutil.which", return_value="/x"),
+        patch("sanctum_cli.backends.r2._prompt_validated", side_effect=fake_prompt),
+        patch("sanctum_cli.backends.r2.Confirm.ask", return_value=True),
+        patch("sanctum_cli.backends.r2._round_trip", side_effect=edit_during_the_canary),
+        patch("sanctum_cli.backends.r2.keychain.exists", return_value=True),
+        patch("sanctum_cli.backends.r2.keychain.read", return_value="passphrase"),
+        patch("sanctum_cli.backends.r2._ensure_keychain_entry", return_value=None),
+    ):
+        result = runner.invoke(app, ["cloud", "setup", "--no-open"])
+
+    assert result.exit_code == 5, result.output
+    assert isinstance(result.exception, SystemExit)  # a clean error, not a traceback
+    assert result.stderr.splitlines() == [
+        f"error: cannot read {target}: 2026-02-30 on line 4 is not a valid date "
+        "(day is out of range for month)",
+        "fix: correct the value on line 4, or quote it to keep it as text, then re-run",
+    ]
+    assert target.read_text(encoding="utf-8") == broken
+    assert list(tmp_path.glob("instance.yaml.*")) == []  # no .bak.<stamp>, no .tmp
+
+
+@pytest.mark.parametrize("tail", ["cli:\n", "cli: ~\n"], ids=["no-value", "tilde"])
+def test_wizard_fills_an_empty_cli_block(
+    tail: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``cli:`` with no value (or ``~``) stopped the wizard at its start with a schema
+    violation (exit 5); it now runs, and its last step fills the block."""
+    target = tmp_path / "instance.yaml"
+    target.write_text("instance:\n  name: T\n  slug: t\n" + tail, encoding="utf-8")
+    monkeypatch.setenv("SANCTUM_INSTANCE_FILE", str(target))
+    list_body = "<ListAllMyBucketsResult><Buckets></Buckets></ListAllMyBucketsResult>"
+
+    def fake_prompt(label, *, validator, hint, password=False, max_attempts=3):  # type: ignore[no-untyped-def]
+        if "account ID" in label:
+            return VALID_ACCOUNT_ID
+        return VALID_ACCESS_KEY if "access key" in label else VALID_SECRET_KEY
+
+    with (
+        patch(
+            "sanctum_cli.backends.r2.httpx.get",
+            return_value=httpx.Response(
+                200, text=list_body, request=httpx.Request("GET", "https://x")
+            ),
+        ),
+        patch(
+            "sanctum_cli.backends.r2.httpx.put",
+            return_value=httpx.Response(200, text="", request=httpx.Request("PUT", "https://x")),
+        ),
+        patch("sanctum_cli.backends.r2.subprocess.run", return_value=_completed()),
+        patch("sanctum_cli.backends.r2.shutil.which", return_value="/x"),
+        patch("sanctum_cli.backends.r2._prompt_validated", side_effect=fake_prompt),
+        patch("sanctum_cli.backends.r2.Confirm.ask", return_value=True),
+        patch("sanctum_cli.backends.r2._round_trip", return_value=None),
+        patch("sanctum_cli.backends.r2.keychain.exists", return_value=True),
+        patch("sanctum_cli.backends.r2.keychain.read", return_value="passphrase"),
+        patch("sanctum_cli.backends.r2._ensure_keychain_entry", return_value=None),
+    ):
+        result = runner.invoke(app, ["cloud", "setup", "--no-open"])
+
+    assert result.exit_code == 0, result.output
+    cloud_backup = config.load(target).cli.cloud_backup
+    assert cloud_backup is not None
+    assert cloud_backup.primary is not None
+    assert cloud_backup.primary.repo.startswith(f"s3:https://{VALID_ACCOUNT_ID}.")
 
 
 def test_wizard_rejects_when_both_slots_full(

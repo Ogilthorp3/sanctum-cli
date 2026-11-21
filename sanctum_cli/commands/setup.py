@@ -44,6 +44,7 @@ from rich.console import Console
 
 from sanctum_cli import config, keychain
 from sanctum_cli.commands.setup_page import render_page
+from sanctum_cli.errors import ConfigError
 
 console = Console()
 
@@ -75,8 +76,15 @@ _MAC_RE = re.compile(r"^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$")
 
 
 def _tier() -> str:
-    """'haus' (the Mini, full stack) or 'basic' (a friend/family CLI install)."""
+    """'haus' (the hub, full stack) or 'basic' (a friend/family CLI install).
+
+    A declared satellite (``instance.role: satellite``) is 'basic': it runs its
+    own local brain but none of the hub services, so it never gets the hub panes
+    (family, Firewalla, Home Assistant, the macOS permission wall).
+    """
     try:
+        if config.instance_role() == "satellite":
+            return "basic"
         from sanctum_cli.commands.self_test import _haus_tier_installed
 
         return "haus" if _haus_tier_installed() else "basic"
@@ -110,7 +118,9 @@ def _tailscale_installed() -> bool:
 
 
 def _oauth_stored() -> bool:
-    return keychain.exists(_KC_ACCOUNT, _KC_OAUTH_ID) and keychain.exists(_KC_ACCOUNT, _KC_OAUTH_SECRET)
+    return keychain.exists(_KC_ACCOUNT, _KC_OAUTH_ID) and keychain.exists(
+        _KC_ACCOUNT, _KC_OAUTH_SECRET
+    )
 
 
 def _tcc_grant_count() -> int | None:
@@ -176,7 +186,7 @@ def _devices_file() -> Path | None:
     if override:
         p = Path(override).expanduser()
         return p if p.is_file() else None
-    for candidate in screen_time._DEVICES_CANDIDATES:
+    for candidate in screen_time.devices_candidates():
         if candidate.is_file():
             return candidate
     return None
@@ -434,7 +444,9 @@ def _probe_tailnet() -> dict[str, Any]:
     )
     return {
         "overall": report.overall,
-        "rows": [{"label": r.label, "status": r.status.name, "detail": r.detail} for r in report.rows],
+        "rows": [
+            {"label": r.label, "status": r.status.name, "detail": r.detail} for r in report.rows
+        ],
     }
 
 
@@ -539,40 +551,44 @@ def probe(pid: str) -> dict[str, Any]:
 
 
 def _act_identity(name: str) -> dict[str, Any]:
-    """Set instance.name/slug via a block-preserving read-modify-write.
+    """Name this box: set ``instance.name`` through :func:`config.set_instance_fields`.
 
-    NOT ``scaffold_instance``/``init`` — those rewrite the whole file to just the
-    ``instance`` block, which would clobber a configured box's ``cli``/``notifications``
-    blocks. Mirrors ``onboard.set_instance_identity``'s RMW + ``.bak`` contract."""
-    import yaml
-
+    The editor ``sanctum init --name`` uses, so a rename edits the file in place:
+    other blocks, comments and key order are kept, the edit is re-parsed before
+    it is written, and the original is saved to ``instance.yaml.bak``. An
+    existing slug never changes (it names this haus's buckets and URLs); a block
+    without one gets a slug derived from the new name. With no file yet, a
+    minimal one is scaffolded. A file the editor will not touch is reported,
+    with the lines to add by hand, and left as it was.
+    """
     name = name.strip()
     if not name:
         return {"ok": False, "detail": "please enter a name"}
+    try:
+        name.encode("utf-8")
+    except UnicodeEncodeError:
+        return {"ok": False, "detail": "the name is not valid text — retype it"}
     target = config.instance_path()
-    data: dict[str, Any] = {}
-    if target.exists():
-        with contextlib.suppress(Exception):
-            loaded = yaml.safe_load(target.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                data = loaded
-    inst = data.get("instance")
-    if not isinstance(inst, dict):
-        inst = data["instance"] = {}
-    inst["name"] = name
-    inst["slug"] = config.slugify_name(name)
-    if target.exists():
-        with contextlib.suppress(Exception):
-            (target.parent / (target.name + ".bak")).write_text(
-                target.read_text(encoding="utf-8"), encoding="utf-8"
-            )
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True), encoding="utf-8")
+    try:
+        if target.exists():
+            block = config.load_raw(target).get("instance")
+            has_slug = isinstance(block, dict) and block.get("slug") is not None
+            slug = None if has_slug else config.slugify_name(name)
+            config.set_instance_fields(target, name=name, slug=slug)
+        else:
+            config.scaffold_instance(target, name=name)
+    except ConfigError as exc:
+        return {"ok": False, "detail": _config_error_detail(exc)}
     try:
         config.load(target)
-    except Exception as exc:  # pragma: no cover - defensive
-        return {"ok": False, "detail": f"saved, but the file no longer validates: {exc}"}
+    except ConfigError as exc:
+        detail = f"saved, but the file no longer validates: {_config_error_detail(exc)}"
+        return {"ok": False, "detail": detail}
     return {"ok": True, "name": name, "detail": f"named “{name}”"}
+
+
+def _config_error_detail(exc: ConfigError) -> str:
+    return f"{exc.message}\n{exc.fix}" if exc.fix else exc.message
 
 
 def _act_creds(client_id: str, client_secret: str) -> dict[str, Any]:
@@ -620,13 +636,18 @@ def _act_apply() -> dict[str, Any]:
     )
     out = ((proc.stdout or "") + (proc.stderr or "")).strip()
     lines = [line for line in out.splitlines() if line.strip()]
-    detail = "\n".join(lines)[-800:] if lines else ("applied" if proc.returncode == 0 else "apply failed")
+    detail = (
+        "\n".join(lines)[-800:]
+        if lines
+        else ("applied" if proc.returncode == 0 else "apply failed")
+    )
     return {"ok": proc.returncode == 0, "detail": detail}
 
 
 def _act_provider(kind: str, key: str) -> dict[str, Any]:
     """Store an API key, health-probe it, and persist routing on success — or revoke
-    on rejection. Reuses onboard's fail-closed provider seams verbatim."""
+    on rejection. Reuses onboard's fail-closed provider seams verbatim. An
+    instance.yaml that does not load stops it before the key is stored."""
     from sanctum_cli.commands import onboard
 
     kind = kind.strip().lower()
@@ -636,34 +657,45 @@ def _act_provider(kind: str, key: str) -> dict[str, Any]:
     if not key:
         return {"ok": False, "detail": "enter an API key, or skip this step"}
     service, account = onboard._CLAUDE_KEYCHAIN if kind == "claude" else onboard._GEMINI_KEYCHAIN
+    try:  # loads instance.yaml, so it runs before anything is stored
+        if kind == "claude":
+            cfg = onboard._config_with_provider_overrides(
+                claude={"via": "direct", "endpoint": "https://api.anthropic.com"}
+            )
+        else:
+            cfg = onboard._config_with_provider_overrides(gemini={"model": "gemini-2.5-pro"})
+    except ConfigError as exc:
+        return {"ok": False, "detail": f"nothing stored: {_config_error_detail(exc)}"}
     onboard.store_device_secret(service=service, account=account, secret=key)
-    if kind == "claude":
-        cfg = onboard._config_with_provider_overrides(
-            claude={"via": "direct", "endpoint": "https://api.anthropic.com"}
-        )
-        health = onboard._provider_health("claude", cfg)
-    else:
-        cfg = onboard._config_with_provider_overrides(gemini={"model": "gemini-2.5-pro"})
-        health = onboard._provider_health("gemini", cfg)
+    health = onboard._provider_health(kind, cfg)
     if not health.ok:
         onboard._revoke_device_secret(service=service, account=account)
         return {
             "ok": False,
             "detail": f"the key was rejected ({health.detail or 'auth failed'}) — nothing stored.",
         }
-    if kind == "claude":
-        onboard.set_provider_config(
-            claude={"via": "direct", "endpoint": "https://api.anthropic.com"},
-            default_provider="claude",
-        )
-    else:
-        onboard.set_provider_config(gemini={"model": "gemini-2.5-pro"}, default_provider="gemini")
+    try:
+        if kind == "claude":
+            onboard.set_provider_config(
+                claude={"via": "direct", "endpoint": "https://api.anthropic.com"},
+                default_provider="claude",
+            )
+        else:
+            onboard.set_provider_config(
+                gemini={"model": "gemini-2.5-pro"}, default_provider="gemini"
+            )
+    except ConfigError as exc:
+        detail = _config_error_detail(exc)
+        return {
+            "ok": False,
+            "detail": f"the key works and is stored, but routing was not saved: {detail}",
+        }
     return {"ok": True, "detail": f"{kind.title()} connected ✓"}
 
 
 def _act_backup(payload: dict[str, Any]) -> dict[str, Any]:
-    """Write the backup *policy* (default recipe + retention) via the same
-    block-preserving read-modify-write contract as :func:`_act_identity`.
+    """Write the backup *policy* (default recipe + retention) via a read-modify-write
+    that keeps the file's other blocks and saves the original to ``instance.yaml.bak``.
 
     Destination credentials are deliberately NOT collected here — the ``sanctum
     cloud setup`` backend wizards own verify-before-store for those, so the pane
@@ -678,7 +710,10 @@ def _act_backup(payload: dict[str, Any]) -> dict[str, Any]:
     )
     recipe = str(payload.get("default_recipe", "")).strip()
     if recipe and recipe not in known:
-        return {"ok": False, "detail": f"unknown recipe {recipe!r} — pick one of: {', '.join(known)}"}
+        return {
+            "ok": False,
+            "detail": f"unknown recipe {recipe!r} — pick one of: {', '.join(known)}",
+        }
     try:
         keep = {
             "keep_daily": int(payload.get("keep_daily", 7)),
@@ -691,12 +726,11 @@ def _act_backup(payload: dict[str, Any]) -> dict[str, Any]:
         return {"ok": False, "detail": "retention: keep at least 1 daily; weekly/monthly can be 0"}
 
     target = config.instance_path()
-    data: dict[str, Any] = {}
-    if target.exists():
-        with contextlib.suppress(Exception):
-            loaded = yaml.safe_load(target.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                data = loaded
+    try:
+        # A file that does not load is reported, never replaced by just this policy.
+        data = config.load_raw_if_present(target)
+    except ConfigError as exc:
+        return {"ok": False, "detail": f"nothing saved: {_config_error_detail(exc)}"}
     cli = data.get("cli")
     if not isinstance(cli, dict):
         cli = data["cli"] = {}
@@ -720,7 +754,9 @@ def _act_backup(payload: dict[str, Any]) -> dict[str, Any]:
             config.load(target)
         except Exception as exc:  # pragma: no cover - defensive
             return {"ok": False, "detail": f"saved, but the file no longer validates: {exc}"}
-    saved = f"policy saved — keep {keep['keep_daily']}d/{keep['keep_weekly']}w/{keep['keep_monthly']}m"
+    saved = (
+        f"policy saved — keep {keep['keep_daily']}d/{keep['keep_weekly']}w/{keep['keep_monthly']}m"
+    )
     return {"ok": True, "detail": (saved + (f", recipe “{recipe}”" if recipe else ""))}
 
 
@@ -731,7 +767,9 @@ def _act_family(payload: dict[str, Any]) -> dict[str, Any]:
     per-member curfew/wake/enforce_personal, per-device ``enforce`` (matched by
     MAC), ``shared_devices``, and any sibling top-level blocks. Members absent
     from the form are kept, never silently deleted (removal stays a deliberate
-    devices.yaml edit)."""
+    devices.yaml edit). A devices.yaml that cannot be read or built (not UTF-8,
+    invalid YAML, an impossible date, a bad tag) or whose top level is not a
+    block of keys is reported and left as it was."""
     import yaml
 
     from sanctum_cli.commands import screen_time
@@ -771,16 +809,20 @@ def _act_family(payload: dict[str, Any]) -> dict[str, Any]:
 
     override = os.environ.get(screen_time.ENV_DEVICES_FILE)
     target = _devices_file() or (
-        Path(override).expanduser() if override else screen_time._DEVICES_CANDIDATES[0]
+        Path(override).expanduser() if override else screen_time.devices_candidates()[0]
     )
     data: dict[str, Any] = {}
     if target.exists():
+        # A file that does not load is reported, never replaced by just the family block.
         try:
-            loaded = yaml.safe_load(target.read_text(encoding="utf-8"))
-        except yaml.YAMLError as exc:
-            return {"ok": False, "detail": f"couldn't parse {target.name}: {exc}"}
-        if isinstance(loaded, dict):
-            data = loaded
+            loaded = config.read_yaml(target)
+        except ConfigError as exc:
+            return {"ok": False, "detail": f"nothing saved: {_config_error_detail(exc)}"}
+        if loaded is not None and not isinstance(loaded, dict):
+            kind = "a list" if isinstance(loaded, list) else "a single value"
+            detail = f"nothing saved: the top level of {target} is {kind}, not keys such as family:"
+            return {"ok": False, "detail": detail}
+        data = loaded or {}
     family = data.get("family")
     if not isinstance(family, dict):
         family = data["family"] = {}
@@ -860,12 +902,15 @@ def _act_firewalla(payload: dict[str, Any]) -> dict[str, Any]:
     result = screen_time.validate_firewalla_pairing(url, token)
     if not result.ok:
         return {"ok": False, "detail": f"not paired — {result.detail}. Nothing was stored."}
-    onboard.set_firewalla_bridge(
-        token=token,
-        device_ip=str(payload.get("device_ip", "")).strip(),
-        device_mac=str(payload.get("device_mac", "")).strip(),
-        port=onboard._port_from_url(url),
-    )
+    try:
+        onboard.set_firewalla_bridge(
+            token=token,
+            device_ip=str(payload.get("device_ip", "")).strip(),
+            device_mac=str(payload.get("device_mac", "")).strip(),
+            port=onboard._port_from_url(url),
+        )
+    except ConfigError as exc:  # raised before the pairing or the token is written
+        return {"ok": False, "detail": f"not paired — {_config_error_detail(exc)}"}
     return {"ok": True, "detail": f"paired ✓ — {result.detail}"}
 
 
@@ -900,13 +945,16 @@ def _act_ha(payload: dict[str, Any]) -> dict[str, Any]:
             ),
         }
     host, port = ha_green._url_host_port(url)
-    onboard.set_ha_green(
-        token=token_arg,
-        host=host,
-        port=port,
-        device_mac=onboard._HA_GREEN_MAC,
-        tailnet_node=ha_green._TAILNET_NODE,
-    )
+    try:
+        onboard.set_ha_green(
+            token=token_arg,
+            host=host,
+            port=port,
+            device_mac=onboard._HA_GREEN_MAC,
+            tailnet_node=ha_green._TAILNET_NODE,
+        )
+    except ConfigError as exc:  # raised before the pairing or the token is written
+        return {"ok": False, "detail": f"not saved — {_config_error_detail(exc)}"}
     version = ha_green.ha_version(url=url, token=token_arg)
     suffix = f" {version}" if version else ""
     return {"ok": True, "detail": f"verified ✓ — Home Assistant{suffix} is running"}
@@ -1051,15 +1099,21 @@ def _make_handler(session: _Session) -> type[BaseHTTPRequestHandler]:
                 return
             raw_len = self.headers.get("Content-Length")
             if raw_len is None:
-                self._write_json({"ok": False, "detail": "missing Content-Length"}, HTTPStatus.BAD_REQUEST)
+                self._write_json(
+                    {"ok": False, "detail": "missing Content-Length"}, HTTPStatus.BAD_REQUEST
+                )
                 return
             try:
                 length = int(raw_len.strip())
             except ValueError:
-                self._write_json({"ok": False, "detail": "invalid Content-Length"}, HTTPStatus.BAD_REQUEST)
+                self._write_json(
+                    {"ok": False, "detail": "invalid Content-Length"}, HTTPStatus.BAD_REQUEST
+                )
                 return
             if length < 0:
-                self._write_json({"ok": False, "detail": "negative Content-Length"}, HTTPStatus.BAD_REQUEST)
+                self._write_json(
+                    {"ok": False, "detail": "negative Content-Length"}, HTTPStatus.BAD_REQUEST
+                )
                 return
             if length > _MAX_BODY_BYTES:
                 self._write_json(
@@ -1074,7 +1128,9 @@ def _make_handler(session: _Session) -> type[BaseHTTPRequestHandler]:
                 self._write_json({"ok": False, "detail": "invalid JSON"}, HTTPStatus.BAD_REQUEST)
                 return
             if not isinstance(data, dict):
-                self._write_json({"ok": False, "detail": "JSON body must be an object"}, HTTPStatus.BAD_REQUEST)
+                self._write_json(
+                    {"ok": False, "detail": "JSON body must be an object"}, HTTPStatus.BAD_REQUEST
+                )
                 return
             if path == "/action":
                 payload = data.get("payload")
@@ -1143,11 +1199,15 @@ def _install_app() -> None:
     macos = _APP_PATH / "Contents" / "MacOS"
     macos.mkdir(parents=True, exist_ok=True)
     launcher = macos / "sanctum-setup"
-    launcher.write_text(f"#!/bin/bash\nexec {shlex.quote(_sanctum_bin())} setup\n", encoding="utf-8")
+    launcher.write_text(
+        f"#!/bin/bash\nexec {shlex.quote(_sanctum_bin())} setup\n", encoding="utf-8"
+    )
     launcher.chmod(0o755)
     (_APP_PATH / "Contents" / "Info.plist").write_text(_INFO_PLIST, encoding="utf-8")
     console.print(f"[green]✓[/] built [bold]{_APP_PATH}[/]")
-    console.print("[dim]Open Finder → Applications and double-click “Sanctum Setup” to run it anytime.[/]")
+    console.print(
+        "[dim]Open Finder → Applications and double-click “Sanctum Setup” to run it anytime.[/]"
+    )
 
 
 # ── command entrypoint ─────────────────────────────────────────────────────────

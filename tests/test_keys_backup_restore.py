@@ -16,8 +16,8 @@ import subprocess
 import tarfile
 from typing import TYPE_CHECKING, Any
 
-import click
 import pytest
+import typer
 from typer.testing import CliRunner
 
 from sanctum_cli import keychain
@@ -118,7 +118,7 @@ def test_keys_restore_rejects_tampered_ciphertext_and_wrong_passphrase(
     # Wrong passphrase -> Exit 1
     fake.store.clear()
     monkeypatch.setattr(kb.getpass, "getpass", lambda *a, **k: "wrong-passphrase-123")
-    with pytest.raises(click.exceptions.Exit) as exc:
+    with pytest.raises(typer.Exit) as exc:
         kb.keys_restore_command(path=bundle)
     assert exc.value.exit_code == 1
     assert fake.store == {}
@@ -128,7 +128,7 @@ def test_keys_restore_rejects_tampered_ciphertext_and_wrong_passphrase(
     tampered[-1] ^= 0xFF
     bundle.write_bytes(bytes(tampered))
     monkeypatch.setattr(kb.getpass, "getpass", lambda *a, **k: "correct-horse-staple")
-    with pytest.raises(click.exceptions.Exit) as exc2:
+    with pytest.raises(typer.Exit) as exc2:
         kb.keys_restore_command(path=bundle)
     assert exc2.value.exit_code == 1
     assert fake.store == {}
@@ -160,7 +160,7 @@ def test_keys_restore_rejects_tar_traversal_symlink_and_bad_manifest(
             passphrase, lambda tf: _add_file(tf, "sanctum-keys/../../evil", b"x")
         )
     )
-    with pytest.raises(click.exceptions.Exit):
+    with pytest.raises(typer.Exit):
         kb.keys_restore_command(path=b1)
 
     # 2. Symlink member
@@ -172,7 +172,7 @@ def test_keys_restore_rejects_tar_traversal_symlink_and_bad_manifest(
 
     b2 = tmp_path / "sym.enc"
     b2.write_bytes(_build_malicious_v2_bundle(passphrase, _add_sym))
-    with pytest.raises(click.exceptions.Exit):
+    with pytest.raises(typer.Exit):
         kb.keys_restore_command(path=b2)
 
     # 3. Hardlink member
@@ -184,7 +184,7 @@ def test_keys_restore_rejects_tar_traversal_symlink_and_bad_manifest(
 
     b3 = tmp_path / "lnk.enc"
     b3.write_bytes(_build_malicious_v2_bundle(passphrase, _add_lnk))
-    with pytest.raises(click.exceptions.Exit):
+    with pytest.raises(typer.Exit):
         kb.keys_restore_command(path=b3)
 
     # 4. Bad service name in MANIFEST.json
@@ -194,7 +194,7 @@ def test_keys_restore_rejects_tar_traversal_symlink_and_bad_manifest(
 
     b4 = tmp_path / "manifest.enc"
     b4.write_bytes(_build_malicious_v2_bundle(passphrase, _add_bad_manifest))
-    with pytest.raises(click.exceptions.Exit):
+    with pytest.raises(typer.Exit):
         kb.keys_restore_command(path=b4)
 
     assert fake.store == {}
@@ -231,7 +231,7 @@ def test_keys_restore_rejects_uncanonical_duplicate_tar_members(
 
     bundle = tmp_path / "dup.enc"
     bundle.write_bytes(_build_malicious_v2_bundle(passphrase, _build_dup))
-    with pytest.raises(click.exceptions.Exit) as exc:
+    with pytest.raises(typer.Exit) as exc:
         kb.keys_restore_command(path=bundle)
     assert exc.value.exit_code == 1
     assert fake.store == {}

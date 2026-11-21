@@ -2,8 +2,8 @@
 
 The hub runs proxyd / force-flow / memory-vault as LaunchDaemons under a dedicated
 local user ``sanctum`` so the control plane does not ride the operator's GUI
-login session. Family Pass (CLI-only) installs never create this user; those
-installs treat the probes as not-applicable.
+login session. Family Pass (CLI-only) installs and satellites (``instance.role:
+satellite``) never create this user; they treat the probes as not-applicable.
 
 Install (sudo, once per hub)::
 
@@ -24,6 +24,9 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from xml.etree import ElementTree as ET
+
+from sanctum_cli import config
+from sanctum_cli.errors import ConfigError, SanctumError
 
 WAVE1_LABELS: tuple[str, ...] = (
     "haus.sanctum.proxyd",
@@ -74,7 +77,18 @@ class Wave1Report:
 
 
 def haus_tier_present() -> bool:
-    """True when this Mac has haus-operator artifacts (not Family Pass only)."""
+    """True when this Mac is a hub that should run the wave-1 daemons.
+
+    A declared ``instance.role`` decides: a ``satellite`` never runs them (it can
+    still carry hub-looking artifacts, such as model manifests for its local
+    brain), and a ``hub`` always does. Without a role, True when haus-operator
+    artifacts are on disk (not Family Pass only).
+    """
+    role = config.instance_role()
+    if role == "satellite":
+        return False
+    if role == "hub":
+        return True
     markers = [
         Path.home() / ".sanctum/sanctum-proxy",
         Path.home() / ".sanctum/manifests",
@@ -173,13 +187,16 @@ def _http_status(url: str, timeout: float = 3.0, tls: bool = False) -> int:
 def check_wave1(*, require_user: bool = True) -> Wave1Report:
     """Check wave-1 ownership and health.
 
-    On CLI-only installs (no haus markers), returns ``applicable=False``.
+    On a satellite or a CLI-only install (no haus markers), returns
+    ``applicable=False``.
     """
     if not haus_tier_present():
-        return Wave1Report(
-            applicable=False,
-            reason="CLI-only install — service principal not expected",
+        reason = (
+            "satellite — the wave-1 hub daemons run on the hub, not here"
+            if config.instance_role() == "satellite"
+            else "CLI-only install — service principal not expected"
         )
+        return Wave1Report(applicable=False, reason=reason)
 
     items: list[CheckItem] = []
 
@@ -198,7 +215,9 @@ def check_wave1(*, require_user: bool = True) -> Wave1Report:
     for label in WAVE1_LABELS:
         plist = DAEMON_DIR / f"{label}.plist"
         if not plist.is_file():
-            items.append(CheckItem(f"plist {label}", False, "not installed in /Library/LaunchDaemons"))
+            items.append(
+                CheckItem(f"plist {label}", False, "not installed in /Library/LaunchDaemons")
+            )
             continue
         items.append(CheckItem(f"plist {label}", True, str(plist)))
         uname = _plist_username(plist)
@@ -383,15 +402,23 @@ def _ensure_group_and_user() -> None:
             gid = pwd.getpwnam(SERVICE_USERNAME).pw_gid if service_user_exists() else 502
             try:
                 gid = int(
-                    _run(["dscl", ".", "-read", f"/Groups/{SERVICE_USERNAME}", "PrimaryGroupID"])
-                    .stdout.split()[-1]
+                    _run(
+                        ["dscl", ".", "-read", f"/Groups/{SERVICE_USERNAME}", "PrimaryGroupID"]
+                    ).stdout.split()[-1]
                 )
             except (IndexError, ValueError):
                 gid = 502
             home = f"/Users/{SERVICE_USERNAME}"
             _run(["dscl", ".", "-create", f"/Users/{SERVICE_USERNAME}"], check=True)
             _run(
-                ["dscl", ".", "-create", f"/Users/{SERVICE_USERNAME}", "UserShell", "/usr/bin/false"],
+                [
+                    "dscl",
+                    ".",
+                    "-create",
+                    f"/Users/{SERVICE_USERNAME}",
+                    "UserShell",
+                    "/usr/bin/false",
+                ],
                 check=True,
             )
             _run(
@@ -584,8 +611,52 @@ def _install_plists(op_home: Path) -> None:
                 _run(["launchctl", "bootout", f"gui/{op_uid}/{label}"], check=False)
 
 
+def _role_file() -> Path:
+    """The instance.yaml that decides the role: the operator's, also under sudo.
+
+    ``$SANCTUM_INSTANCE_FILE`` when set. As root it usually is not (sudo resets
+    the environment, and HOME may be root's), so the operator's own
+    ``~/.sanctum/instance.yaml``.
+    """
+    if os.environ.get(config.ENV_INSTANCE_FILE) or os.geteuid() != 0:
+        return config.instance_path()
+    return operator_home() / ".sanctum" / "instance.yaml"
+
+
+def refuse_on_a_satellite() -> None:
+    """Raise ``ConfigError`` on a declared satellite: the service principal is hub-only.
+
+    Fails closed. An existing instance.yaml must load (:func:`config.load_raw`
+    raises ``ConfigError`` for one it cannot read, such as an impossible date
+    anywhere in it), so nothing is installed from a file that does not load,
+    whatever its role. The role then comes from :func:`config.instance_role`,
+    the single role detector. Only a missing file, or a role other than
+    ``satellite``, passes.
+    """
+    target = _role_file()
+    if not target.exists():
+        return
+    config.load_raw(target)  # fail closed: a file that does not load raises ConfigError
+    if config.instance_role(target) != "satellite":
+        return
+    msg = (
+        "the hive service principal (user sanctum + the wave-1 proxyd / force-flow / "
+        "memory-vault LaunchDaemons) is hub-only, and this machine is a satellite "
+        f"(instance.role: satellite in {target})"
+    )
+    raise ConfigError(
+        msg,
+        fix="run it on the hub; if this machine is the hub, set instance.role: hub "
+        "(sanctum init --role hub) and re-run",
+    )
+
+
 def install_wave1_as_root() -> int:
-    """Full greenfield wave-1 install. Must run as root. Returns 0 on success."""
+    """Full greenfield wave-1 install. Must run as root. Returns 0 on success.
+
+    Refuses on a declared satellite (``ConfigError``) before writing anything.
+    """
+    refuse_on_a_satellite()
     if os.geteuid() != 0:
         raise PermissionError("install_wave1_as_root requires root")
     op_home = operator_home()
@@ -601,9 +672,12 @@ def run_install(*, dry_run: bool = False) -> int:
 
     Materializes packaged plists, creates user ``sanctum``, installs
     LaunchDaemons, fixes ACLs. Prompts for admin via ``sudo`` when not root.
+    Refuses on a declared satellite (``ConfigError``, see
+    :func:`refuse_on_a_satellite`) before it writes or asks for anything.
 
     Returns the subprocess / install exit code.
     """
+    refuse_on_a_satellite()
     if dry_run:
         # Validate packaged assets load cleanly without writing anything to disk.
         for name in (
@@ -617,24 +691,31 @@ def run_install(*, dry_run: bool = False) -> int:
     if os.geteuid() == 0:
         return install_wave1_as_root()
 
-    # Re-enter as root with isolated Python (-I) and sanitized sudo env (no -E).
+    # Re-enter as root with isolated Python (-I) and sanitized sudo env (no -E),
+    # through main(), so a refusal there is one clean error, not a traceback.
     import sys
 
-    code = (
-        "import sys; "
-        "from sanctum_cli.service_user import install_wave1_as_root; "
-        "sys.exit(install_wave1_as_root())"
-    )
-    cmd = ["sudo", "--", sys.executable, "-I", "-c", code]
+    cmd = ["sudo", "--", sys.executable, "-I", "-m", "sanctum_cli.service_user", "install"]
     return subprocess.call(cmd)
 
 
 def main() -> None:
-    """``python -m sanctum_cli.service_user install`` (usually under sudo)."""
+    """``python -m sanctum_cli.service_user install`` (usually under sudo).
+
+    A refusal (a satellite, an unreadable instance.yaml) prints ``error:`` /
+    ``fix:`` on stderr and exits with the error's code (5), never a traceback.
+    """
     import sys
 
     if len(sys.argv) > 1 and sys.argv[1] == "install":
-        raise SystemExit(install_wave1_as_root() if os.geteuid() == 0 else run_install())
+        try:
+            rc = install_wave1_as_root() if os.geteuid() == 0 else run_install()
+        except SanctumError as exc:
+            print(f"error: {exc.message}", file=sys.stderr)
+            if exc.fix:
+                print(f"fix: {exc.fix}", file=sys.stderr)
+            raise SystemExit(int(exc.exit_code)) from exc
+        raise SystemExit(rc)
     raise SystemExit("usage: python -m sanctum_cli.service_user install")
 
 

@@ -121,6 +121,8 @@ def test_run_install_uses_sudo_without_dash_e_and_python_dash_i(monkeypatch):
     assert "--" in cmd
     assert cmd[cmd.index("--") + 1] == sys.executable
     assert "-I" in cmd
+    # Through the module entry point, whose refusals print error:/fix:, not a traceback.
+    assert cmd[-3:] == ["-m", "sanctum_cli.service_user", "install"]
 
 
 def test_ensure_group_and_user_uses_locked_password_not_argv_token(monkeypatch, tmp_path):

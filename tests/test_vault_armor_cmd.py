@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import errno
 import json
+import os
 import stat
 from typing import TYPE_CHECKING
 
+import pytest
 from typer.testing import CliRunner
 
 from sanctum_cli.cli import app
@@ -13,9 +16,8 @@ from sanctum_cli.cli import app
 if TYPE_CHECKING:
     from pathlib import Path
 
-    import pytest
-
 runner = CliRunner()
+_SUBCOMMANDS = [["status"], ["self-test"], ["unlock"], ["lock"]]
 
 
 def _write_fake_armor_bin(tmp_path: Path) -> Path:
@@ -86,3 +88,62 @@ def test_vault_armor_missing_binary_reports_fix(
     assert res.exit_code != 0
     normalized = " ".join(res.output.split())
     assert "cargo build --release -p sanctum-vault-armor" in normalized
+
+
+@pytest.mark.parametrize("command", _SUBCOMMANDS, ids=lambda c: c[0])
+def test_vault_armor_binary_without_execute_permission_is_a_clean_error(
+    command: list[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """subprocess raised PermissionError for a mode-0644 binary: a traceback, not exit 4."""
+    fake = _write_fake_armor_bin(tmp_path)
+    fake.chmod(0o644)
+    monkeypatch.setenv("SANCTUM_VAULT_ARMOR_BIN", str(fake))
+    res = runner.invoke(app, ["vault-armor", *command])
+    assert res.exit_code == 4, res.output
+    assert isinstance(res.exception, SystemExit)  # a clean exit, not a traceback
+    assert res.stderr.splitlines() == [
+        f"error: cannot run sanctum-vault-armor at {fake}: Permission denied",
+        f"fix: make it an executable file you can run (ls -l {fake}; chmod +x {fake})",
+    ]
+
+
+def test_vault_armor_binary_this_mac_cannot_run_is_a_clean_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Any other OSError from subprocess (here an exec format error) is exit 4 too."""
+    fake = tmp_path / "sanctum-vault-armor"
+    fake.write_bytes(b"\x00\x01 not a program")
+    fake.chmod(0o755)
+    monkeypatch.setenv("SANCTUM_VAULT_ARMOR_BIN", str(fake))
+    res = runner.invoke(app, ["vault-armor", "status"])
+    assert res.exit_code == 4, res.output
+    assert isinstance(res.exception, SystemExit)
+    assert res.stderr.splitlines() == [
+        f"error: cannot run sanctum-vault-armor at {fake}: {os.strerror(errno.ENOEXEC)}",
+        "fix: rebuild and reinstall it from sanctum-rs: "
+        "cargo build --release -p sanctum-vault-armor",
+    ]
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root searches any directory")
+def test_vault_armor_binary_behind_a_directory_it_cannot_search_is_a_clean_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Looking for the binary raised PermissionError there, before it was even run."""
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    fake = _write_fake_armor_bin(locked)
+    monkeypatch.setenv("SANCTUM_VAULT_ARMOR_BIN", str(fake))
+    locked.chmod(0o000)
+    try:
+        res = runner.invoke(app, ["vault-armor", "status"])
+    finally:
+        locked.chmod(0o755)
+    assert res.exit_code == 4, res.output
+    assert isinstance(res.exception, SystemExit)
+    assert res.stderr.splitlines()[0] == (
+        f"error: cannot run sanctum-vault-armor at {fake}: Permission denied"
+    )
+    assert res.stderr.splitlines()[1] == (
+        f"fix: make {locked} searchable by you (ls -ld {locked}; chmod u+x {locked})"
+    )

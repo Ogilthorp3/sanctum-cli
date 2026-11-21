@@ -12,6 +12,7 @@ import subprocess
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
+import pytest
 from typer.testing import CliRunner
 
 from sanctum_cli.backends import gdrive
@@ -19,8 +20,6 @@ from sanctum_cli.cli import app
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-    import pytest
 
 runner = CliRunner()
 
@@ -191,3 +190,32 @@ def test_inject_rclone_client_secret_preserves_other_sections_at_0600(tmp_path: 
     assert f"client_secret = {VALID_CLIENT_SECRET}" in text
     assert "client_secret = old" not in text
     assert (conf.stat().st_mode & 0o777) == 0o600
+
+
+@pytest.mark.parametrize("slot", ["primary", "secondary"])
+def test_persist_writes_once_and_the_bak_holds_the_original(tmp_path: Path, slot: str) -> None:
+    """The primary slot used to be written twice, usually within the same second, so the
+    second ``.bak.<stamp>`` (of the half-written file) replaced the backup of the original."""
+    import yaml as _yaml
+
+    target = tmp_path / "instance.yaml"
+    original = "# my haus\ninstance:\n  name: T\n  slug: t\nservices:\n  x:\n    port: 1\n"
+    target.write_text(original, encoding="utf-8")
+    repo = "rclone:gdrive-sanctum:sanctum-restic-t"
+    gdrive._persist_gdrive(
+        target_slot=slot,
+        instance_path=target,
+        repo=repo,
+        keychain_service_restic="sanctum-backup-key",
+        keychain_account="sanctum-backup",
+    )
+    baks = list(tmp_path.glob("instance.yaml.bak.*"))
+    assert len(baks) == 1
+    assert baks[0].read_text(encoding="utf-8") == original
+    parsed = _yaml.safe_load(target.read_text(encoding="utf-8"))
+    assert parsed["services"] == {"x": {"port": 1}}
+    assert parsed["cli"]["cloud_backup"][slot] == {
+        "kind": "restic",
+        "repo": repo,
+        "keychain": {"service": "sanctum-backup-key", "account": "sanctum-backup"},
+    }

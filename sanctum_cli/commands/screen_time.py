@@ -32,10 +32,23 @@ from sanctum_cli.errors import LocalError, UserError
 console = Console()
 
 ENV_DEVICES_FILE = "SANCTUM_DEVICES_FILE"
-_DEVICES_CANDIDATES = (
-    Path.home() / ".sanctum/screen-time/devices.yaml",
-    Path.home() / "Projects/sanctum-screen-time/devices.yaml",
-)
+
+
+def devices_candidates() -> tuple[Path, Path]:
+    """Where ``devices.yaml`` may live, most canonical first.
+
+    Resolved on every call, not at import: a value bound at import would keep
+    the home directory of whichever process imported the module first, so a
+    test's fake home (and the onboarding write path) would still point at the
+    operator's real file.
+    """
+    home = Path.home()
+    return (
+        home / ".sanctum/screen-time/devices.yaml",
+        home / "Projects/sanctum-screen-time/devices.yaml",
+    )
+
+
 _DEVICE_OFF_VALUES = frozenset({"off", "none", "false", "0"})
 _VALID_MODES = ("apple", "macpause", "both")
 
@@ -136,7 +149,7 @@ def _resolve_devices_path() -> Path:
     override = os.environ.get(ENV_DEVICES_FILE)
     if override:
         return Path(override).expanduser()
-    for candidate in _DEVICES_CANDIDATES:
+    for candidate in devices_candidates():
         if candidate.is_file():
             return candidate
     raise LocalError(

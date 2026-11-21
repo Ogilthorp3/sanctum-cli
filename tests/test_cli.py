@@ -70,6 +70,27 @@ def test_config_validate_missing_returns_5(
     assert result.exit_code == 5
 
 
+def test_config_validate_prints_bracketed_values_exactly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Brackets in a path or a value are text, not Rich markup, and long lines never break."""
+    target = tmp_path / "[site]" / "instance.yaml"
+    target.parent.mkdir()
+    target.write_text(
+        'instance:\n  name: Box\n  slug: box\nflag: !!bool "[bold]maybe[/bold]"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("SANCTUM_INSTANCE_FILE", str(target))
+    result = runner.invoke(app, ["config", "validate"])
+    assert result.exit_code == 5
+    lines = result.stderr.splitlines()
+    assert lines[0] == (
+        f'error: cannot read {target}: !!bool "[bold]maybe[/bold]" on line 4 '
+        "is not a valid true/false value"
+    )
+    assert lines[1] == "fix: correct the value on line 4 or drop its tag, then re-run"
+
+
 def test_status_oneline(
     minimal_instance_yaml: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

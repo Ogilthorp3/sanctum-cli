@@ -45,7 +45,7 @@ from sanctum_cli.backends import b2, gdrive, r2
 from sanctum_cli.commands import backup as backup_cmd
 from sanctum_cli.commands import net as net_cmd
 from sanctum_cli.devices.base import NetContext as _NetContext
-from sanctum_cli.errors import LocalError, SanctumError, UserError
+from sanctum_cli.errors import ConfigError, LocalError, SanctumError, UserError
 from sanctum_cli.gear.scan import build_default_scan, discover_haus
 from sanctum_cli.net import heal, link, system
 from sanctum_cli.onboard_experience import chapter_banner, green_check, recap_card
@@ -250,7 +250,10 @@ def _run_gate(gate: str, *, yes: bool) -> bool:
 def _run_service_user_install(*, yes: bool) -> bool:
     """Ensure wave-1 control plane runs as the dedicated sanctum service user.
 
-    Greenfield-safe: packaged plists live in the CLI wheel. Haus-operator only.
+    Greenfield-safe: packaged plists live in the CLI wheel. Hub only: on a
+    satellite or a CLI-only install the wave-1 report is not applicable, so the
+    gate prints ``n/a`` with the reason and returns before it writes or asks
+    anything (False: nothing was configured, so the recap reads "skipped").
     Under --yes, materialize assets and print the one-liner for a later sudo
     install (no password prompt in scripted runs).
     """
@@ -258,7 +261,16 @@ def _run_service_user_install(*, yes: bool) -> bool:
 
     # This gate is operator-recipe only — always greenfield-capable (packaged assets).
     report = su.check_wave1()
-    if report.applicable and report.ok:
+    if not report.applicable:
+        reason = report.reason or "service principal not expected here"
+        console.print(Text.assemble("  ", ("n/a", "dim"), f"  {reason}"))
+        if config.instance_role() is None:
+            console.print(
+                "  [dim]a new hub? declare it first: sanctum init --role hub, "
+                "then sanctum service-user install[/]"
+            )
+        return False
+    if report.ok:
         console.print("  [green]ok[/] wave-1 already running as sanctum")
         return True
     if yes:
@@ -613,13 +625,13 @@ def _preferred_name(fallback: str) -> str:
     recipe, or already-configured).
     """
     try:
-        data = yaml.safe_load(config.instance_path().read_text(encoding="utf-8")) or {}
-        notif = data.get("notifications") if isinstance(data, dict) else None
-        owner = notif.get("owner_name") if isinstance(notif, dict) else None
-        if isinstance(owner, str) and owner.strip():
-            return owner.strip()
-    except (OSError, yaml.YAMLError):
-        pass
+        data = config.load_raw()
+    except ConfigError:  # missing or unreadable: the login name will do
+        return fallback
+    notif = data.get("notifications")
+    owner = notif.get("owner_name") if isinstance(notif, dict) else None
+    if isinstance(owner, str) and owner.strip():
+        return owner.strip()
     return fallback
 
 
@@ -773,11 +785,7 @@ def set_instance_identity(
     user who skips one field doesn't clobber an existing value.
     """
     target = Path(path) if path else config.instance_path()
-    data: dict[str, Any] = {}
-    if target.exists():
-        loaded = yaml.safe_load(target.read_text(encoding="utf-8"))
-        if isinstance(loaded, dict):
-            data = loaded
+    data = config.load_raw_if_present(target)
     notif = data.get("notifications")
     if not isinstance(notif, dict):
         notif = data["notifications"] = {}
@@ -931,10 +939,11 @@ def _devices_write_path() -> Path:
     override = os.environ.get(screen_time.ENV_DEVICES_FILE)
     if override:
         return Path(override).expanduser()
-    for candidate in screen_time._DEVICES_CANDIDATES:
+    candidates = screen_time.devices_candidates()
+    for candidate in candidates:
         if candidate.is_file():
             return candidate
-    return screen_time._DEVICES_CANDIDATES[0]
+    return candidates[0]
 
 
 def _run_family_setup(*, yes: bool) -> bool:
@@ -1120,11 +1129,7 @@ def set_provider_config(
     written. Callers must only invoke this AFTER a green health-probe.
     """
     target = Path(path) if path else config.instance_path()
-    data: dict[str, Any] = {}
-    if target.exists():
-        loaded = yaml.safe_load(target.read_text(encoding="utf-8"))
-        if isinstance(loaded, dict):
-            data = loaded
+    data = config.load_raw_if_present(target)
     cli = data.get("cli")
     if not isinstance(cli, dict):
         cli = data["cli"] = {}
@@ -1366,10 +1371,10 @@ def _identity_configured(path: Path | None = None) -> bool:
     """True when notifications.owner_name AND signal.target are both already set."""
     target = path or config.instance_path()
     try:
-        data = yaml.safe_load(target.read_text(encoding="utf-8")) or {}
-    except (OSError, yaml.YAMLError):
+        data = config.load_raw(target)
+    except ConfigError:
         return False
-    notif = data.get("notifications") if isinstance(data, dict) else None
+    notif = data.get("notifications")
     if not isinstance(notif, dict):
         return False
     sig = notif.get("signal")
@@ -1432,11 +1437,7 @@ def set_firewalla_bridge(
     after :func:`screen_time.validate_firewalla_pairing` returns ``ok``.
     """
     target = Path(path) if path else config.instance_path()
-    data: dict[str, Any] = {}
-    if target.exists():
-        loaded = yaml.safe_load(target.read_text(encoding="utf-8"))
-        if isinstance(loaded, dict):
-            data = loaded
+    data = config.load_raw_if_present(target)
     services = data.get("services")
     if not isinstance(services, dict):
         services = data["services"] = {}
@@ -1602,11 +1603,7 @@ def set_ha_green(
     Callers must only invoke this AFTER :func:`ha_green.api_running` returns True.
     """
     target = Path(path) if path else config.instance_path()
-    data: dict[str, Any] = {}
-    if target.exists():
-        loaded = yaml.safe_load(target.read_text(encoding="utf-8"))
-        if isinstance(loaded, dict):
-            data = loaded
+    data = config.load_raw_if_present(target)
     services = data.get("services")
     if not isinstance(services, dict):
         services = data["services"] = {}
@@ -2275,11 +2272,7 @@ def set_device_reference(
     only invoke this AFTER a genuine read-only ``connect()`` auth-probe succeeds.
     """
     target = Path(path) if path else config.instance_path()
-    data: dict[str, Any] = {}
-    if target.exists():
-        loaded = yaml.safe_load(target.read_text(encoding="utf-8"))
-        if isinstance(loaded, dict):
-            data = loaded
+    data = config.load_raw_if_present(target)
     devices = data.get("devices")
     if not isinstance(devices, dict):
         devices = data["devices"] = {}

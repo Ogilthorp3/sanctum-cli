@@ -27,6 +27,7 @@ from typer.testing import CliRunner
 from sanctum_cli import config
 from sanctum_cli.cli import app
 from sanctum_cli.commands import node as node_cmd
+from sanctum_cli.errors import ConfigError
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -363,6 +364,24 @@ def test_node_adopt_happy_path_registers(
     assert any("AAAAC3NzaC1lZDI1NTE5AAAAIFakeBlobForNodeTest" in c for c in ssh.calls)
 
 
+def test_node_adopt_fails_l6_on_an_unreadable_instance_yaml(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The scorecard names the bad value; the file is not rewritten; nothing is adopted."""
+    instance = _wire_adopt(monkeypatch, tmp_path, ScriptedSsh(_healthy_script()))
+    before = "instance:\n  name: Box\n  slug: box\nsince: 2026-02-30\n"
+    instance.write_text(before, encoding="utf-8")
+    result = runner.invoke(
+        app, ["node", "adopt", "sat.example", "--user", "operator", "--wait", "0"]
+    )
+    assert result.exit_code == 1, result.output
+    assert isinstance(result.exception, SystemExit)
+    out = " ".join(result.stdout.split())
+    assert "2026-02-30 on line 4 is not a valid date" in out
+    assert "NOT ADOPTED" in out
+    assert instance.read_text(encoding="utf-8") == before
+
+
 def test_node_adopt_name_override(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """--name wins over the hostname-derived default."""
     instance = _wire_adopt(monkeypatch, tmp_path, ScriptedSsh(_healthy_script()))
@@ -600,6 +619,99 @@ def test_node_list_and_get(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> N
     got = runner.invoke(app, ["node", "get", "home"])
     assert got.exit_code == 0
     assert "primary" in got.stdout
+
+
+def test_node_list_reports_an_impossible_date_as_a_config_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """One clean error and fix (exit 5), never a traceback, for a value PyYAML cannot build."""
+    inst = tmp_path / "instance.yaml"
+    inst.write_text("nodes:\n  home:\n    type: hub\nsince: 2026-02-30\n", encoding="utf-8")
+    monkeypatch.setenv("SANCTUM_INSTANCE_FILE", str(inst))
+    result = runner.invoke(app, ["node", "list"])
+    assert result.exit_code == 5
+    assert isinstance(result.exception, SystemExit)
+    assert result.stderr.splitlines() == [
+        f"error: cannot read {inst}: 2026-02-30 on line 4 is not a valid date "
+        "(day is out of range for month)",
+        "fix: correct the value on line 4, or quote it to keep it as text, then re-run",
+    ]
+
+
+def test_node_names_notes_an_unreadable_instance_yaml_and_exits_0(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The live roster is optional: the cheat sheet prints, then a note says why no roster."""
+    inst = tmp_path / "[site]" / "instance.yaml"  # a bracketed path: the note is text, not markup
+    inst.parent.mkdir()
+    inst.write_text("nodes:\n  home:\n    type: hub\nsince: 2026-02-30\n", encoding="utf-8")
+    monkeypatch.setenv("SANCTUM_INSTANCE_FILE", str(inst))
+    result = runner.invoke(app, ["node", "names"])
+    assert result.exit_code == 0, result.output
+    assert "Hive naming" in result.stdout
+    assert "    aliases: [alice-mbp]   # until Tailscale machine renamed" in result.stdout
+    assert "Live roster stems" not in result.stdout
+    assert result.stdout.splitlines()[-1] == (
+        f"live roster not shown: cannot read {inst}: 2026-02-30 on line 4 is not a valid date "
+        "(day is out of range for month)"
+    )
+    assert result.stderr == ""
+
+
+def test_node_names_prints_the_live_roster_as_written(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    inst = tmp_path / "instance.yaml"
+    inst.write_text(
+        'nodes:\n  home:\n    type: hub\n    aliases: [old-home]\n  "[bold]x":\n    type: satellite\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("SANCTUM_INSTANCE_FILE", str(inst))
+    result = runner.invoke(app, ["node", "names"])
+    assert result.exit_code == 0, result.output
+    assert result.stdout.splitlines()[-3:] == [
+        "Live roster stems",
+        "  [bold]x → [bold]x",
+        "  home → home  aliases=['old-home']",
+    ]
+
+
+@pytest.mark.parametrize("aliases", ["5", "true", "old-home", "{old: home}"])
+def test_node_names_treats_aliases_that_are_not_a_list_as_none(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, aliases: str
+) -> None:
+    """A number crashed the command; a single name was listed one letter per alias."""
+    inst = tmp_path / "instance.yaml"
+    inst.write_text(f"nodes:\n  home:\n    type: hub\n    aliases: {aliases}\n", encoding="utf-8")
+    monkeypatch.setenv("SANCTUM_INSTANCE_FILE", str(inst))
+    result = runner.invoke(app, ["node", "names"])
+    assert result.exit_code == 0, result.output
+    assert result.stdout.splitlines()[-2:] == ["Live roster stems", "  home → home"]
+
+
+@pytest.mark.parametrize("argv", [["node", "ensure-hub"], ["node", "declare-peer", "montreal"]])
+def test_roster_writes_leave_an_unreadable_instance_yaml_untouched(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, argv: list[str]
+) -> None:
+    inst = tmp_path / "instance.yaml"
+    before = "instance:\n  name: Box\n  slug: box\nflag: !!bool maybe\n"
+    inst.write_text(before, encoding="utf-8")
+    monkeypatch.setenv("SANCTUM_INSTANCE_FILE", str(inst))
+    result = runner.invoke(app, argv)
+    assert result.exit_code == 5
+    assert isinstance(result.exception, SystemExit)
+    assert "!!bool maybe on line 4 is not a valid true/false value" in result.stderr
+    assert inst.read_text(encoding="utf-8") == before
+    assert not (tmp_path / "instance.yaml.bak").exists()
+
+
+def test_register_node_refuses_to_rewrite_a_file_with_a_list_at_the_top(tmp_path: Path) -> None:
+    """It used to replace such a file with just the new ``nodes:`` block."""
+    target = tmp_path / "instance.yaml"
+    target.write_text("- keep\n- me\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match="top-level YAML must be a mapping"):
+        node_cmd.register_node("studio", host="studio", user="operator", path=target)
+    assert target.read_text(encoding="utf-8") == "- keep\n- me\n"
 
 
 def test_node_whoami(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

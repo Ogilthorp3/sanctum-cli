@@ -43,16 +43,17 @@ import time
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any, NoReturn
 
 import typer
 import yaml
 from rich.console import Console
 from rich.markup import escape
 from rich.table import Table
+from rich.text import Text
 
 from sanctum_cli import config, keychain
-from sanctum_cli.errors import LocalError, NetworkError, SanctumError
+from sanctum_cli.errors import ConfigError, LocalError, NetworkError, SanctumError
 from sanctum_cli.hive.capabilities import NodeCapability, capabilities_of, normalize_capability
 from sanctum_cli.hive.export_council import overlay_hosts
 from sanctum_cli.hive.naming import (
@@ -79,12 +80,19 @@ node_app = typer.Typer(
 def _report(exc: SanctumError) -> None:
     """Pretty-print a SanctumError to stderr with its optional fix suggestion.
 
-    Mirrors ``net._report`` so the node sub-app reports failures the same way the
-    rest of the CLI does (it cannot import from ``cli`` without a cycle).
+    Mirrors ``cli._report`` so the node sub-app reports failures the same way the
+    rest of the CLI does (it cannot import from ``cli`` without a cycle): plain
+    Text, so a path or value in brackets prints as written, and soft-wrapped.
     """
-    err_console.print(f"[bold red]error:[/] {exc.message}")
+    err_console.print(Text.assemble(("error:", "bold red"), f" {exc.message}"), soft_wrap=True)
     if exc.fix:
-        err_console.print(f"[dim]fix:[/] {exc.fix}")
+        err_console.print(Text.assemble(("fix:", "dim"), f" {exc.fix}"), soft_wrap=True)
+
+
+def _exit_on(exc: ConfigError) -> NoReturn:
+    """Report an unreadable instance.yaml and exit 5: never a traceback, nothing written."""
+    _report(exc)
+    raise typer.Exit(code=int(exc.exit_code)) from exc
 
 
 # ─── impure seams (tests monkeypatch these; nothing else shells out) ──
@@ -1184,14 +1192,17 @@ def looks_like_tailscale_name(host: str) -> bool:
 
 
 def load_nodes_map(path: Path | None = None) -> dict[str, dict[str, Any]]:
-    """Return ``nodes`` from instance.yaml as ``{name: block}`` (empty if missing)."""
+    """Return ``nodes`` from instance.yaml as ``{name: block}`` (empty if missing).
+
+    Read through :func:`config.load_raw`, so a file that cannot be read or built
+    (not UTF-8, invalid YAML, an impossible date, a bad tag, a list at the top)
+    raises ``ConfigError`` naming the file and line; commands read it through
+    :func:`_roster`, which reports that and exits 5.
+    """
     target = Path(path) if path else config.instance_path()
     if not target.exists():
         return {}
-    loaded = yaml.safe_load(target.read_text(encoding="utf-8"))
-    if not isinstance(loaded, dict):
-        return {}
-    nodes = loaded.get("nodes")
+    nodes = config.load_raw(target).get("nodes")
     if not isinstance(nodes, dict):
         return {}
     out: dict[str, dict[str, Any]] = {}
@@ -1199,6 +1210,14 @@ def load_nodes_map(path: Path | None = None) -> dict[str, dict[str, Any]]:
         if isinstance(k, str) and isinstance(v, dict):
             out[k] = v
     return out
+
+
+def _roster() -> dict[str, dict[str, Any]]:
+    """:func:`load_nodes_map` for a command: an unreadable instance.yaml exits 5."""
+    try:
+        return load_nodes_map()
+    except ConfigError as exc:
+        _exit_on(exc)
 
 
 def read_node_id(path: Path | None = None) -> str | None:
@@ -1390,9 +1409,10 @@ def register_node(name: str, *, host: str, user: str, path: Path | None = None) 
 
     Raw read-modify-write (matching ``onboard.set_instance_identity``): every
     other block is preserved, a ``<file>.bak`` is written first, and the parent
-    dir is created for a fresh file. ``nodes:`` is deliberately NOT modeled in
-    :class:`config.Config` — it is read back via ``config.instance_value``, the
-    per-setup-block convention.
+    dir is created for a fresh file. A file that cannot be read or built raises
+    ``ConfigError`` and is left as it was. ``nodes:`` is deliberately NOT modeled
+    in :class:`config.Config` — it is read back via ``config.instance_value``,
+    the per-setup-block convention.
 
     Hive roster shape (satellite adopt default)::
 
@@ -1404,11 +1424,7 @@ def register_node(name: str, *, host: str, user: str, path: Path | None = None) 
         adopted: YYYY-MM-DD
     """
     target = Path(path) if path else config.instance_path()
-    data: dict[str, Any] = {}
-    if target.exists():
-        loaded = yaml.safe_load(target.read_text(encoding="utf-8"))
-        if isinstance(loaded, dict):
-            data = loaded
+    data = config.load_raw_if_present(target)
     nodes = data.get("nodes")
     if not isinstance(nodes, dict):
         nodes = data["nodes"] = {}
@@ -1454,7 +1470,7 @@ def _tailscale_ip_for_name(name: str) -> str | None:
 @node_app.command("list", help="List hive roster from instance.yaml nodes.")
 def node_list() -> None:
     """Print every registered haus node (type, tier, site, address fields)."""
-    nodes = load_nodes_map()
+    nodes = _roster()
     if not nodes:
         console.print("[dim]no nodes in instance.yaml — adopt a satellite or declare the hub[/]")
         raise typer.Exit(code=0)
@@ -1484,7 +1500,7 @@ def node_list() -> None:
 def node_get(
     name: Annotated[str, typer.Argument(help="Node name (key under nodes. in instance.yaml).")],
 ) -> None:
-    nodes = load_nodes_map()
+    nodes = _roster()
     n = nodes.get(name) or nodes.get(name.lower())
     if n is None:
         exc = LocalError(
@@ -1507,7 +1523,7 @@ def node_whoami() -> None:
         )
         _report(exc)
         raise typer.Exit(code=int(exc.exit_code))
-    nodes = load_nodes_map()
+    nodes = _roster()
     n = nodes.get(nid) or nodes.get(nid.lower())
     console.print(f"[bold]{escape(nid)}[/]")
     if n is None:
@@ -1534,7 +1550,7 @@ def node_resolve(
     name: Annotated[str, typer.Argument(help="Node name to resolve.")],
 ) -> None:
     """Name → address for cross-site ops. Prefers live Tailscale; never invents routes."""
-    nodes = load_nodes_map()
+    nodes = _roster()
     peers = parse_tailscale_peer_ips(_tailscale_status_json())
     result = resolve_node_address(name, nodes, peers)
     if not result.get("ok"):
@@ -1557,7 +1573,7 @@ def node_resolve(
 @node_app.command("offers", help="List which hive nodes offer which capabilities.")
 def node_offers() -> None:
     """Capability matrix for the roster (explicit + type/tier defaults)."""
-    nodes = load_nodes_map()
+    nodes = _roster()
     if not nodes:
         console.print("[dim]no nodes in roster[/]")
         raise typer.Exit(code=0)
@@ -1595,7 +1611,7 @@ def node_can(
         )
         _report(exc)
         raise typer.Exit(code=int(exc.exit_code))
-    nodes = load_nodes_map()
+    nodes = _roster()
     names = sorted(n for n, block in nodes.items() if cap in capabilities_of(block))
     if not names:
         console.print(f"[yellow]no node offers[/] {cap.value}")
@@ -1615,7 +1631,7 @@ def node_route(
     ] = "fastest",
 ) -> None:
     """Route work: prefer local metal, fastest online, primary, or forced hub."""
-    nodes = load_nodes_map()
+    nodes = _roster()
     local = read_node_id()
     peers = parse_tailscale_peer_ips(_tailscale_status_json())
     result = pick_node(
@@ -1648,7 +1664,7 @@ def node_route(
 @node_app.command("vault-host", help="Resolve the primary hub for vault / memory authority.")
 def node_vault_host() -> None:
     """Vault is hub-authoritative: print primary node + live address (name-only hop)."""
-    nodes = load_nodes_map()
+    nodes = _roster()
     primary = primary_node_name(nodes)
     if not primary:
         # fall back to capability
@@ -1715,11 +1731,10 @@ def node_declare_peer(
         _report(exc)
         raise typer.Exit(code=int(exc.exit_code))
     target = config.instance_path()
-    data: dict[str, Any] = {}
-    if target.exists():
-        loaded = yaml.safe_load(target.read_text(encoding="utf-8"))
-        if isinstance(loaded, dict):
-            data = loaded
+    try:
+        data = config.load_raw_if_present(target)
+    except ConfigError as unreadable:
+        _exit_on(unreadable)
     nodes = data.get("nodes")
     if not isinstance(nodes, dict):
         nodes = data["nodes"] = {}
@@ -1781,11 +1796,10 @@ def node_ensure_hub(
     hub_name = (name or read_node_id() or "home").strip()
     resolved_ssh_user = (ssh_user or getpass.getuser()).strip()
     target = config.instance_path()
-    data: dict[str, Any] = {}
-    if target.exists():
-        loaded = yaml.safe_load(target.read_text(encoding="utf-8"))
-        if isinstance(loaded, dict):
-            data = loaded
+    try:
+        data = config.load_raw_if_present(target)
+    except ConfigError as unreadable:
+        _exit_on(unreadable)
     nodes = data.get("nodes")
     if not isinstance(nodes, dict):
         nodes = data["nodes"] = {}
@@ -1857,7 +1871,7 @@ def node_export_council(
         _report(exc)
         raise typer.Exit(code=int(exc.exit_code))
     council = json.loads(src.read_text(encoding="utf-8"))
-    hive = load_nodes_map()
+    hive = _roster()
     peers = parse_tailscale_peer_ips(_tailscale_status_json())
     resolved: dict[str, str] = {}
     for name in hive:
@@ -1870,7 +1884,7 @@ def node_export_council(
 
 @node_app.command("validate", help="Validate hive roster SoT rules + naming contract.")
 def node_validate() -> None:
-    nodes = load_nodes_map()
+    nodes = _roster()
     problems = validate_roster(nodes)
     primary = primary_node_name(nodes)
     console.print(f"primary: {escape(str(primary or '—'))}")
@@ -1988,7 +2002,12 @@ def node_apply_names(
 
 @node_app.command("names", help="Print the hive naming contract (Apple-simple cheat sheet).")
 def node_names() -> None:
-    """One name per machine — what you call it when you talk to it."""
+    """One name per machine — what you call it when you talk to it.
+
+    The live roster section is optional: when instance.yaml cannot be read, the
+    cheat sheet still prints, a dim note says why the roster is missing, and the
+    command exits 0.
+    """
     console.print("[bold]Hive naming[/] — one string, everywhere\n")
     console.print("  [bold]Jobs test:[/] What do you call it when you talk to it? That is the only name.\n")
     table = Table(title="Patterns", title_justify="left")
@@ -2002,9 +2021,18 @@ def node_names() -> None:
     console.print(table)
     console.print("\n[bold]Same three places:[/] roster key · ~/.sanctum/.node_id · MagicDNS stem")
     console.print("[bold]Forbidden:[/] owner prefixes, MM64/MBP128 codes, dual names without aliases:")
-    console.print("  mbp:\n    tailscale_name: mbp\n    aliases: [alice-mbp]   # until Tailscale machine renamed\n")
+    example = (
+        "  mbp:\n"
+        "    tailscale_name: mbp\n"
+        "    aliases: [alice-mbp]   # until Tailscale machine renamed\n"
+    )
+    console.print(Text(example))  # Text: the [alice-mbp] list is YAML, not a markup tag
     console.print(f"  infra example: {suggest_infra_name('home', 'fw')}")
-    nodes = load_nodes_map()
+    try:
+        nodes = load_nodes_map()
+    except ConfigError as exc:
+        console.print(Text(f"\nlive roster not shown: {exc.message}", style="dim"), soft_wrap=True)
+        return
     if nodes:
         console.print("\n[bold]Live roster stems[/]")
         for name in sorted(nodes):
@@ -2015,7 +2043,7 @@ def node_names() -> None:
                 if a.lower() not in {name.lower(), preferred.lower()}
             ]
             extra = f"  aliases={legacy}" if legacy else ""
-            console.print(f"  {name} → {preferred}{extra}")
+            console.print(Text(f"  {name} → {preferred}{extra}"), soft_wrap=True)
 
 
 _LAYER_STYLE = {
@@ -2126,9 +2154,13 @@ def node_adopt(
     # L6: register only over a proven L1-L4, and trust only the read-back.
     if required_ok:
         node_name = name or config.slugify_name(remote_hostname)
+        failure = "instance.yaml write did not read back"
         try:
             register_node(node_name, host=host, user=ssh_user)
             written = config.instance_value(f"nodes.{node_name}.host") == host
+        except ConfigError as unreadable:  # unreadable instance.yaml: left as it was
+            written = False
+            failure = "; ".join(part for part in (unreadable.message, unreadable.fix) if part)
         except OSError:
             written = False
         if written:
@@ -2138,9 +2170,7 @@ def node_adopt(
                 )
             )
         else:
-            rows.append(
-                LayerResult("L6", "register", LayerStatus.FAIL, "instance.yaml write did not read back")
-            )
+            rows.append(LayerResult("L6", "register", LayerStatus.FAIL, failure))
     else:
         rows.append(LayerResult("L6", "register", LayerStatus.SKIP, "blocked by a failing layer"))
 

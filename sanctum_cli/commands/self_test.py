@@ -18,14 +18,17 @@ summary panel at the end.
 
 from __future__ import annotations
 
+import http.client
 import importlib
 import json
+import os
 import shutil
 import socket
 import sqlite3
 import ssl
 import subprocess
 import time
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -72,12 +75,32 @@ class Probe:
 # ── Probe implementations ─────────────────────────────────────────────
 
 
+def _satellite_role() -> bool:
+    """``instance.role: satellite`` — a contained remote site (a second haus).
+
+    :func:`config.instance_role` reads the raw YAML, so the profile still applies
+    when the rest of the file fails validation or holds a value PyYAML cannot
+    build, such as an impossible date (the config probe reports that separately).
+    """
+    return config.instance_role() == "satellite"
+
+
 def _haus_tier_installed() -> bool:
     """Detect whether this is a haus-operator install (cathedrals + proxyd +
     Force Flow + chitti + R2D2) vs a CLI-only install (just sanctum-cli +
-    backup recipe). Returns True only if at least one haus-tier artifact is
-    present on disk — cathedral manifests, proxyd config, or the R2D2
-    classifier source. A friend's fresh install has none of these."""
+    backup recipe).
+
+    A declared ``instance.role`` decides: ``hub`` is always haus tier, and
+    ``satellite`` never is (it carries model manifests for its local brain, but
+    the hub services live on the hub). Without a role, returns True only if at
+    least one haus-tier artifact is present on disk — cathedral manifests,
+    proxyd config, or the R2D2 classifier source. A friend's fresh install has
+    none of these."""
+    role = config.instance_role()
+    if role == "hub":
+        return True
+    if role == "satellite":
+        return False
     haus_markers = [
         Path.home() / ".sanctum/manifests",  # cathedral model manifests
         Path.home() / ".sanctum/sanctum-proxy",  # proxyd config dir
@@ -87,6 +110,16 @@ def _haus_tier_installed() -> bool:
     return any(p.exists() for p in haus_markers)
 
 
+def _tier_label() -> str:
+    """The profile this run is graded on: ``satellite``, ``haus`` or ``CLI``.
+
+    Reported as the ``--json`` ``tier`` and in the summary headline.
+    """
+    if _satellite_role():
+        return "satellite"
+    return "haus" if _haus_tier_installed() else "CLI"
+
+
 def _haus_only(name: str, check_fn: Callable[[], ProbeResult]) -> Callable[[], ProbeResult]:
     """Decorator-like wrapper: skip a haus-tier probe with n/a when this is
     a CLI-only install. The wrapped function is only invoked on haus
@@ -94,11 +127,32 @@ def _haus_only(name: str, check_fn: Callable[[], ProbeResult]) -> Callable[[], P
     can tell at a glance which haus surface was skipped."""
 
     def wrapped() -> ProbeResult:
+        if _satellite_role():
+            return ProbeResult(
+                passed=True,
+                not_applicable=True,
+                reason=f"satellite: {name} runs on the hub, not here",
+            )
         if not _haus_tier_installed():
             return ProbeResult(
                 passed=True,
                 not_applicable=True,
                 reason=f"CLI-only install: {name} probe skipped (no haus services configured)",
+            )
+        return check_fn()
+
+    return wrapped
+
+
+def _satellite_only(name: str, check_fn: Callable[[], ProbeResult]) -> Callable[[], ProbeResult]:
+    """Inverse of :func:`_haus_only`: run only on a declared satellite."""
+
+    def wrapped() -> ProbeResult:
+        if not _satellite_role():
+            return ProbeResult(
+                passed=True,
+                not_applicable=True,
+                reason=f"not a satellite: {name} probe skipped",
             )
         return check_fn()
 
@@ -359,6 +413,274 @@ def probe_backup_recent() -> ProbeResult:
     return ProbeResult(True, f"last backup {age_h:.1f}h ago")
 
 
+# The router's TLS keys for a backend (sanctum-docs: architecture/dynamic-model-routing).
+_TLS_PATH_KEYS = ("ca_cert_path", "client_cert_path", "client_key_path")
+# Their pre-release names, which nothing reads any more, mapped to the current ones.
+_RENAMED_TLS_KEYS = {
+    "ca": "ca_cert_path",
+    "client_cert": "client_cert_path",
+    "client_key": "client_key_path",
+}
+
+
+def _router_shape(key: str) -> str:
+    """One line showing the ``router:`` block the satellite probe expects."""
+    return (
+        f"set router.default: {key} and router.backends.{key}.url: "
+        "https://127.0.0.1:6502/v1 (plus ca_cert_path / client_cert_path / "
+        "client_key_path for mTLS)"
+    )
+
+
+class _TLSMaterialError(Exception):
+    """A backend's TLS material cannot be loaded; the message is the probe detail."""
+
+
+def _backend_tls_context(backend: dict[str, object]) -> ssl.SSLContext:
+    """CA-verifying client context for an ``https`` backend, with its client cert.
+
+    Raises :class:`_TLSMaterialError` with an operator-facing reason. The client
+    key loads through a password callback that always answers an empty
+    passphrase, so an encrypted key fails fast instead of OpenSSL stopping to
+    prompt on the terminal (or hanging a headless run).
+    """
+    paths = {k: _expand(backend.get(k)) for k in _TLS_PATH_KEYS}
+    for key, path in paths.items():
+        if path and not Path(path).is_file():
+            raise _TLSMaterialError(f"{key} not found: {path}")
+    cert, client_key = paths["client_cert_path"], paths["client_key_path"]
+    if client_key and not cert:
+        raise _TLSMaterialError("client_key_path is set without client_cert_path")
+    try:
+        ctx = ssl.create_default_context(cafile=paths["ca_cert_path"])
+    except (OSError, ssl.SSLError) as e:
+        raise _TLSMaterialError(f"ca_cert_path unusable: {e}") from e
+    if cert:
+        prompted: list[bool] = []
+
+        def no_passphrase() -> bytes:
+            # OpenSSL only asks for a passphrase when the key is encrypted.
+            prompted.append(True)
+            return b""
+
+        try:
+            ctx.load_cert_chain(cert, client_key, password=no_passphrase)
+        except (OSError, ssl.SSLError) as e:
+            if prompted:
+                holder = (
+                    "client_key_path"
+                    if client_key
+                    else "the client key (client_key_path, or the key inside client_cert_path)"
+                )
+                raise _TLSMaterialError(
+                    f"{holder} is passphrase-protected; use an unencrypted key (mode 0600)"
+                ) from e
+            if not client_key:
+                raise _TLSMaterialError(
+                    f"client_cert_path unusable: {e}; set client_key_path to its private key"
+                ) from e
+            raise _TLSMaterialError(f"client_cert_path / client_key_path unusable: {e}") from e
+    return ctx
+
+
+def _transport_hint(reason: object, backend: dict[str, object]) -> str:
+    """Point at the missing TLS key when the handshake failure names one."""
+    if isinstance(reason, ssl.SSLCertVerificationError) and not backend.get("ca_cert_path"):
+        return "; set ca_cert_path to the CA that signed the server certificate"
+    wants_cert = getattr(reason, "reason", None) == "TLSV13_ALERT_CERTIFICATE_REQUIRED"
+    if wants_cert and not backend.get("client_cert_path"):
+        return "; the server wants a client certificate: set client_cert_path and client_key_path"
+    return ""
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Follow no redirect: the probe must never carry its bearer token to another url.
+
+    With no new request to make, urllib raises the 3xx as an ``HTTPError``, which
+    the probe reports as a failure naming the redirect target.
+    """
+
+    def redirect_request(self, *args: object, **kwargs: object) -> None:  # noqa: ARG002
+        return None
+
+
+def _brain_opener(ctx: ssl.SSLContext | None) -> urllib.request.OpenerDirector:
+    """The local-brain probe's own opener: no proxy, no redirects, the backend's TLS.
+
+    The brain is on this machine, so a proxy from ``http_proxy`` / ``https_proxy``
+    would only be a stranger reading the request (and its token).
+    """
+    handlers: list[urllib.request.BaseHandler] = [urllib.request.ProxyHandler({}), _NoRedirect()]
+    if ctx is not None:
+        handlers.append(urllib.request.HTTPSHandler(context=ctx))
+    return urllib.request.build_opener(*handlers)
+
+
+def _one_line(text: str, limit: int = 200) -> str:
+    """Server-supplied text made safe to print: no control characters, bounded length."""
+    shown = "".join(ch if ch.isprintable() else "?" for ch in text)
+    return shown if len(shown) <= limit else shown[: limit - 3] + "..."
+
+
+def probe_satellite_brain() -> ProbeResult:
+    """The satellite's default router backend answers ``/models``.
+
+    A satellite is ACL-contained from the hub's council, so its own local brain
+    (``router.default`` → ``router.backends.<name>.url``) is the only one it has.
+    The backend uses the router's own keys: an ``https`` url may set
+    ``ca_cert_path``, ``client_cert_path`` and ``client_key_path`` for a server
+    that requires mutual TLS, and ``api_key_env`` names an environment variable
+    whose value is sent as a bearer token. The pre-release names ``ca``,
+    ``client_cert`` and ``client_key`` fail with the rename to make instead of
+    being ignored. An HTTP 401/403 still proves the brain is up, so it passes
+    with a note.
+
+    The token is never printed: a value with a control character in it fails
+    before any request, and no error text that could quote a header is shown.
+    The request ignores proxy settings and follows no redirect; a 3xx fails.
+    """
+    name = config.instance_value("router.default")
+    if name is not None and not isinstance(name, str):
+        return ProbeResult(
+            False,
+            f"router.default must name a backend (a string), got {name!r}; "
+            f"{_router_shape('<key>')}",
+        )
+    if not name or not name.strip():
+        return ProbeResult(False, f"router.default is not set; {_router_shape('<key>')}")
+    backends = config.instance_value("router.backends")
+    # .get, not a dotted instance_value lookup: a backend name may contain '.'.
+    backend = backends.get(name) if isinstance(backends, dict) else None
+    if not isinstance(backend, dict):
+        return ProbeResult(False, f"router.backends.{name} is missing; {_router_shape(name)}")
+    url = backend.get("url")
+    if not isinstance(url, str) or not url.strip():
+        return ProbeResult(False, f"router.backends.{name}.url is not set; {_router_shape(name)}")
+    url = url.strip()
+    try:
+        parts = urllib.parse.urlsplit(url)
+        scheme, netloc = parts.scheme.lower(), parts.netloc
+    except ValueError:  # e.g. an unbalanced IPv6 bracket
+        scheme = netloc = ""
+    if scheme not in ("http", "https") or not netloc:
+        return ProbeResult(
+            False, f"{name}: url {url} is not an http:// or https:// url; {_router_shape(name)}"
+        )
+    if any(backend.get(old) and not backend.get(new) for old, new in _RENAMED_TLS_KEYS.items()):
+        # Ignoring them would probe without the operator's CA or client certificate.
+        return ProbeResult(
+            False,
+            f"{name}: ca, client_cert and client_key were renamed ca_cert_path, "
+            "client_cert_path and client_key_path; rename them in instance.yaml",
+        )
+    tls_keys = [k for k in _TLS_PATH_KEYS if backend.get(k)]
+    if tls_keys and scheme != "https":
+        return ProbeResult(
+            False,
+            f"{name}: TLS material is set ({', '.join(tls_keys)}) but the url is not https: {url}",
+        )
+    ctx: ssl.SSLContext | None = None
+    if scheme == "https":
+        try:
+            ctx = _backend_tls_context(backend)
+        except _TLSMaterialError as e:
+            return ProbeResult(False, f"{name}: {e}")
+
+    key_env = backend.get("api_key_env")
+    key_env = key_env.strip() if isinstance(key_env, str) else ""
+    token = os.environ.get(key_env, "").strip() if key_env else ""
+    if any(unicodedata.category(ch) == "Cc" for ch in token):
+        return ProbeResult(
+            False,
+            f"{name}: ${key_env} holds a control character (a stray line break?); "
+            "set it to the bare token",
+        )
+    request = urllib.request.Request(f"{url.rstrip('/')}/models")
+    if token:
+        # Unredirected: never forwarded, even if a redirect were ever followed.
+        request.add_unredirected_header("Authorization", f"Bearer {token}")
+    location: str | None = None
+    try:
+        with _brain_opener(ctx).open(request, timeout=5) as resp:
+            status: int = resp.status
+    except urllib.error.HTTPError as e:
+        status = e.code
+        location = e.headers.get("Location") if e.headers is not None else None
+        e.close()
+    except ValueError:
+        # http.client quotes a rejected header value in its message, and that
+        # value may be the token: report a fixed text, never the exception's.
+        check = f"; check ${key_env} and the url" if key_env else "; check the url"
+        return ProbeResult(
+            False, f"{name}: could not send a request to {url} (invalid header or url{check})"
+        )
+    except (OSError, http.client.HTTPException) as e:  # URLError and SSLError are OSErrors
+        reason = e.reason if isinstance(e, urllib.error.URLError) else e
+        hint = _transport_hint(reason, backend)
+        return ProbeResult(False, f"{name} not answering at {url} (HTTP none: {reason}{hint})")
+
+    if 300 <= status < 400:
+        target = _one_line(location) if location else "an unnamed location"
+        return ProbeResult(
+            False,
+            f"{name} not answering at {url} (HTTP {status}: redirects to {target}; "
+            "set url to the API base itself)",
+        )
+    if status == 200:
+        return ProbeResult(True, f"{name} answers at {url}")
+    if status in (401, 403):
+        note = "needs auth"
+        if key_env:
+            note += f"; ${key_env} was rejected" if token else f"; ${key_env} is not set here"
+        return ProbeResult(True, f"{name} answers at {url} (HTTP {status}: {note})")
+    hint = "; does the url end with the API base path, e.g. /v1?" if status == 404 else ""
+    return ProbeResult(False, f"{name} not answering at {url} (HTTP {status}{hint})")
+
+
+def _expand(path: object) -> str | None:
+    return str(Path(str(path)).expanduser()) if path else None
+
+
+# Absolute path: a PATH-planted ``diskutil`` must not answer for the system one.
+_DISKUTIL = "/usr/sbin/diskutil"
+
+
+def probe_vault_armor() -> ProbeResult:
+    """Vault Armor's APFS volume is unlocked (n/a where Vault Armor is not set up).
+
+    A locked vault after boot means the threshold unlock never collected enough
+    witness shares; secrets that live on the volume are unavailable until it does.
+    """
+    manifest = Path.home() / ".sanctum/vault-armor/manifest.json"
+    if not manifest.is_file():
+        return ProbeResult(True, not_applicable=True, reason="vault armor not configured")
+    try:
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        volume = data["envelope"]["volume_uuid"]
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        return ProbeResult(False, f"vault-armor manifest unreadable: {e}")
+    name = data.get("volume_name", "SanctumVault")
+    try:
+        out = subprocess.run(
+            [_DISKUTIL, "info", volume], capture_output=True, text=True, timeout=5
+        ).stdout
+    except Exception as e:
+        return ProbeResult(False, f"diskutil failed: {e}")
+    locked = next(
+        (
+            ln.split(":", 1)[1].strip()
+            for ln in out.splitlines()
+            if ln.strip().startswith("Locked:")
+        ),
+        None,
+    )
+    if locked == "No":
+        return ProbeResult(True, f"{name} unlocked")
+    if locked == "Yes":
+        return ProbeResult(
+            False, f"{name} locked — witness unlock has not succeeded; see vault-armor.log"
+        )
+    return ProbeResult(False, f"{name} ({volume}) not found by diskutil")
 
 
 def probe_service_user_wave1() -> ProbeResult:
@@ -387,6 +709,9 @@ PROBES: list[Probe] = [
     Probe("node binary identity", probe_node_identity),
     Probe("sanctum config valid", probe_config_valid),
     Probe("recent backup snapshot", probe_backup_recent),
+    Probe("vault armor unlocked", probe_vault_armor),
+    # Satellite profile — ``instance.role: satellite``; n/a everywhere else.
+    Probe("satellite local brain", _satellite_only("local-brain", probe_satellite_brain)),
     # Haus-tier — only meaningful when the haus services are installed.
     # Each is wrapped to return n/a on CLI-only installs.
     Probe("Yoda cathedral (:1337)", _haus_only("yoda", probe_yoda_cathedral)),
@@ -531,9 +856,16 @@ def self_test_command(
                 )
             )
         else:
-            console.print_json(
-                json.dumps({"total": 0, "passed": 0, "failed": 0, "duration_ms": 0.0, "probes": []})
-            )
+            empty = {
+                "tier": _tier_label(),
+                "total": 0,
+                "passed": 0,
+                "failed": 0,
+                "not_applicable": 0,
+                "duration_ms": 0.0,
+                "probes": [],
+            }
+            console.print_json(json.dumps(empty))
         raise typer.Exit(code=0)
 
     width = max(len(p.name) for p in selected) + 2
@@ -571,7 +903,7 @@ def self_test_command(
     passed = sum(1 for _, r, _ in results if r.passed and not r.not_applicable)
     failed = sum(1 for _, r, _ in results if not r.passed)
 
-    tier = "haus" if _haus_tier_installed() else "CLI"
+    tier = _tier_label()
 
     if json_output:
         payload = {
@@ -597,10 +929,15 @@ def self_test_command(
     else:
         console.print()
         if failed == 0:
-            headline = f"Sanctum {tier} is healthy."
+            if tier == "satellite":
+                headline = "This Sanctum satellite is healthy."
+                na_scope = "on this satellite"
+            else:
+                headline = f"Sanctum {tier} is healthy."
+                na_scope = "on this install tier"
             counts = f"  {passed}/{len(results)} probes passed in {total_ms:.0f} ms"
             if na:
-                counts += f"  ·  {na} n/a on this install tier"
+                counts += f"  ·  {na} n/a {na_scope}"
             console.print(
                 Panel(
                     Text.assemble(

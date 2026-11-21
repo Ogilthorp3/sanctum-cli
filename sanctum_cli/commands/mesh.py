@@ -40,15 +40,16 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Protocol
+from typing import TYPE_CHECKING, Annotated, Any, Protocol
 
 import typer
 import yaml
 from rich.console import Console
 from rich.markup import escape
+from rich.text import Text
 
 from sanctum_cli import config
-from sanctum_cli.errors import ExitCode, LocalError, SanctumError, UserError
+from sanctum_cli.errors import ConfigError, ExitCode, LocalError, SanctumError, UserError
 from sanctum_cli.mesh.adapters import (
     AutoresearchEvalGate,
     BoundManifestVerifier,
@@ -531,6 +532,22 @@ def _resolve_identity_dir() -> Path | None:
     return None
 
 
+def _config_for_a_mesh_write(path: Path, key: str) -> dict[str, Any] | None:
+    """instance.yaml as a mapping for a best-effort ``mesh`` write, or None to skip it.
+
+    A missing file starts empty. One that cannot be read or built (invalid YAML, an
+    impossible date, a bad tag) is never rewritten from scratch, which would drop
+    every other block: the write is skipped with a note, and the command goes on.
+    """
+    try:
+        return config.load_raw_if_present(path)
+    except ConfigError as exc:
+        err_console.print(
+            f"[yellow]note:[/] {key} was not saved: {escape(exc.message)}", soft_wrap=True
+        )
+        return None
+
+
 def _record_champion(ref: ArtifactRef) -> None:
     """Persist an adopted champion into instance.yaml's ``mesh`` block (best-effort).
 
@@ -541,11 +558,8 @@ def _record_champion(ref: ArtifactRef) -> None:
     persists the pointer. Only the ``mesh`` block is touched, leaving the rest intact.
     """
     path = config.instance_path()
-    try:
-        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    except (OSError, yaml.YAMLError):
-        raw = {}
-    if not isinstance(raw, dict):
+    raw = _config_for_a_mesh_write(path, "mesh.champion")
+    if raw is None:
         return
     mesh_block = raw.get("mesh")
     if not isinstance(mesh_block, dict):
@@ -569,11 +583,8 @@ def _persist_mesh_config(label: str, addr: str | None) -> None:
     ``instance`` / ``cli`` config the schema validates is left intact.
     """
     path = config.instance_path()
-    try:
-        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    except (OSError, yaml.YAMLError):
-        raw = {}
-    if not isinstance(raw, dict):
+    raw = _config_for_a_mesh_write(path, "mesh.label")
+    if raw is None:
         return
     mesh_block = raw.get("mesh")
     if not isinstance(mesh_block, dict):
@@ -693,9 +704,13 @@ def _build_adopt_seams() -> AdoptSeams:
 
 
 def _report(exc: SanctumError) -> None:
-    err_console.print(f"[bold red]error:[/] {escape(exc.message)}")
+    """Print a SanctumError as ``error:`` / ``fix:`` lines to stderr, like ``cli._report``.
+
+    Plain Text, so a path or value in brackets prints as written, and soft-wrapped.
+    """
+    err_console.print(Text.assemble(("error:", "bold red"), f" {exc.message}"), soft_wrap=True)
     if exc.fix:
-        err_console.print(f"[dim]fix:[/] {escape(exc.fix)}")
+        err_console.print(Text.assemble(("fix:", "dim"), f" {exc.fix}"), soft_wrap=True)
 
 
 def _print_join(report: JoinReport, *, yes: bool) -> None:

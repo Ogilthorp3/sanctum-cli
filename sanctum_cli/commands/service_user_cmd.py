@@ -3,19 +3,21 @@
 Subcommands:
   status   print wave-1 ownership / health
   check    same as status; exit 1 on failure (CI / self-test)
-  install  run ~/.sanctum/scripts/service-user/install-on-new-hub.sh (sudo)
+  install  run ~/.sanctum/scripts/service-user/install-on-new-hub.sh (sudo);
+           hub-only, so a declared satellite is refused (exit 5)
 """
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, NoReturn
 
 import typer
 from rich.console import Console
 from rich.table import Table
+from rich.text import Text
 
 from sanctum_cli import service_user as su
-from sanctum_cli.errors import ConfigError, LocalError
+from sanctum_cli.errors import ConfigError, LocalError, SanctumError
 
 console = Console()
 err_console = Console(stderr=True)
@@ -75,7 +77,7 @@ def check_cmd() -> None:
 
 @app.command(
     "install",
-    help="Create user sanctum + install wave-1 LaunchDaemons (prompts for admin).",
+    help="Create user sanctum + install wave-1 LaunchDaemons on a hub (prompts for admin).",
 )
 def install_cmd(
     dry_run: Annotated[
@@ -86,6 +88,27 @@ def install_cmd(
         ),
     ] = False,
 ) -> None:
+    try:
+        _install(dry_run=dry_run)
+    except SanctumError as exc:
+        _report_and_exit(exc)
+
+
+def _report_and_exit(exc: SanctumError) -> NoReturn:
+    """One clean ``error:`` / ``fix:`` pair and the error's exit code, never a traceback.
+
+    Soft-wrapped, so a long path stays whole on its line (copy-pasteable).
+    """
+    err_console.print(Text.assemble(("error:", "bold red"), f" {exc.message}"), soft_wrap=True)
+    if exc.fix:
+        err_console.print(Text.assemble(("fix:", "dim"), f" {exc.fix}"), soft_wrap=True)
+    raise typer.Exit(code=int(exc.exit_code)) from exc
+
+
+def _install(*, dry_run: bool) -> None:
+    # Before the banner and before sudo: hub-only, and an instance.yaml that does not
+    # load is a ConfigError (exit 5) rather than a role silently read as unset.
+    su.refuse_on_a_satellite()
     if dry_run:
         rc = su.run_install(dry_run=True)
         if rc != 0:

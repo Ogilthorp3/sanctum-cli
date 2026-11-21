@@ -29,7 +29,6 @@ import subprocess
 import tempfile
 import webbrowser
 from dataclasses import dataclass
-from datetime import UTC
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -37,7 +36,6 @@ import httpx
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-import yaml
 from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Confirm, Prompt
@@ -271,45 +269,20 @@ def _persist_to_instance_yaml(
     keychain_service_restic: str,
     keychain_account: str,
 ) -> None:
-    """Atomically merge the new cli.cloud_backup section into instance.yaml.
+    """Point ``cli.cloud_backup.primary`` at the new B2 repo, keeping a ``.bak.<stamp>``.
 
-    Preserves existing top-level keys (instance, services, paths, etc.) and
-    only adds/updates ``cli.cloud_backup``. Backs up the original to
-    ``<file>.bak.YYYYMMDDTHHMMSSZ`` before the rename.
+    Every other key is kept. :func:`config.set_cloud_backup_slot` does the
+    write: a file that cannot be read or built, or whose ``cli`` /
+    ``cli.cloud_backup`` is not a block of keys, raises ``ConfigError`` and is
+    left as it was.
     """
-    raw = yaml.safe_load(instance_path.read_text(encoding="utf-8")) or {}
-    if not isinstance(raw, dict):
-        msg = f"instance.yaml top-level is not a mapping: {instance_path}"
-        raise LocalError(msg)
-    cli_block = raw.setdefault("cli", {}) or {}
-    if not isinstance(cli_block, dict):
-        msg = "cli: must be a mapping"
-        raise LocalError(msg)
-    cb_block = cli_block.setdefault("cloud_backup", {}) or {}
-    cb_block["primary"] = {
-        "kind": "restic",
-        "repo": f"b2:{bucket}",
-        "keychain": {
-            "service": keychain_service_restic,
-            "account": keychain_account,
-        },
-    }
-    cb_block.setdefault(
-        "retention", {"keep_daily": 7, "keep_weekly": 4, "keep_monthly": 12}
+    config.set_cloud_backup_slot(
+        instance_path,
+        "primary",
+        repo=f"b2:{bucket}",
+        keychain_service=keychain_service_restic,
+        keychain_account=keychain_account,
     )
-    cli_block["cloud_backup"] = cb_block
-    raw["cli"] = cli_block
-
-    from datetime import datetime
-
-    stamp = datetime.now(tz=UTC).strftime("%Y%m%dT%H%M%SZ")
-    backup_path = instance_path.with_suffix(instance_path.suffix + f".bak.{stamp}")
-    backup_path.write_text(instance_path.read_text(encoding="utf-8"), encoding="utf-8")
-
-    new_yaml = yaml.safe_dump(raw, sort_keys=False, default_flow_style=False)
-    tmp = instance_path.with_suffix(instance_path.suffix + ".tmp")
-    tmp.write_text(new_yaml, encoding="utf-8")
-    tmp.replace(instance_path)
 
 
 # ─── Wizard ─────────────────────────────────────────────────────────

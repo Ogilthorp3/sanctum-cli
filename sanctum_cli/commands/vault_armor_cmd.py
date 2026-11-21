@@ -11,11 +11,12 @@ import json
 import os
 import subprocess
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, NoReturn
 
 import typer
 from rich.console import Console
 from rich.table import Table
+from rich.text import Text
 
 from sanctum_cli.errors import ExitCode, LocalError, SanctumError
 
@@ -28,6 +29,9 @@ app = typer.Typer(
 )
 
 
+_BUILD = "cargo build --release -p sanctum-vault-armor"  # run in a sanctum-rs checkout
+
+
 def binary_path() -> Path:
     override = os.environ.get("SANCTUM_VAULT_ARMOR_BIN")
     if override:
@@ -37,12 +41,12 @@ def binary_path() -> Path:
 
 def _run_armor(args: list[str], timeout: int = 45) -> dict[str, object]:
     bin_p = binary_path()
-    if not bin_p.exists():
-        raise LocalError(
-            f"sanctum-vault-armor binary not found at {bin_p}",
-            fix="build and install from sanctum-rs: cargo build --release -p sanctum-vault-armor",
-        )
     try:
+        if not bin_p.exists():
+            raise LocalError(
+                f"sanctum-vault-armor binary not found at {bin_p}",
+                fix=f"build and install from sanctum-rs: {_BUILD}",
+            )
         proc = subprocess.run(
             [str(bin_p), *args],
             capture_output=True,
@@ -52,6 +56,8 @@ def _run_armor(args: list[str], timeout: int = 45) -> dict[str, object]:
         )
     except subprocess.TimeoutExpired as exc:
         raise LocalError(f"sanctum-vault-armor {' '.join(args)} timed out after {timeout}s") from exc
+    except OSError as exc:  # it cannot be run (see _cannot_run)
+        raise _cannot_run(bin_p, exc) from exc
 
     if proc.returncode != 0:
         detail = (proc.stderr or proc.stdout or "").strip()
@@ -70,10 +76,33 @@ def _run_armor(args: list[str], timeout: int = 45) -> dict[str, object]:
     return parsed if isinstance(parsed, dict) else {"data": parsed}
 
 
-def _report_and_exit(exc: SanctumError) -> None:
-    err_console.print(f"[bold red]error:[/] {exc.message}")
+def _cannot_run(bin_p: Path, exc: OSError) -> LocalError:
+    """The error (exit 4) for a binary that is there but cannot be run, with the likely fix.
+
+    A file without execute permission (the usual case), a directory, or a path
+    through a directory that cannot be searched raises ``PermissionError``; a file
+    this Mac cannot run (an exec format error, another CPU type, a script whose
+    interpreter is missing) raises another ``OSError``.
+    """
+    reason = exc.strerror or str(exc)
+    parent = bin_p.parent
+    if isinstance(exc, PermissionError) and not os.access(parent, os.X_OK):
+        fix = f"make {parent} searchable by you (ls -ld {parent}; chmod u+x {parent})"
+    elif isinstance(exc, PermissionError):
+        fix = f"make it an executable file you can run (ls -l {bin_p}; chmod +x {bin_p})"
+    else:
+        fix = f"rebuild and reinstall it from sanctum-rs: {_BUILD}"
+    return LocalError(f"cannot run sanctum-vault-armor at {bin_p}: {reason}", fix=fix)
+
+
+def _report_and_exit(exc: SanctumError) -> NoReturn:
+    """Print ``error:`` / ``fix:`` lines to stderr, like ``cli._report``, and exit with the code.
+
+    Plain Text, so a path or value in brackets prints as written, and soft-wrapped.
+    """
+    err_console.print(Text.assemble(("error:", "bold red"), f" {exc.message}"), soft_wrap=True)
     if exc.fix:
-        err_console.print(f"[dim]fix:[/] {exc.fix}")
+        err_console.print(Text.assemble(("fix:", "dim"), f" {exc.fix}"), soft_wrap=True)
     raise typer.Exit(code=int(exc.exit_code)) from exc
 
 
@@ -92,7 +121,6 @@ def status_cmd(
         data = _run_armor(args)
     except SanctumError as exc:
         _report_and_exit(exc)
-        return
 
     if json_output:
         typer.echo(json.dumps(data, indent=2))
@@ -133,7 +161,6 @@ def self_test_cmd(
         data = _run_armor(["self-test"], timeout=20)
     except SanctumError as exc:
         _report_and_exit(exc)
-        return
     if json_output:
         typer.echo(json.dumps(data, indent=2))
         return
@@ -159,7 +186,6 @@ def unlock_cmd(
         data = _run_armor(args, timeout=max(30, wait + 20))
     except SanctumError as exc:
         _report_and_exit(exc)
-        return
     if json_output:
         typer.echo(json.dumps(data, indent=2))
         return
@@ -177,7 +203,6 @@ def lock_cmd(
         data = _run_armor(["lock"], timeout=20)
     except SanctumError as exc:
         _report_and_exit(exc)
-        return
     if json_output:
         typer.echo(json.dumps(data, indent=2))
         return

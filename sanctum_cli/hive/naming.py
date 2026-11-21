@@ -78,6 +78,18 @@ def classify_name(name: str) -> str:
     return "site_brain"
 
 
+def _alias_stems(node: Mapping[str, Any]) -> list[str]:
+    """A roster row's ``aliases:`` as lowercase stems; a value that is not a list is none.
+
+    ``aliases: alice-mbp`` (a single name) or ``aliases: 5`` counts as no aliases,
+    rather than as one alias per letter or a crash.
+    """
+    aliases = node.get("aliases")
+    if not isinstance(aliases, list):
+        return []
+    return [stem for a in aliases if (stem := str(a).strip().lower())]
+
+
 def preferred_name(raw: str, nodes: Mapping[str, Mapping[str, Any]] | None = None) -> str:
     """Map a raw stem (Tailscale HostName / alias) to the preferred hive name."""
     n = (raw or "").strip().lower().split(".")[0]
@@ -91,9 +103,8 @@ def preferred_name(raw: str, nodes: Mapping[str, Mapping[str, Any]] | None = Non
             ts = str(block.get("tailscale_name") or "").strip().lower()
             if ts == n:
                 return key
-            for a in block.get("aliases") or []:
-                if str(a).strip().lower() == n:
-                    return key
+            if n in _alias_stems(block):
+                return key
     if n in LEGACY_ALIASES:
         return LEGACY_ALIASES[n]
     m_long = _INFRA_LONG.match(n)
@@ -112,9 +123,8 @@ def aliases_of(node: Mapping[str, Any] | None) -> list[str]:
     ts = str(node.get("tailscale_name") or "").strip().lower()
     if ts:
         out.append(ts)
-    for a in node.get("aliases") or []:
-        s = str(a).strip().lower()
-        if s and s not in out:
+    for s in _alias_stems(node):
+        if s not in out:
             out.append(s)
     return out
 
@@ -134,7 +144,7 @@ def validate_node_naming(name: str, node: Mapping[str, Any]) -> list[str]:
     if (
         ts
         and not is_valid_hive_name(ts)
-        and ts.lower() not in {a.lower() for a in (node.get("aliases") or [])}
+        and ts.lower() not in _alias_stems(node)
         and (_OWNER_PREFIX.match(ts) or _MEMORY_CODE.match(ts))
     ):
         problems.append(
@@ -143,7 +153,7 @@ def validate_node_naming(name: str, node: Mapping[str, Any]) -> list[str]:
         )
     if ts and ts.lower() != key.lower() and classify_name(key) != "site_infra":
         # brain/mobile: prefer key == tailscale_name
-        aliases = {str(a).lower() for a in (node.get("aliases") or [])}
+        aliases = set(_alias_stems(node))
         if ts.lower() not in aliases and ts.lower() != key.lower():
             problems.append(
                 f"{key}: tailscale_name={ts!r} differs from roster key — "

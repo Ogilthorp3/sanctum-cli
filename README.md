@@ -15,7 +15,7 @@ The beta-safe command set runs on any Mac:
 | Command | What it does | State |
 |---|---|---|
 | `sanctum status` | One-line health: backup age, disk, providers | ✅ |
-| `sanctum init` | Scaffold a minimal `~/.sanctum/instance.yaml` | ✅ |
+| `sanctum init` | Create `~/.sanctum/instance.yaml`, or add/update its `instance:` block (name, role) in place, keeping other blocks and comments | ✅ |
 | `sanctum onboard` | recipe → cloud wizard → first backup → restore canary | ✅ |
 | `sanctum doctor` / `--ship` | Health probes + six-gate module ship bar | ✅ |
 | `sanctum self-test` | Honest, tier-aware health check | ✅ |
@@ -32,6 +32,12 @@ are not part of the beta — `brainstorm`, `council`, `chat`, `code`, `bridge`,
 `proxy`, `agent`, `screen-time`, `devices`, `schedule`, `endocrine`. Running one
 without the haus prints a short banner and exits cleanly; it never half-runs. See
 [sanctum.run](https://sanctum.run) for the full setup.
+
+A satellite (`instance.role: satellite`) is not the hub: there `brainstorm`,
+`council`, `chat`, `code`, `endocrine` and `bridge` print the same banner, and a bare
+`sanctum` does not open the council chamber, even though the satellite has an
+mTLS CA of its own. On a satellite that can reach the hub's council and bridge,
+set `SANCTUM_HAUS_ON_SATELLITE=1` to use them.
 
 See [`SPEC.md`](./SPEC.md) for the full design, doctrine, and roadmap.
 

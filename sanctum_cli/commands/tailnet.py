@@ -35,6 +35,7 @@ import typer
 import yaml
 from rich.console import Console
 from rich.markup import escape
+from rich.text import Text
 
 from sanctum_cli import config, keychain
 from sanctum_cli.errors import (
@@ -89,9 +90,13 @@ _P = TypeVar("_P")
 
 
 def _report(exc: SanctumError) -> None:
-    err_console.print(f"[bold red]error:[/] {escape(exc.message)}")
+    """Print a SanctumError as ``error:`` / ``fix:`` lines to stderr, like ``cli._report``.
+
+    Plain Text, so a path or value in brackets prints as written, and soft-wrapped.
+    """
+    err_console.print(Text.assemble(("error:", "bold red"), f" {exc.message}"), soft_wrap=True)
     if exc.fix:
-        err_console.print(f"[dim]fix:[/] {escape(exc.fix)}")
+        err_console.print(Text.assemble(("fix:", "dim"), f" {exc.fix}"), soft_wrap=True)
 
 
 def _fail(exc: SanctumError) -> NoReturn:

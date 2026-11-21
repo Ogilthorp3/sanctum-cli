@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import pytest
+
 from sanctum_cli.hive.naming import (
     LEGACY_ALIASES,
+    aliases_of,
     classify_name,
     is_valid_hive_name,
     preferred_name,
@@ -77,3 +80,23 @@ def test_roster_duplicate_stems() -> None:
     }
     problems = validate_roster_naming(nodes)
     assert any("road" in p for p in problems)
+
+
+@pytest.mark.parametrize(
+    "aliases",
+    [5, True, "alice-mbp", {"alice-mbp": None}],
+    ids=["a-number", "a-bool", "a-single-name", "a-mapping"],
+)
+def test_aliases_that_are_not_a_list_count_as_none(aliases: object) -> None:
+    """A roster row read from YAML can hold anything under aliases:; none of it may crash."""
+    row = {"type": "mobile", "tailscale_name": "alice-mbp", "aliases": aliases}
+    assert aliases_of(row) == ["alice-mbp"]  # the tailscale_name alone
+    assert preferred_name("a", {"mbp": row}) == "a"
+    assert validate_node_naming("mbp", row)  # the legacy name is still flagged
+    assert validate_roster_naming({"mbp": row})
+
+
+def test_alias_entries_that_are_not_text_are_read_as_text() -> None:
+    row = {"type": "mobile", "tailscale_name": "mbp128", "aliases": [128, "MBP128"]}
+    assert aliases_of(row) == ["mbp128", "128"]
+    assert validate_node_naming("mbp", row) == []

@@ -3,63 +3,57 @@
 from __future__ import annotations
 
 import os
+import shutil
+import tempfile
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import pytest
 
-if TYPE_CHECKING:
-    from collections.abc import Iterator
+_INSTANCE_ENV = "SANCTUM_INSTANCE_FILE"
+# The CA bundles proxyd, council and brainstorm read before ~/.sanctum/certs/ca.crt.
+_CA_ENVS = ("SANCTUM_PROXYD_CA", "SANCTUM_COUNCIL_CACERT", "SANCTUM_COUNCIL_CA")
+_saved_env: list[dict[str, str | None]] = []
+_test_ca_dirs: list[Path] = []
 
 
-@pytest.fixture(autouse=True)
-def _home_is_never_the_operators(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """No test writes into the operator's real ``~/.sanctum``.
+def pytest_configure(config: pytest.Config) -> None:
+    """Even collection must not read the developer's real ``instance.yaml`` or certificates.
 
-    On 2026-09-19 a full-suite run appended 215 lines to the real
-    ``~/.sanctum/telemetry/cli.jsonl`` and 10 to ``~/.sanctum/logs/netgear-audit.jsonl``, and
-    overwrote ``~/.sanctum/wifi-mac-stability.mobileconfig``. ``HOME`` alone is not enough:
-    several defaults are bound to ``Path.home()`` at IMPORT time, so they are patched by name
-    here. A test that wants the real home asks for it explicitly.
+    Test modules import ``sanctum_cli.commands.council`` while pytest collects them, and
+    its ``SEATS`` table reads ``instance.yaml`` at import time (the operator and host
+    labels in Yoda's persona), before any fixture runs. Point the instance file at a path
+    that does not exist for the whole session; the autouse fixture below repoints it at
+    each test's fake home.
+
+    The TLS code reads ``$SANCTUM_PROXYD_CA`` / ``$SANCTUM_COUNCIL_CACERT`` before
+    ``~/.sanctum/certs/ca.crt``, and ``brainstorm`` binds its default ``--cacert`` at import.
+    On every machine, with or without a real CA (and whatever the shell exports), point
+    all three at a throwaway CA minted here, so no test loads the developer's CA and a
+    CA-less CI box still has a valid cafile.
     """
-    fake = tmp_path / "home"
-    (fake / ".sanctum").mkdir(parents=True, exist_ok=True)
-    monkeypatch.setenv("HOME", str(fake))
-    monkeypatch.setattr(Path, "home", staticmethod(lambda: fake))
-    for mod_name, attr, rel in (
-        ("sanctum_cli.devices.rails", "DEFAULT_AUDIT_LOG", ".sanctum/logs/netgear-audit.jsonl"),
-        ("sanctum_cli.service_user", "INSTALL_SCRIPT", ".sanctum/scripts/service-user/install-on-new-hub.sh"),
-        ("sanctum_cli.service_user", "STATUS_SCRIPT", ".sanctum/scripts/service-user/status.sh"),
-    ):
-        try:
-            mod = __import__(mod_name, fromlist=["_"])
-        except Exception:  # a module this suite never loads
-            continue
-        if hasattr(mod, attr):
-            monkeypatch.setattr(mod, attr, fake / rel, raising=False)
+    _saved_env.append({name: os.environ.get(name) for name in (_INSTANCE_ENV, *_CA_ENVS)})
+    missing = Path(tempfile.gettempdir()) / f"sanctum-tests-{os.getpid()}-absent"
+    os.environ[_INSTANCE_ENV] = str(missing / "instance.yaml")
+    ca_dir = Path(tempfile.mkdtemp(prefix="sanctum-test-ca-"))
+    _test_ca_dirs.append(ca_dir)
+    ca = _mint_test_ca(ca_dir / "ca.crt")
+    for name in _CA_ENVS:
+        os.environ[name] = str(ca)
 
 
-@pytest.fixture(scope="session", autouse=True)
-def _tls_ca_for_tests(tmp_path_factory: pytest.TempPathFactory) -> Iterator[None]:
-    """Make TLS code paths hermetic on a CA-less machine (CI / a clean checkout).
+def pytest_unconfigure(config: pytest.Config) -> None:
+    if _saved_env:
+        for name, saved in _saved_env.pop().items():
+            if saved is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = saved
+    while _test_ca_dirs:
+        shutil.rmtree(_test_ca_dirs.pop(), ignore_errors=True)
 
-    proxyd/council build an SSL context from ``$SANCTUM_PROXYD_CA`` else
-    ``~/.sanctum/certs/ca.crt``; with neither present, ``create_default_context``
-    raises ``FileNotFoundError``. When the real haus CA is absent, mint a
-    throwaway CA and point the CA env vars at it so those paths load a valid
-    cafile. No-op when a real CA exists (tests use it); never writes to
-    ``~/.sanctum``.
-    """
-    real_ca = Path("~/.sanctum/certs/ca.crt").expanduser()
-    if real_ca.exists():
-        # Pin the absolute real CA path into env BEFORE function-scoped
-        # _home_is_never_the_operators swaps HOME to tmp_path/home; otherwise
-        # lazy imports of sanctum_cli.proxyd evaluate DEFAULT_CA against the
-        # empty fake HOME and fail with FileNotFoundError.
-        for env in ("SANCTUM_PROXYD_CA", "SANCTUM_COUNCIL_CACERT", "SANCTUM_COUNCIL_CA"):
-            os.environ.setdefault(env, str(real_ca))
-        yield
-        return
+
+def _mint_test_ca(dest: Path) -> Path:
+    """Write a self-signed CA certificate (PEM, valid for two days) to ``dest``; no key kept."""
     import datetime
 
     from cryptography import x509
@@ -81,11 +75,48 @@ def _tls_ca_for_tests(tmp_path_factory: pytest.TempPathFactory) -> Iterator[None
         .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
         .sign(key, hashes.SHA256())
     )
-    ca = tmp_path_factory.mktemp("sanctum-test-ca") / "ca.crt"
-    ca.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
-    for env in ("SANCTUM_PROXYD_CA", "SANCTUM_COUNCIL_CACERT", "SANCTUM_COUNCIL_CA"):
-        os.environ.setdefault(env, str(ca))
-    yield
+    dest.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    return dest
+
+
+@pytest.fixture(autouse=True)
+def _home_is_never_the_operators(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """No test writes into the operator's real ``~/.sanctum``.
+
+    On 2026-09-19 a full-suite run appended 215 lines to the real
+    ``~/.sanctum/telemetry/cli.jsonl`` and 10 to ``~/.sanctum/logs/netgear-audit.jsonl``, and
+    overwrote ``~/.sanctum/wifi-mac-stability.mobileconfig``. ``HOME`` alone is not enough:
+    several defaults are bound to ``Path.home()`` at IMPORT time, so they are patched by name
+    here. A test that wants the real home asks for it explicitly.
+
+    Two more escape HOME. The default instance file is resolved at import time, so without
+    ``SANCTUM_INSTANCE_FILE`` every test reads the developer's real ``instance.yaml`` (and a
+    satellite's ``instance.role`` silently regrades every tier test). And
+    ``service_user.operator_home()`` finds the login user through ``pwd``, so anything that
+    materializes the wave-1 plists (``onboard --recipe operator --yes``) would write them into
+    the real ``~/.sanctum/launchdaemons``. Both point at the fake home instead.
+    """
+    fake = tmp_path / "home"
+    (fake / ".sanctum").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("HOME", str(fake))
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: fake))
+    monkeypatch.setenv(_INSTANCE_ENV, str(fake / ".sanctum" / "instance.yaml"))
+    monkeypatch.setattr("sanctum_cli.service_user.operator_home", lambda: fake)
+    for mod_name, attr, rel in (
+        ("sanctum_cli.devices.rails", "DEFAULT_AUDIT_LOG", ".sanctum/logs/netgear-audit.jsonl"),
+        (
+            "sanctum_cli.service_user",
+            "INSTALL_SCRIPT",
+            ".sanctum/scripts/service-user/install-on-new-hub.sh",
+        ),
+        ("sanctum_cli.service_user", "STATUS_SCRIPT", ".sanctum/scripts/service-user/status.sh"),
+    ):
+        try:
+            mod = __import__(mod_name, fromlist=["_"])
+        except Exception:  # a module this suite never loads
+            continue
+        if hasattr(mod, attr):
+            monkeypatch.setattr(mod, attr, fake / rel, raising=False)
 
 
 @pytest.fixture(autouse=True)
@@ -135,10 +166,7 @@ def minimal_instance_yaml(tmp_path: Path) -> Path:
     """A tiny but valid instance.yaml — instance block only, defaults everywhere else."""
     p = tmp_path / "instance.yaml"
     p.write_text(
-        "instance:\n"
-        "  name: Test Instance\n"
-        "  slug: test-instance\n"
-        "  timezone: UTC\n",
+        "instance:\n  name: Test Instance\n  slug: test-instance\n  timezone: UTC\n",
         encoding="utf-8",
     )
     return p

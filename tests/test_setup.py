@@ -8,6 +8,7 @@ keychain, or the real instance.yaml.
 from __future__ import annotations
 
 import types
+from pathlib import Path
 
 import pytest
 import yaml
@@ -61,7 +62,9 @@ def _stub_probes(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(setup, "_ha_paired", lambda: False)
 
 
-def test_state_basic_tier_hides_haus_panes(monkeypatch: pytest.MonkeyPatch, _stub_probes: None) -> None:
+def test_state_basic_tier_hides_haus_panes(
+    monkeypatch: pytest.MonkeyPatch, _stub_probes: None
+) -> None:
     monkeypatch.setattr(setup, "_tier", lambda: "basic")
     state = setup.gather_state()
     assert state["tier"] == "basic"
@@ -71,13 +74,41 @@ def test_state_basic_tier_hides_haus_panes(monkeypatch: pytest.MonkeyPatch, _stu
     assert state["steps"]["oauth"]["status"] == "todo"
 
 
-def test_state_haus_tier_shows_permission_panes(monkeypatch: pytest.MonkeyPatch, _stub_probes: None) -> None:
+def test_state_haus_tier_shows_permission_panes(
+    monkeypatch: pytest.MonkeyPatch, _stub_probes: None
+) -> None:
     monkeypatch.setattr(setup, "_tier", lambda: "haus")
     state = setup.gather_state()
     assert state["tier"] == "haus"
     assert state["steps"]["fda"]["status"] == "ok"  # 17 >= 13
     assert state["steps"]["fda"]["anchor"] == setup._FDA_ANCHOR
     assert state["steps"]["automation"]["status"] == "unknown"  # honestly undetectable
+
+
+def _declare(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, role: str) -> None:
+    inst = tmp_path / "instance.yaml"
+    inst.write_text(f"instance:\n  name: Box\n  slug: box\n  role: {role}\n", encoding="utf-8")
+    monkeypatch.setenv("SANCTUM_INSTANCE_FILE", str(inst))
+
+
+def test_tier_is_basic_on_a_satellite_even_with_haus_markers(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, _stub_probes: None
+) -> None:
+    """A satellite carries model manifests for its local brain but gets no hub panes."""
+    _declare(tmp_path, monkeypatch, "satellite")
+    (Path.home() / ".sanctum" / "manifests").mkdir(parents=True)
+    assert setup._tier() == "basic"
+    state = setup.gather_state()
+    assert state["tier"] == "basic"
+    for hub_pane in ("family", "firewalla", "ha", "fda", "automation"):
+        assert hub_pane not in state["steps"]
+
+
+def test_tier_is_haus_on_a_declared_hub_without_markers(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _declare(tmp_path, monkeypatch, "hub")
+    assert setup._tier() == "haus"
 
 
 def test_state_fda_attention_when_under_threshold(
@@ -99,29 +130,79 @@ def test_state_fda_unknown_when_tcc_unreadable(
 # ── identity action: block-preserving read-modify-write ────────────────────────
 
 
-def test_identity_save_preserves_other_blocks(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: object
+IDENTITY_FILE = (
+    "# my haus\n"
+    "instance:\n"
+    "  name: Old Name  # what the family calls it\n"
+    "  slug: old-name\n"
+    "cli:\n"
+    "  # local first\n"
+    "  default_provider: mlx_local\n"
+    "notifications:\n"
+    "  owner_name: Operator\n"
+)
+
+
+def test_identity_save_renames_in_place_and_keeps_the_slug(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    inst = tmp_path / "instance.yaml"  # type: ignore[operator]
-    inst.write_text(
-        "instance:\n  name: Old Name\n  slug: old-name\n"
-        "cli:\n  default_provider: mlx_local\n"
-        "notifications:\n  owner_name: Operator\n",
-        encoding="utf-8",
-    )
+    """A rename goes through the in-place editor: the slug (buckets, URLs) never moves,
+    and the other blocks and every comment survive byte for byte."""
+    inst = tmp_path / "instance.yaml"
+    inst.write_text(IDENTITY_FILE, encoding="utf-8")
     monkeypatch.setenv("SANCTUM_INSTANCE_FILE", str(inst))
 
     result = setup.do_action("identity", "save", {"name": "Casa Verde"})
-    assert result["ok"] is True
 
+    assert result["ok"] is True, result
+    assert inst.read_text(encoding="utf-8") == IDENTITY_FILE.replace("Old Name", "Casa Verde")
     data = yaml.safe_load(inst.read_text(encoding="utf-8"))
-    assert data["instance"]["name"] == "Casa Verde"
-    assert data["instance"]["slug"] == "casa-verde"
-    # The sibling blocks a fresh scaffold/init would have clobbered survive:
-    assert data["cli"]["default_provider"] == "mlx_local"
-    assert data["notifications"]["owner_name"] == "Operator"
-    # A .bak of the pre-edit file was written.
-    assert (inst.parent / "instance.yaml.bak").exists()
+    assert data["instance"] == {"name": "Casa Verde", "slug": "old-name"}
+    assert (inst.parent / "instance.yaml.bak").read_text(encoding="utf-8") == IDENTITY_FILE
+
+
+def test_identity_save_gives_a_block_without_a_slug_one(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    inst = tmp_path / "instance.yaml"
+    inst.write_text("router:\n  default: local  # the brain\n", encoding="utf-8")
+    monkeypatch.setenv("SANCTUM_INSTANCE_FILE", str(inst))
+
+    result = setup.do_action("identity", "save", {"name": "Casa Verde"})
+
+    assert result["ok"] is True, result
+    text = inst.read_text(encoding="utf-8")
+    assert text.endswith("router:\n  default: local  # the brain\n")
+    assert yaml.safe_load(text)["instance"] == {"name": "Casa Verde", "slug": "casa-verde"}
+
+
+def test_identity_save_scaffolds_a_missing_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    inst = tmp_path / "instance.yaml"
+    monkeypatch.setenv("SANCTUM_INSTANCE_FILE", str(inst))
+
+    result = setup.do_action("identity", "save", {"name": "Casa Verde"})
+
+    assert result["ok"] is True, result
+    assert yaml.safe_load(inst.read_text(encoding="utf-8")) == {
+        "instance": {"name": "Casa Verde", "slug": "casa-verde"}
+    }
+
+
+def test_identity_save_reports_a_file_it_will_not_edit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    inst = tmp_path / "instance.yaml"
+    inst.write_text("instance: just a string\ncli: {}\n", encoding="utf-8")
+    monkeypatch.setenv("SANCTUM_INSTANCE_FILE", str(inst))
+
+    result = setup.do_action("identity", "save", {"name": "Casa Verde"})
+
+    assert result["ok"] is False
+    assert "cannot safely edit" in result["detail"]
+    assert "name: Casa Verde" in result["detail"]  # the lines to add by hand
+    assert inst.read_text(encoding="utf-8") == "instance: just a string\ncli: {}\n"
 
 
 def test_identity_save_rejects_empty(monkeypatch: pytest.MonkeyPatch, tmp_path: object) -> None:
@@ -166,9 +247,7 @@ def test_creds_both_scopes_ok_stores(monkeypatch: pytest.MonkeyPatch) -> None:
     stored = {}
     monkeypatch.setattr(tailnet, "_mint_oauth_token", lambda *a, **k: "tok")
     monkeypatch.setattr(tailnet, "_api_request", lambda *a, **k: (200, ""))
-    monkeypatch.setattr(
-        tailnet, "_store_creds", lambda cid, sec: stored.update(id=cid, secret=sec)
-    )
+    monkeypatch.setattr(tailnet, "_store_creds", lambda cid, sec: stored.update(id=cid, secret=sec))
     res = setup.do_action("tailscale", "creds", {"client_id": "id1", "client_secret": "sec1"})
     assert res["ok"] is True
     assert stored == {"id": "id1", "secret": "sec1"}
@@ -214,9 +293,7 @@ def _patch_provider(monkeypatch: pytest.MonkeyPatch, *, healthy: bool) -> dict[s
     monkeypatch.setattr(
         onboard, "_revoke_device_secret", lambda **k: log.__setitem__("revoked", k["service"])
     )
-    monkeypatch.setattr(
-        onboard, "set_provider_config", lambda **k: log.__setitem__("config", k)
-    )
+    monkeypatch.setattr(onboard, "set_provider_config", lambda **k: log.__setitem__("config", k))
     return log
 
 
@@ -300,8 +377,13 @@ def test_state_backup_statuses(monkeypatch: pytest.MonkeyPatch, _stub_probes: No
     monkeypatch.setattr(setup, "_restic_installed", lambda: False)
     assert setup.gather_state()["steps"]["backup"]["status"] == "attention"  # repo, no restic
     base = {
-        "repo": None, "secondary": None, "recipes": [], "default_recipe": None,
-        "keep_daily": 7, "keep_weekly": 4, "keep_monthly": 12,
+        "repo": None,
+        "secondary": None,
+        "recipes": [],
+        "default_recipe": None,
+        "keep_daily": 7,
+        "keep_weekly": 4,
+        "keep_monthly": 12,
     }
     monkeypatch.setattr(setup, "_backup_state", lambda: dict(base))
     assert setup.gather_state()["steps"]["backup"]["status"] == "todo"
@@ -323,7 +405,8 @@ def test_backup_save_writes_policy_preserving_blocks(
     monkeypatch.setenv("SANCTUM_INSTANCE_FILE", str(inst))
 
     result = setup.do_action(
-        "backup", "save",
+        "backup",
+        "save",
         {"default_recipe": "operator", "keep_daily": 5, "keep_weekly": 2, "keep_monthly": 6},
     )
     assert result["ok"] is True
@@ -331,7 +414,9 @@ def test_backup_save_writes_policy_preserving_blocks(
     data = yaml.safe_load(inst.read_text(encoding="utf-8"))
     assert data["cli"]["default_recipe"] == "operator"
     assert data["cli"]["cloud_backup"]["retention"] == {
-        "keep_daily": 5, "keep_weekly": 2, "keep_monthly": 6,
+        "keep_daily": 5,
+        "keep_weekly": 2,
+        "keep_monthly": 6,
     }
     # Sibling blocks survive the RMW:
     assert data["cli"]["default_provider"] == "mlx_local"
@@ -376,7 +461,8 @@ def test_family_save_updates_and_preserves_unmodeled_keys(
     monkeypatch.setenv("SANCTUM_DEVICES_FILE", str(devices))
 
     result = setup.do_action(
-        "family", "save",
+        "family",
+        "save",
         {
             "members": [
                 {
@@ -398,7 +484,9 @@ def test_family_save_updates_and_preserves_unmodeled_keys(
     kid1 = data["family"]["kid1"]
     # Renamed device kept its per-device enforce flag (matched by MAC, case-folded):
     assert kid1["personal_devices"][0] == {
-        "name": "Kid One iPhone", "mac": "AA:BB:CC:00:00:01", "enforce": "macpause",
+        "name": "Kid One iPhone",
+        "mac": "AA:BB:CC:00:00:01",
+        "enforce": "macpause",
     }
     assert kid1["personal_devices"][1] == {"name": "iPad", "mac": "AA:BB:CC:00:00:02"}
     # Unmodeled member keys survive:
@@ -418,7 +506,8 @@ def test_family_save_rejects_bad_mac_writing_nothing(
     devices = tmp_path / "devices.yaml"  # type: ignore[operator]
     monkeypatch.setenv("SANCTUM_DEVICES_FILE", str(devices))
     result = setup.do_action(
-        "family", "save",
+        "family",
+        "save",
         {"members": [{"name": "Kid", "devices": [{"name": "iPhone", "mac": "not-a-mac"}]}]},
     )
     assert result["ok"] is False
@@ -449,7 +538,9 @@ def _patch_firewalla(
         lambda url, token, **k: (
             log.__setitem__("probed", (url, token))
             or screen_time.PairingResult(
-                "paired" if ok else "auth_rejected", ok, "bridge sees 3 device(s)" if ok else "bad token"
+                "paired" if ok else "auth_rejected",
+                ok,
+                "bridge sees 3 device(s)" if ok else "bad token",
             )
         ),
     )
@@ -471,7 +562,8 @@ def test_firewalla_save_rejected_token_persists_nothing(
 def test_firewalla_save_pairs_on_authenticated_ok(monkeypatch: pytest.MonkeyPatch) -> None:
     log = _patch_firewalla(monkeypatch, ok=True)
     res = setup.do_action(
-        "firewalla", "save",
+        "firewalla",
+        "save",
         {"url": "http://192.168.1.2:8834", "token": "tok1", "device_ip": "192.168.1.1"},
     )
     assert res["ok"] is True
@@ -636,7 +728,9 @@ def test_http_server_enforces_csrf_host_origin_content_type_and_size(
     monkeypatch.setattr(
         setup,
         "do_action",
-        lambda step, action, payload: called_actions.append((step, action, payload)) or {"ok": True},
+        lambda step, action, payload: (
+            called_actions.append((step, action, payload)) or {"ok": True}
+        ),
     )
 
     server, session, port = _start_setup_server(monkeypatch)

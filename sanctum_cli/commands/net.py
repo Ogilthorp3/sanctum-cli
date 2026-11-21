@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Annotated, Any, TypeVar
 import typer
 from rich.console import Console
 from rich.markup import escape
+from rich.text import Text
 
 from sanctum_cli import config
 from sanctum_cli.commands.home_net import home_app
@@ -59,11 +60,12 @@ def _report(exc: SanctumError) -> None:
     """Pretty-print a SanctumError to stderr with its optional fix suggestion.
 
     Mirrors ``sanctum_cli.cli._report`` but is defined locally to avoid importing
-    from ``cli`` (which imports this module — a circular dependency).
+    from ``cli`` (which imports this module — a circular dependency): plain Text,
+    so a path or value in brackets prints as written, and soft-wrapped.
     """
-    err_console.print(f"[bold red]error:[/] {exc.message}")
+    err_console.print(Text.assemble(("error:", "bold red"), f" {exc.message}"), soft_wrap=True)
     if exc.fix:
-        err_console.print(f"[dim]fix:[/] {exc.fix}")
+        err_console.print(Text.assemble(("fix:", "dim"), f" {exc.fix}"), soft_wrap=True)
 
 
 _SNAP_ROOT = Path.home() / ".sanctum" / "net-optimize"

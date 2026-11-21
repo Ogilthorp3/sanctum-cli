@@ -26,6 +26,7 @@ from typing import Annotated
 import typer
 from rich.console import Console
 from rich.markup import escape
+from rich.text import Text
 
 from sanctum_cli.errors import LocalError, SanctumError
 from sanctum_cli.net import link
@@ -60,11 +61,12 @@ def _report(exc: SanctumError) -> None:
     """Pretty-print a SanctumError to stderr with its optional fix suggestion.
 
     Mirrors ``net._report`` so the link sub-app reports failures the same way the
-    rest of the CLI does (it cannot import from ``cli`` without a cycle).
+    rest of the CLI does (it cannot import from ``cli`` without a cycle): plain
+    Text, so a path or value in brackets prints as written, and soft-wrapped.
     """
-    err_console.print(f"[bold red]error:[/] {exc.message}")
+    err_console.print(Text.assemble(("error:", "bold red"), f" {exc.message}"), soft_wrap=True)
     if exc.fix:
-        err_console.print(f"[dim]fix:[/] {exc.fix}")
+        err_console.print(Text.assemble(("fix:", "dim"), f" {exc.fix}"), soft_wrap=True)
 
 
 def _render(diag: link.Diagnosis) -> None:
