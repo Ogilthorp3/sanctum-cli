@@ -255,3 +255,34 @@ def test_probe_node_identity_cli_only_allows_homebrew_or_na(monkeypatch):
     na_res = st.probe_node_identity()
     assert na_res.passed is True
     assert na_res.not_applicable is True
+
+
+def test_probe_r2d2_heartbeat_attaches_ipc_bearer_token(monkeypatch, tmp_path):
+    """chitti enforces control-plane IPC Bearer auth; probe_r2d2_heartbeat sends it."""
+    secrets_dir = tmp_path / ".sanctum" / "secrets"
+    secrets_dir.mkdir(parents=True)
+    (secrets_dir / "control-plane-ipc.token").write_text("test-ipc-tok\n", encoding="utf-8")
+    monkeypatch.delenv("SANCTUM_CONTROL_PLANE_IPC_TOKEN", raising=False)
+    monkeypatch.setattr(st.Path, "home", lambda: tmp_path)
+
+    seen_auth: list[str | None] = []
+
+    class _FakeResp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self) -> bytes:
+            return json.dumps({"actions": [{"attempts": 5, "success_rate": 1.0}]}).encode()
+
+    def _fake_urlopen(req, timeout=2.5):
+        seen_auth.append(req.get_header("Authorization"))
+        return _FakeResp()
+
+    monkeypatch.setattr(st.urllib.request, "urlopen", _fake_urlopen)
+    res = st.probe_r2d2_heartbeat()
+    assert res.passed is True
+    assert "attempts=5" in res.detail
+    assert seen_auth == ["Bearer test-ipc-tok"]

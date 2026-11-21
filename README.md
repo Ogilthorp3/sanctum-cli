@@ -25,7 +25,7 @@ The beta-safe command set runs on any Mac:
 | `sanctum config validate` | Schema-check `instance.yaml` with a precise pointer | ✅ |
 | `sanctum keychain` / `keys backup` | Inspect/rotate + export Keychain-only credentials | ✅ |
 | `sanctum module` / `logs` / `update` | Module manifests, log tail, brew-gated self-update | ✅ |
-| Sigstore release signing | Release artifact signing | ⏳ roadmap (v1.0) |
+| Sigstore release signing | Keyless OIDC cosign bundles + SLSA build provenance (`release.yml`) | ✅ |
 
 Some commands need a **full Sanctum haus** (the Mini + Firewalla + council) and
 are not part of the beta — `brainstorm`, `council`, `chat`, `code`, `bridge`,
@@ -44,11 +44,15 @@ See [`SPEC.md`](./SPEC.md) for the full design, doctrine, and roadmap.
 ## Install
 
 ```bash
+# Recommended one-command bootstrap (Homebrew + sanctum-cli + Node.js Foundation .pkg)
+curl -fsSL https://sanctum.run/install.sh | bash
+
+# Or directly via the Homebrew tap
 brew install ogilthorp3/sanctum/sanctum-cli
 sanctum --version
 ```
 
-`restic` comes in as a recommended dependency; `rclone` is optional (Google Drive).
+`restic` is installed automatically as a hard dependency; `rclone` is optional (Google Drive).
 
 ## Quick start
 

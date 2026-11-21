@@ -1,0 +1,142 @@
+name: Release (Sigstore Signed)
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      verify_only:
+        description: 'Build, sign, and verify artifacts without publishing a GitHub Release'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build, Sigstore-sign, attest, and publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+
+      - name: Verify tag matches pyproject.toml version
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          python3 - <<'PY'
+          import os, sys, tomllib
+          tag = os.environ["TAG_NAME"]
+          with open("pyproject.toml", "rb") as fh:
+              version = tomllib.load(fh)["project"]["version"]
+          expected = f"v{version}"
+          if tag != expected:
+              print(f"ERROR: git tag {tag!r} != pyproject.toml version {expected!r}", file=sys.stderr)
+              sys.exit(1)
+          print(f"OK: tag {tag} matches pyproject.toml version {version}")
+          PY
+
+      - name: Build wheel and sdist
+        run: |
+          python3 -m pip install --disable-pip-version-check --quiet "build==1.2.2.post1"
+          python3 -m build --outdir dist
+          ls -la dist
+
+      - name: Generate SHA256SUMS.txt
+        run: |
+          (cd dist && LC_ALL=C sha256sum sanctum_cli-*.whl sanctum_cli-*.tar.gz > SHA256SUMS.txt)
+          cat dist/SHA256SUMS.txt
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+
+      - name: Keyless Sigstore OIDC sign artifacts
+        run: |
+          set -euo pipefail
+          for artifact in dist/sanctum_cli-*.whl dist/sanctum_cli-*.tar.gz dist/SHA256SUMS.txt; do
+            cosign sign-blob --yes --bundle "${artifact}.sigstore.json" "$artifact"
+          done
+
+      - name: Verify Sigstore bundles (closed-loop)
+        env:
+          EXPECTED_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          IDENTITY_RE="^https://github\\.com/${EXPECTED_REPO}/\\.github/workflows/release\\.yml@"
+          for artifact in dist/sanctum_cli-*.whl dist/sanctum_cli-*.tar.gz dist/SHA256SUMS.txt; do
+            cosign verify-blob \
+              --bundle "${artifact}.sigstore.json" \
+              --certificate-identity-regexp "$IDENTITY_RE" \
+              --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+              "$artifact"
+          done
+
+      - name: Attest SLSA build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            dist/sanctum_cli-*.whl
+            dist/sanctum_cli-*.tar.gz
+            dist/SHA256SUMS.txt
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v') && (github.event_name != 'workflow_dispatch' || inputs.verify_only == false)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          NOTES_FILE="$(mktemp)"
+          python3 - "$TAG_NAME" "$NOTES_FILE" <<'PY'
+          import pathlib, re, sys
+          tag, out = sys.argv[1], sys.argv[2]
+          ver = tag.lstrip("v")
+          changelog = pathlib.Path("CHANGELOG.md")
+          section = ""
+          if changelog.is_file():
+              text = changelog.read_text(encoding="utf-8")
+              m = re.search(rf"^## \[{re.escape(ver)}\][^\n]*\n(.*?)(?=^## \[|\Z)", text, re.M | re.S)
+              if m:
+                  section = m.group(1).strip()
+          header = (
+              f"## Sanctum CLI {tag}\n\n"
+              "### Verification\n"
+              "Every release artifact (`*.whl`, `*.tar.gz`, `SHA256SUMS.txt`) is signed via "
+              "keyless Sigstore OIDC (`*.sigstore.json`) and carries GitHub SLSA build provenance:\n"
+              "```bash\n"
+              f"gh attestation verify sanctum_cli-{ver}-py3-none-any.whl --repo Ogilthorp3/sanctum-cli\n"
+              "cosign verify-blob \\\n"
+              "  --bundle SHA256SUMS.txt.sigstore.json \\\n"
+              "  --certificate-identity-regexp '^https://github\\.com/Ogilthorp3/sanctum-cli/\\.github/workflows/release\\.yml@' \\\n"
+              "  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \\\n"
+              "  SHA256SUMS.txt\n"
+              "```\n"
+          )
+          body = f"{section}\n\n{header}" if section else header
+          pathlib.Path(out).write_text(body, encoding="utf-8")
+          PY
+          if gh release view "$TAG_NAME" >/dev/null 2>&1; then
+            gh release upload "$TAG_NAME" dist/* --clobber
+          else
+            gh release create "$TAG_NAME" dist/* \
+              --title "sanctum-cli $TAG_NAME" \
+              --notes-file "$NOTES_FILE" \
+              --verify-tag
+          fi

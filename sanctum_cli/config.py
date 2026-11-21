@@ -1188,7 +1188,7 @@ def _unbuildable_scalar(text: str) -> tuple[yaml.ScalarNode, Exception] | None:
             if node.tag == _MERGE_TAG:
                 continue
             try:
-                builder.construct_object(node)
+                builder.construct_object(node)  # type: ignore[no-untyped-call]
             except yaml.YAMLError:
                 continue
             except _YAML_LOAD_ERRORS as error:

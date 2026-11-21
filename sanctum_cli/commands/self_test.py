@@ -360,13 +360,34 @@ def probe_tcc_grants() -> ProbeResult:
         return ProbeResult(False, f"TCC.db read failed: {e} (needs FDA on Terminal)")
 
 
+def _control_plane_ipc_token() -> str | None:
+    """Read the local control-plane IPC Bearer token (env or ~/.sanctum/secrets)."""
+    env_tok = os.environ.get("SANCTUM_CONTROL_PLANE_IPC_TOKEN", "").strip()
+    if env_tok:
+        return env_tok
+    token_path = Path.home() / ".sanctum/secrets/control-plane-ipc.token"
+    try:
+        if token_path.is_file():
+            tok = token_path.read_text(encoding="utf-8").strip()
+            if tok:
+                return tok
+    except OSError:
+        return None
+    return None
+
+
 def probe_r2d2_heartbeat() -> ProbeResult:
     """R2D2 supervisor reports a recent cycle to chitti."""
     try:
-        with urllib.request.urlopen(
+        headers: dict[str, str] = {}
+        token = _control_plane_ipc_token()
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        req = urllib.request.Request(
             "http://127.0.0.1:2188/samskara?service=r2d2&pattern=cycle&limit=1",
-            timeout=2.5,
-        ) as resp:
+            headers=headers,
+        )
+        with urllib.request.urlopen(req, timeout=2.5) as resp:
             data = json.loads(resp.read())
         actions = data.get("actions", [])
         if not actions:

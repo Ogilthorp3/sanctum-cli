@@ -32,4 +32,8 @@ def test_readme_matches_version_and_license() -> None:
     assert "FSL-1.1-Apache-2.0" in readme
     assert "Apache License, Version 2.0" in readme
     assert "FSL-1.1-MIT" not in readme
-    assert "roadmap (v1.0)" in readme
+    assert "Sigstore release signing" in readme
+    release_wf = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+    assert "sigstore/cosign-installer@" in release_wf
+    assert "actions/attest-build-provenance@" in release_wf
+    assert "id-token: write" in release_wf
