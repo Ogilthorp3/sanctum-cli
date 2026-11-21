@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-11-22
+
 ### Added
 
 - `instance.role` declares what a machine is: `satellite` for a contained remote site (a second haus that runs its own local brain and none of the hub services), `hub` for the primary haus. A declared role decides the tier everywhere: model manifests on disk no longer make a satellite look like a hub, and a declared hub is graded as one before its services leave anything on disk. Without a role, the tier is still inferred from what is on disk. Every role reader (the haus gate, `self-test`, `doctor`, `setup`, `service-user`) reads the role the same way, from the raw YAML: it counts only when it is exactly `hub` or `satellite` in a top-level `instance:` block of keys (a `!!set` is not one). A character PyYAML refuses (such as an escape code or a BEL) is read as an unknown character, which is never part of `hub`, `satellite`, `role` or `instance`: one in a comment hides nothing, and one inside a key or value breaks that key or value; where it cannot stand (inside a tag, an anchor or alias name or a block scalar's header, or right after a quoted value, a flow collection or a key's colon) it is a syntax error like any other, so a role after it is not read. Another value that fails the schema does not hide the role, and neither does one that cannot be built (such as `since: 2026-02-30`): the role is then read off the parsed YAML nodes, without building any value. A file PyYAML cannot load as one document (a syntax error, such as a tab indent; an undefined alias; a second document) is read off the parser's events, without following aliases or `<<` merges: a role written before the first syntax error is read; one after it, or only in a second document, is not. A `role` whose value the error cuts off (an unclosed quote, say) reads as no role, but a plain value ends where PyYAML ends it, before the error: at a tab or a `: `, and inside braces also at `,`, `?`, `[`, `]`, `{` or `}`. So `role: satellite<TAB># note`, `role: hub<TAB>x` and `role: hub: x` read as the text before the tab or colon, and `{role: hub]` reads `hub`. A file that is not UTF-8 reads as having no role.
@@ -208,6 +210,15 @@ the commands that need the author's full Sanctum haus.
 - self-test coder-cathedral probe repointed `:1338` → `:3301` (the retired
   coder-14b stale endpoint).
 
-[Unreleased]: https://github.com/ogilthorp3/sanctum-cli/compare/v0.10.1...HEAD
+[Unreleased]: https://github.com/ogilthorp3/sanctum-cli/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/ogilthorp3/sanctum-cli/compare/v0.15.5...v1.0.0
+[0.15.5]: https://github.com/ogilthorp3/sanctum-cli/compare/v0.15.4...v0.15.5
+[0.15.4]: https://github.com/ogilthorp3/sanctum-cli/compare/v0.15.3...v0.15.4
+[0.15.3]: https://github.com/ogilthorp3/sanctum-cli/compare/v0.15.2...v0.15.3
+[0.15.2]: https://github.com/ogilthorp3/sanctum-cli/compare/v0.15.1...v0.15.2
+[0.15.1]: https://github.com/ogilthorp3/sanctum-cli/compare/v0.15.0...v0.15.1
+[0.15.0]: https://github.com/ogilthorp3/sanctum-cli/compare/v0.14.1...v0.15.0
+[0.14.1]: https://github.com/ogilthorp3/sanctum-cli/compare/v0.14.0...v0.14.1
+[0.10.2]: https://github.com/ogilthorp3/sanctum-cli/compare/v0.10.1...v0.10.2
 [0.10.1]: https://github.com/ogilthorp3/sanctum-cli/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/ogilthorp3/sanctum-cli/releases/tag/v0.10.0
