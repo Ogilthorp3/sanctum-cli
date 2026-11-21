@@ -18,7 +18,7 @@ import socket
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
@@ -1188,7 +1188,7 @@ def _unbuildable_scalar(text: str) -> tuple[yaml.ScalarNode, Exception] | None:
             if node.tag == _MERGE_TAG:
                 continue
             try:
-                builder.construct_object(node)  # type: ignore[no-untyped-call]
+                cast("Any", builder).construct_object(node)
             except yaml.YAMLError:
                 continue
             except _YAML_LOAD_ERRORS as error:
