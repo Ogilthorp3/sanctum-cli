@@ -62,6 +62,7 @@ from sanctum_cli.hive.naming import (
     preferred_name,
     suggest_infra_name,
 )
+from sanctum_cli.hive.peers import is_ip_literal, parse_tailscale_peer_ips, peer_refusal
 from sanctum_cli.hive.route import pick_node
 from sanctum_cli.hive.sot import peers_of, primary_node_name, validate_roster
 from sanctum_cli.keychain import KeychainEntryMissingError
@@ -1232,44 +1233,10 @@ def read_node_id(path: Path | None = None) -> str | None:
     return None
 
 
-def parse_tailscale_peer_ips(status_json: str) -> dict[str, dict[str, Any]]:
-    """Map MagicDNS stem / HostName → {online, ips} from ``tailscale status --json``.
-
-    Pure parser (tests inject JSON). Keys are lowercased stems (``home``,
-    ``studio``) plus HostName lowercased when present.
-    """
-    out: dict[str, dict[str, Any]] = {}
-    try:
-        data = __import__("json").loads(status_json or "{}")
-    except Exception:
-        return out
-
-    def _ingest(host_name: str | None, dns: str | None, online: bool, ips: list[str]) -> None:
-        stems: list[str] = []
-        if host_name:
-            stems.append(host_name.strip().lower())
-        if dns:
-            # hub.tailnet-abc.ts.net → hub
-            stem = dns.strip().lower().split(".")[0]
-            if stem:
-                stems.append(stem)
-        for s in stems:
-            if not s:
-                continue
-            prev = out.get(s)
-            if prev and prev.get("online") and not online:
-                continue
-            out[s] = {"online": bool(online), "ips": list(ips or [])}
-
-    self = data.get("Self") or {}
-    self_ips = [str(i) for i in (self.get("TailscaleIPs") or []) if i]
-    _ingest(self.get("HostName"), self.get("DNSName"), True, self_ips)
-    for peer in (data.get("Peer") or {}).values():
-        if not isinstance(peer, dict):
-            continue
-        ips = [str(i) for i in (peer.get("TailscaleIPs") or []) if i]
-        _ingest(peer.get("HostName"), peer.get("DNSName"), bool(peer.get("Online")), ips)
-    return out
+# ``parse_tailscale_peer_ips`` (MagicDNS stem → machine) lives in
+# :mod:`sanctum_cli.hive.peers`, with the identity rule :func:`peer_refusal` that
+# both resolve and the routing online map apply; it is imported above, so
+# ``sanctum_cli.commands.node.parse_tailscale_peer_ips`` still works.
 
 
 def resolve_node_address(
@@ -1283,6 +1250,13 @@ def resolve_node_address(
     Order: online Tailscale peer for preferred + aliases → literal non-TS host
     → host string when tailscale status is empty.
     Fail-closed when the only known address is an offline tailnet peer.
+
+    ``peer_ips`` is keyed by MagicDNS stem (:func:`parse_tailscale_peer_ips`). A
+    record :func:`peer_refusal` refuses (an ambiguous stem, or a ``tag:satellite``
+    machine for a node that is not a satellite) ends the lookup with
+    ``ok: False``, ``refused: True``, the ``error`` and a ``fix``: no later
+    name, ``tailscale ip`` lookup or configured host is tried. A ``host`` that
+    is an IP address is never looked up as a tailnet name.
     """
     raw = name.strip()
     key = preferred_name(raw, nodes)
@@ -1324,8 +1298,19 @@ def resolve_node_address(
 
     offline_peer: dict[str, Any] | None = None
     for cand, source in stems:
+        if is_ip_literal(cand):
+            continue  # an address, not a tailnet name (``192.0.2.5`` is not machine ``192``)
         stem = cand.lower().split(".")[0]
         peer = peer_ips.get(stem) or peer_ips.get(cand.lower())
+        refusal = peer_refusal(key, node, nodes, peer, stem) if peer else None
+        if refusal is not None:
+            return {
+                **base,
+                "error": refusal.error,
+                "fix": refusal.fix,
+                "refused": True,
+                "source": f"tailscale:{source}",
+            }
         if peer and peer.get("online") and peer.get("ips"):
             return {
                 **base,
@@ -1556,7 +1541,10 @@ def node_resolve(
     if not result.get("ok"):
         exc = NetworkError(
             str(result.get("error") or f"could not resolve {name!r}"),
-            fix="check `sanctum node list` and `tailscale status`; use node names, not 10.0.0.x",
+            fix=str(
+                result.get("fix")
+                or "check `sanctum node list` and `tailscale status`; use node names, not 10.0.0.x"
+            ),
         )
         _report(exc)
         raise typer.Exit(code=int(exc.exit_code))
@@ -1657,6 +1645,8 @@ def node_route(
     )
     if addr:
         console.print(f"  address {escape(str(addr))}  ssh_user={escape(str(resolved.get('ssh_user') or '—'))}")
+    elif resolved.get("refused"):
+        console.print(f"  [yellow]refused:[/] {escape(str(resolved.get('error')))}")
     else:
         console.print(f"  [yellow]unresolved address[/] — try `sanctum node resolve {escape(node)}`")
 
@@ -1692,6 +1682,8 @@ def node_vault_host() -> None:
         console.print("  [dim]always use node name in scripts; resolve at call time[/]")
     else:
         console.print(f"  [yellow]{escape(str(resolved.get('error') or 'unresolved'))}[/]")
+        if resolved.get("fix"):
+            console.print(f"  [dim]fix: {escape(str(resolved['fix']))}[/]")
         raise typer.Exit(code=1)
 
 
@@ -1878,6 +1870,12 @@ def node_export_council(
         r = resolve_node_address(name, hive, peers)
         if r.get("ok") and r.get("address"):
             resolved[name] = str(r["address"])
+        elif r.get("refused"):
+            # Left as written in the council file; said on stderr so stdout stays JSON.
+            err_console.print(
+                Text.assemble(("note:", "yellow"), f" {name} not overlaid: {r.get('error')}"),
+                soft_wrap=True,
+            )
     overlaid = overlay_hosts(council, hive, resolved)
     console.print(json.dumps(overlaid, indent=2))
 

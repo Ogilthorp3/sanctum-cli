@@ -6,6 +6,7 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
 from sanctum_cli.hive.capabilities import NodeCapability, capabilities_of, normalize_capability
+from sanctum_cli.hive.peers import is_ip_literal, peer_refusal
 from sanctum_cli.hive.sot import primary_node_name
 
 if TYPE_CHECKING:
@@ -23,13 +24,19 @@ def _online_map(
     peer_ips: Mapping[str, Mapping[str, Any]],
     nodes: Mapping[str, Mapping[str, Any]],
 ) -> dict[str, bool | None]:
-    """node_name → True/False/None (unknown)."""
+    """node_name → True/False/None (unknown).
+
+    A record :func:`~sanctum_cli.hive.peers.peer_refusal` refuses (an ambiguous
+    MagicDNS name, or a ``tag:satellite`` machine for a node that is not a
+    satellite) says nothing about the node: unknown. An IP-address host is not
+    looked up as a tailnet name.
+    """
     out: dict[str, bool | None] = {}
     for name, n in nodes.items():
         ts = str(n.get("tailscale_name") or n.get("host") or name).strip().lower()
-        stem = ts.split(".")[0]
-        peer = peer_ips.get(stem) or peer_ips.get(name.lower())
-        if peer is None:
+        stem = "" if is_ip_literal(ts) else ts.split(".")[0]
+        peer = (peer_ips.get(stem) if stem else None) or peer_ips.get(name.lower())
+        if peer is None or peer_refusal(name, n, nodes, peer, stem or name.lower()) is not None:
             out[name] = None
         else:
             out[name] = bool(peer.get("online"))

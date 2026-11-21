@@ -106,6 +106,30 @@ def test_pick_offline_forced_fails() -> None:
     assert r["ok"] is False
 
 
+def test_a_record_that_cannot_answer_for_a_node_says_nothing_about_it() -> None:
+    """An ambiguous MagicDNS name, or a satellite holding the hub's, is not the hub up."""
+    ambiguous = {
+        "online": False,
+        "ips": [],
+        "ambiguous": True,
+        "claims": [
+            {"dns_name": "home.t.ts.net", "stable_id": "nA", "online": True},
+            {"dns_name": "home.t.ts.net", "stable_id": "nB", "online": False},
+        ],
+    }
+    squatter = {"online": True, "ips": ["100.64.0.9"], "tags": ["tag:satellite"]}
+    for peer in (ambiguous, squatter):
+        r = pick_node("vault", ROSTER, prefer="primary", peer_ips={"home": peer})
+        assert r["online"]["home"] is None
+    # The satellite's own row still reads its record.
+    r = pick_node(
+        "satellite",
+        ROSTER,
+        peer_ips={"studio": {"online": True, "ips": ["100.64.0.11"], "tags": ["tag:satellite"]}},
+    )
+    assert r["online"]["studio"] is True
+
+
 def test_overlay_council_hosts() -> None:
     council = {
         "nodes": {
