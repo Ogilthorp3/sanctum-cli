@@ -30,6 +30,9 @@ def test_detect_country_fallback_env(monkeypatch: pytest.MonkeyPatch) -> None:
     def failing_runner(_argv: list[str]) -> str:
         raise RuntimeError("command failed")
 
+    # LC_ALL outranks LANG; a host that sets it (GitHub's macOS runners set
+    # en_US.UTF-8) would otherwise answer for the test.
+    monkeypatch.delenv("LC_ALL", raising=False)
     monkeypatch.setenv("LANG", "fr_FR.UTF-8")
     assert detect_country(failing_runner) == "FR"
 
