@@ -869,7 +869,8 @@ def test_http_server_enforces_csrf_host_origin_content_type_and_size(
         assert r.status == 200
         assert json.loads(r.read())["ok"] is True
         conn.close()
-        assert session.shutdown.is_set()
+        # The handler writes the reply, then sets the event: wait, don't sample.
+        assert session.shutdown.wait(timeout=5)
     finally:
         server.shutdown()
         server.server_close()
