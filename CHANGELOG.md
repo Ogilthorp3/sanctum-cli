@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-11-23
+
 ### Added
 
 - Keyless Sigstore OIDC release signing (`cosign sign-blob` `.sigstore.json` bundles) and SLSA build provenance (`actions/attest-build-provenance`) in `.github/workflows/release.yml`, with tag-vs-`pyproject.toml` version verification and closed-loop signature verification prior to GitHub Release upload.
@@ -213,6 +215,7 @@ the commands that need the author's full Sanctum haus.
 - self-test coder-cathedral probe repointed `:1338` → `:3301` (the retired
   coder-14b stale endpoint).
 
-[Unreleased]: https://github.com/ogilthorp3/sanctum-cli/compare/v0.10.1...HEAD
+[Unreleased]: https://github.com/ogilthorp3/sanctum-cli/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/ogilthorp3/sanctum-cli/releases/tag/v1.0.0
 [0.10.1]: https://github.com/ogilthorp3/sanctum-cli/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/ogilthorp3/sanctum-cli/releases/tag/v0.10.0
