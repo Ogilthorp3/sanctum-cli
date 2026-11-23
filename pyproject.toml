@@ -13,7 +13,7 @@ license-files = ["LICENSE"]
 authors = [{ name = "Bertrand Nepveu" }]
 keywords = ["sanctum", "cli", "backup", "claude", "gemini"]
 classifiers = [
-  "Development Status :: 5 - Production/Stable",
+  "Development Status :: 4 - Beta",
   "Environment :: Console",
   "Operating System :: MacOS",
   "Programming Language :: Python :: 3.11",

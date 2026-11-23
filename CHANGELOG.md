@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.0.0] - 2026-11-23
 
+Sanctum 1.0, in beta: we're looking for beta users.
+
 ### Added
 
 - Keyless Sigstore OIDC release signing (`cosign sign-blob` `.sigstore.json` bundles) and SLSA build provenance (`actions/attest-build-provenance`) in `.github/workflows/release.yml`, with tag-vs-`pyproject.toml` version verification and closed-loop signature verification prior to GitHub Release upload.
