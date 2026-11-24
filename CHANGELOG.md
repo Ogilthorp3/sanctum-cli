@@ -28,6 +28,7 @@ Sanctum 1.0, in beta: we're looking for beta users.
 
 - `sanctum node resolve` no longer answers for an offline tailnet peer with the roster's LAN `host` (a site address that can be a different machine at another site): it reports the peer offline, and a node with a tailnet name is never reached by a bare LAN address.
 - `sanctum node adopt` no longer names a node from the remote machine's own hostname: the name is `--name` or the machine's `~/.sanctum/.node_id` (a mismatch or neither is refused), adopt never overwrites an existing roster row unless it is the same satellite re-adopted explicitly with `--name` (a name that comes only from the machine's `.node_id`, a hub row, or a row for a different machine is refused), and a row it does write is merged and written atomically (temp file, fsync, rename) instead of replaced.
+- `deploy/ahsoka-agent-deploy.sh` no longer starts or targets a plain-HTTP brain on :1338: it deploys the mTLS-only `sanctum-mlx` brain (`--no-plain`, `:6502`, the node's `~/.sanctum/certs`), health-checks it over https with the client certificate, points the agent at `https://127.0.0.1:6502/v1`, and refuses (before touching the node) without the client certificate, key, CA and provider TLS settings, and on the node without a tailnet IP or the certificate files, or when an older plain daemon or provider is already there.
 
 ### Changed
 
