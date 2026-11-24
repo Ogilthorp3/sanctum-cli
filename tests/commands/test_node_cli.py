@@ -18,7 +18,9 @@ The contract the commands MUST honor:
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import os
+from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -28,9 +30,6 @@ from sanctum_cli import config
 from sanctum_cli.cli import app
 from sanctum_cli.commands import node as node_cmd
 from sanctum_cli.errors import ConfigError
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 runner = CliRunner()
 
@@ -314,7 +313,8 @@ def _healthy_script(user: str = "operator") -> dict[str, tuple[int, str]]:
     """The wire answers of a satellite whose bootstrap ran cleanly."""
     return {
         "whoami": (0, f"{user}\n"),
-        "hostname -s": (0, "studio-mini|15.5|arm64"),
+        "hostname -s": (0, "imposter-host|15.5|arm64"),  # a self-reported claim, never a name
+        ".node_id": (0, "# hive name\nstudio-mini\n"),
         "stat -f%Lp": (0, "700\n600\nkey-present\n"),
         "pmset -g custom": (0, HEALTHY_PMSET),
         "sudo -n true": (1, ""),  # no passwordless sudo — the default bootstrap
@@ -383,8 +383,9 @@ def test_node_adopt_fails_l6_on_an_unreadable_instance_yaml(
 
 
 def test_node_adopt_name_override(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """--name wins over the hostname-derived default."""
-    instance = _wire_adopt(monkeypatch, tmp_path, ScriptedSsh(_healthy_script()))
+    """--name names a machine that has no .node_id yet."""
+    script = {**_healthy_script(), ".node_id": (1, "")}
+    instance = _wire_adopt(monkeypatch, tmp_path, ScriptedSsh(script))
     result = runner.invoke(
         app,
         ["node", "adopt", "sat.example", "--user", "operator", "--wait", "0", "--name", "studio"],
@@ -393,6 +394,50 @@ def test_node_adopt_name_override(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     data = yaml.safe_load(instance.read_text(encoding="utf-8"))
     assert "studio" in data["nodes"]
     assert "studio-mini" not in data["nodes"]
+
+
+def test_node_adopt_never_names_a_node_from_its_self_reported_hostname(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """S1: no .node_id and no --name means no name, so no roster write."""
+    script = {**_healthy_script(), ".node_id": (1, "")}
+    instance = _wire_adopt(monkeypatch, tmp_path, ScriptedSsh(script))
+    result = runner.invoke(
+        app, ["node", "adopt", "sat.example", "--user", "operator", "--wait", "0"]
+    )
+    assert result.exit_code == 1, result.stdout
+    assert "NOT ADOPTED" in result.stdout
+    assert "--name" in result.stdout
+    assert not instance.exists()  # nothing named "imposter-host" (or anything) was written
+
+
+def test_node_adopt_rejects_a_node_id_that_is_not_a_plain_hive_name(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The remote .node_id becomes a roster key, so a hostile value is not accepted."""
+    script = {**_healthy_script(), ".node_id": (0, "home\nnodes: {x: 1}")}
+    instance = _wire_adopt(monkeypatch, tmp_path, ScriptedSsh(script))
+    ok = runner.invoke(app, ["node", "adopt", "sat.example", "--user", "operator", "--wait", "0"])
+    assert ok.exit_code == 0  # the first line is a plain name; the rest is never read
+    assert list(yaml.safe_load(instance.read_text(encoding="utf-8"))["nodes"]) == ["home"]
+    instance.unlink()
+    script = {**_healthy_script(), ".node_id": (0, "../etc/x: [\n")}
+    _wire_adopt(monkeypatch, tmp_path, ScriptedSsh(script))
+    bad = runner.invoke(app, ["node", "adopt", "sat.example", "--user", "operator", "--wait", "0"])
+    assert bad.exit_code == 1
+    assert not instance.exists()
+
+
+def test_node_adopt_refuses_a_name_that_disagrees_with_its_node_id(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    instance = _wire_adopt(monkeypatch, tmp_path, ScriptedSsh(_healthy_script()))
+    result = runner.invoke(
+        app,
+        ["node", "adopt", "sat.example", "--user", "operator", "--wait", "0", "--name", "home"],
+    )
+    assert result.exit_code == 1, result.stdout
+    assert not instance.exists()
 
 
 def test_node_adopt_auth_failure_registers_nothing(
@@ -519,6 +564,74 @@ def test_register_node_preserves_existing_blocks(tmp_path: Path) -> None:
     assert studio["tier"] == "edge"
     assert "tailscale_name" not in studio  # sat.example is a FQDN, not a TS stem
     assert (tmp_path / "instance.yaml.bak").exists()
+
+
+def test_register_node_merges_into_an_existing_row(tmp_path: Path) -> None:
+    """Re-adopting updates the connection facts and keeps every field it does not own."""
+    target = tmp_path / "instance.yaml"
+    target.write_text(
+        "nodes:\n  studio:\n    type: hub\n    tier: primary\n    aliases: [old-studio]\n"
+        "    capabilities: [council]\n    user: legacy\n    host: 192.0.2.9\n",
+        encoding="utf-8",
+    )
+    node_cmd.register_node("studio", host="sat.example", user="operator", path=target)
+    row = yaml.safe_load(target.read_text(encoding="utf-8"))["nodes"]["studio"]
+    assert (row["type"], row["tier"]) == ("hub", "primary")  # declared, not adopt's to reset
+    assert row["aliases"] == ["old-studio"]
+    assert row["capabilities"] == ["council"]
+    assert row["host"] == "sat.example"
+    assert row["ssh_user"] == "operator"
+    assert "user" not in row
+
+
+def test_register_node_replaces_the_file_atomically(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The roster is written to a temp file beside it, fsynced, then os.replace'd in."""
+    target = tmp_path / "instance.yaml"
+    target.write_text("nodes:\n  older:\n    host: old.example\n", encoding="utf-8")
+    target.chmod(0o640)
+    seen: dict[str, list[Any]] = {"replace": [], "fsync": []}
+    real_replace, real_fsync = os.replace, os.fsync
+
+    def spy_replace(src: Any, dst: Any) -> None:
+        seen["replace"].append((Path(src).parent, Path(dst).name, Path(src).read_text("utf-8")))
+        real_replace(src, dst)
+
+    def spy_fsync(fd: int) -> None:
+        seen["fsync"].append(fd)
+        real_fsync(fd)
+
+    monkeypatch.setattr(os, "replace", spy_replace)
+    monkeypatch.setattr(os, "fsync", spy_fsync)
+    node_cmd.register_node("studio", host="sat.example", user="operator", path=target)
+    final = [r for r in seen["replace"] if r[1] == "instance.yaml"]
+    assert len(final) == 1
+    assert final[0][0] == tmp_path  # same directory: the rename cannot cross filesystems
+    assert "studio:" in final[0][2]  # the complete new file existed before the swap
+    assert seen["fsync"]
+    assert target.stat().st_mode & 0o777 == 0o640  # mode kept
+    assert not [p for p in tmp_path.iterdir() if p.name.endswith(".tmp")]
+
+
+def test_register_node_failed_write_leaves_the_roster_untouched(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    target = tmp_path / "instance.yaml"
+    original = "nodes:\n  older:\n    host: old.example\n"
+    target.write_text(original, encoding="utf-8")
+    real_replace = os.replace
+
+    def boom(src: Any, dst: Any) -> None:
+        if Path(dst).name == "instance.yaml":
+            raise OSError("disk full")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", boom)
+    with pytest.raises(OSError, match="disk full"):
+        node_cmd.register_node("studio", host="sat.example", user="operator", path=target)
+    assert target.read_text(encoding="utf-8") == original
+    assert not [p for p in tmp_path.iterdir() if p.name.endswith(".tmp")]
 
 
 def test_register_node_sets_tailscale_name_for_simple_host(tmp_path: Path) -> None:
