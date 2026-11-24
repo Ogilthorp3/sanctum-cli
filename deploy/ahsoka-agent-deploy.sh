@@ -12,6 +12,16 @@
 #      native MCP hands with guards, and the eval harness.
 #
 # Usage:  deploy/ahsoka-agent-deploy.sh <ssh-host> [agent-name]
+# Required environment (the script refuses, before touching the node, without it):
+#   SANCTUM_BRAIN_CLIENT_CERT / _KEY / _CA   paths ON THE NODE of the client
+#       certificate, key and CA the agent presents to the brain over mTLS
+#   SANCTUM_BRAIN_PROVIDER_REQUEST   local JSON file holding the OpenClaw provider
+#       `request` block (the {"tls": {...}} client settings), exactly as OpenClaw
+#       expects it; its schema is not guessed here
+# Optional: SANCTUM_BRAIN_TLS_HOST   the node's tailnet IPv4 for the brain's
+#       second --tls-host (default: `tailscale ip -4` on the node; refuses if absent)
+# The brain is sanctum-mlx, mTLS only (--no-plain) on 127.0.0.1:6502. No plain
+# HTTP listener is ever started and nothing is pointed at one.
 # Idempotent: every step checks before it changes; safe to re-run.
 # Generic satellite agent deployment (see docs for satellite setup).
 # Needs on the node afterwards, from the operator:
@@ -28,6 +38,27 @@ if [[ ! "$NAME" =~ ^[a-z0-9][a-z0-9_-]{0,62}$ ]]; then
   echo "error: invalid agent-name: $NAME" >&2
   exit 2
 fi
+BRAIN_PORT=6502
+CLIENT_CERT="${SANCTUM_BRAIN_CLIENT_CERT:-}"
+CLIENT_KEY="${SANCTUM_BRAIN_CLIENT_KEY:-}"
+CLIENT_CA="${SANCTUM_BRAIN_CLIENT_CA:-}"
+REQUEST_FILE="${SANCTUM_BRAIN_PROVIDER_REQUEST:-}"
+TLS_HOST="${SANCTUM_BRAIN_TLS_HOST:-}"
+for v in CLIENT_CERT CLIENT_KEY CLIENT_CA; do
+  if [[ -z "${!v}" || ! "${!v}" =~ ^/[A-Za-z0-9._/-]+$ ]]; then
+    echo "error: SANCTUM_BRAIN_$v must be an absolute path on the node (the agent's mTLS client file); refusing to deploy a brain without it" >&2
+    exit 2
+  fi
+done
+if [[ -z "$REQUEST_FILE" || ! -f "$REQUEST_FILE" ]] || ! python3 -c 'import json, sys; r = json.load(open(sys.argv[1])); sys.exit(0 if isinstance(r, dict) and isinstance(r.get("tls"), dict) else 1)' "$REQUEST_FILE" 2>/dev/null; then
+  echo "error: SANCTUM_BRAIN_PROVIDER_REQUEST must name a JSON file with the OpenClaw provider request block ({\"tls\": {...}}); refusing to wire the agent to the brain without client TLS settings" >&2
+  exit 2
+fi
+if [[ -n "$TLS_HOST" && ! "$TLS_HOST" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+  echo "error: invalid SANCTUM_BRAIN_TLS_HOST: $TLS_HOST" >&2
+  exit 2
+fi
+REQUEST_B64="$(python3 -c 'import base64, json, sys; print(base64.b64encode(json.dumps(json.load(open(sys.argv[1]))).encode()).decode())' "$REQUEST_FILE")"
 OPENCLAW_VER="2026.7.1-2"            # pin: last version live-fire-verified on a satellite
 MODEL_REPO="mlx-community/Qwen2.5-7B-Instruct-4bit"   # bake-off winner (12/12 tools, FR, fits 16GB)
 MODEL_DIR=".sanctum/models/Qwen2.5-7B-Instruct-4bit"
@@ -54,7 +85,7 @@ openclaw --version | head -1
 EOF
 
 say "2. local brain: model + venv + daemon"
-run_remote "$MODEL_DIR" "$MODEL_REPO" "$NAME" <<'EOF'
+run_remote "$MODEL_DIR" "$MODEL_REPO" "$NAME" "$TLS_HOST" "$BRAIN_PORT" "$CLIENT_CERT" "$CLIENT_KEY" "$CLIENT_CA" <<'EOF'
 export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 MODEL_DIR="$1"
 MODEL_REPO="$2"
@@ -63,10 +94,29 @@ NAME="$3"
 "$HOME/.sanctum/mlx-venv/bin/python" -c 'import mlx_lm' 2>/dev/null || "$HOME/.sanctum/mlx-venv/bin/pip" install -q -U pip mlx-lm
 [ -d "$HOME/$MODEL_DIR" ] || "$HOME/.sanctum/mlx-venv/bin/python" -c 'import sys; from huggingface_hub import snapshot_download; snapshot_download(sys.argv[1], local_dir=sys.argv[2])' "$MODEL_REPO" "$HOME/$MODEL_DIR"
 echo brain-assets-ok
+# mTLS only: the brain is sanctum-mlx with --no-plain; nothing listens on plain HTTP.
+TLS_HOST="$4"; PORT="$5"; CCERT="$6"; CKEY="$7"; CCA="$8"
+if [ -z "$TLS_HOST" ]; then
+  TS="$(command -v tailscale || true)"; [ -n "$TS" ] || TS=/Applications/Tailscale.app/Contents/MacOS/Tailscale
+  TLS_HOST="$("$TS" ip -4 2>/dev/null | head -1)" || TLS_HOST=""
+fi
+case "$TLS_HOST" in
+  [0-9]*.[0-9]*.[0-9]*.[0-9]*) ;;
+  *) echo "REFUSING: no tailnet IPv4 for the brain (tailscale ip -4 gave none; pass SANCTUM_BRAIN_TLS_HOST)"; exit 12 ;;
+esac
+[ -x "$HOME/.sanctum/bin/sanctum-mlx" ] || { echo "REFUSING: ~/.sanctum/bin/sanctum-mlx is missing or not executable"; exit 13; }
+for f in "$HOME/.sanctum/certs/server.crt" "$HOME/.sanctum/certs/server.key" "$HOME/.sanctum/certs/ca.crt" "$CCERT" "$CKEY" "$CCA"; do
+  [ -f "$f" ] || { echo "REFUSING: missing certificate file $f"; exit 14; }
+done
 # LaunchDaemon (system domain — survives no-login boots). Needs sudo on the node once.
 PLIST_PATH="/Library/LaunchDaemons/com.sanctum.${NAME}-brain.plist"
 if sudo test -f "$PLIST_PATH" 2>/dev/null; then
-  echo daemon-exists
+  # an older daemon may still be plain HTTP: never keep one
+  if sudo grep -q -e '--no-plain' "$PLIST_PATH" && ! sudo grep -q -e '<string>--port</string>' "$PLIST_PATH"; then
+    echo daemon-exists
+  else
+    echo "REFUSING: $PLIST_PATH is not an mTLS-only (--no-plain) brain; replace it first"; exit 15
+  fi
 else
   sudo tee "$PLIST_PATH" >/dev/null <<PL
 <?xml version="1.0" encoding="UTF-8"?>
@@ -74,10 +124,26 @@ else
 <plist version="1.0"><dict>
 <key>Label</key><string>com.sanctum.${NAME}-brain</string>
 <key>ProgramArguments</key><array>
-<string>${HOME}/.sanctum/mlx-venv/bin/python</string><string>-m</string><string>mlx_lm</string><string>server</string>
+<string>${HOME}/.sanctum/bin/sanctum-mlx</string>
 <string>--model</string><string>${HOME}/${MODEL_DIR}</string>
-<string>--host</string><string>127.0.0.1</string><string>--port</string><string>1338</string></array>
-<key>EnvironmentVariables</key><dict><key>HF_HUB_OFFLINE</key><string>1</string></dict>
+<string>--no-plain</string>
+<string>--tls-host</string><string>127.0.0.1</string>
+<string>--tls-host</string><string>${TLS_HOST}</string>
+<string>--tls-port</string><string>${PORT}</string>
+<string>--tls-cert</string><string>${HOME}/.sanctum/certs/server.crt</string>
+<string>--tls-key</string><string>${HOME}/.sanctum/certs/server.key</string>
+<string>--tls-client-ca</string><string>${HOME}/.sanctum/certs/ca.crt</string>
+<string>--temp</string><string>0.0</string>
+<string>--metal-cache-limit-mb</string><string>512</string>
+<string>--metal-memory-limit-mb</string><string>10000</string>
+<string>--metal-wired-limit-mb</string><string>8000</string>
+<string>--prompt-cache-slots</string><string>2</string></array>
+<key>EnvironmentVariables</key><dict><key>HF_HUB_OFFLINE</key><string>1</string>
+<key>RUST_LOG</key><string>info</string>
+<key>SANCTUM_MLX_FUSED_MLP</key><string>1</string>
+<key>SANCTUM_MLX_FUSED_QKV</key><string>1</string>
+<key>SANCTUM_MLX_KV_QUANT</key><string>8</string>
+<key>SANCTUM_MLX_SSM_LADDER</key><string>8</string></dict>
 <key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>UserName</key><string>${USER}</string>
 <key>StandardOutPath</key><string>${HOME}/.sanctum/logs/${NAME}-brain.log</string>
 <key>StandardErrorPath</key><string>${HOME}/.sanctum/logs/${NAME}-brain.log</string>
@@ -85,18 +151,24 @@ else
 PL
 fi
 sudo launchctl bootstrap system "$PLIST_PATH" 2>/dev/null || true
-for i in 1 2 3 4 5 6 7 8 9 10; do curl -s --max-time 3 http://127.0.0.1:1338/v1/models >/dev/null && { echo brain-serving; break; }; sleep 6; done
+for i in 1 2 3 4 5 6 7 8 9 10; do curl -s --max-time 3 --cacert "$CCA" --cert "$CCERT" --key "$CKEY" "https://127.0.0.1:${PORT}/v1/models" >/dev/null && { echo brain-serving; break; }; sleep 6; done
 EOF
 
 say "3. agent: provider + identity + guards"
-run_remote "$MODEL_DIR" "$NAME" <<'EOF'
+run_remote "$MODEL_DIR" "$NAME" "$BRAIN_PORT" "$REQUEST_B64" <<'EOF'
 export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 MP="$HOME/$1"
 NAME="$2"
 PROVIDER_ID="${NAME}-local"
-PROVIDER_JSON="$(python3 -c 'import json, sys; print(json.dumps({"baseUrl": "http://127.0.0.1:1338/v1", "apiKey": "no-key", "api": "openai-completions", "models": [{"id": sys.argv[1], "name": f"{sys.argv[2]} local brain"}]}))' "$MP" "$NAME")"
-openclaw config get "models.providers.${PROVIDER_ID}" >/dev/null 2>&1 || \
+BASE_URL="https://127.0.0.1:$3/v1"
+PROVIDER_JSON="$(python3 -c 'import base64, json, sys; print(json.dumps({"baseUrl": sys.argv[3], "apiKey": "no-key", "api": "openai-completions", "request": json.loads(base64.b64decode(sys.argv[4])), "models": [{"id": sys.argv[1], "name": f"{sys.argv[2]} local brain"}]}))' "$MP" "$NAME" "$BASE_URL" "$4")"
+if openclaw config get "models.providers.${PROVIDER_ID}" >/dev/null 2>&1; then
+  # an existing provider must already be the mTLS endpoint: never leave one on plain HTTP
+  openclaw config get "models.providers.${PROVIDER_ID}.baseUrl" 2>/dev/null | grep -qF -- "$BASE_URL" || \
+    { echo "REFUSING: provider ${PROVIDER_ID} does not point at $BASE_URL; fix it first"; exit 16; }
+else
   openclaw config set "models.providers.${PROVIDER_ID}" "$PROVIDER_JSON" --strict-json
+fi
 openclaw agents list --json 2>/dev/null | python3 -c 'import json, sys; sys.exit(0 if any(a.get("id") == sys.argv[1] for a in json.load(sys.stdin)) else 1)' "$NAME" || \
   openclaw agents add "$NAME" --model "${PROVIDER_ID}/${MP}" --workspace "$HOME/.sanctum/agents/$NAME/workspace" --non-interactive
 IDX="$(openclaw config get agents.list 2>/dev/null | python3 -c 'import sys, json; print([a.get("id") for a in json.load(sys.stdin)].index(sys.argv[1]))' "$NAME")"
