@@ -7,5 +7,5 @@ contact_links:
     url: https://sanctum.run/operations/troubleshooting/
     about: The top 10 issues with copy-pastable fixes — check here before filing.
   - name: Architecture
-    url: https://sanctum.run/architecture/
+    url: https://sanctum.run/architecture/overview/
     about: How Sanctum is built (cathedrals, R2D2, two-anchor TCC, the whole stack).

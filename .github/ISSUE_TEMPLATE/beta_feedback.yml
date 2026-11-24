@@ -1,0 +1,83 @@
+name: Beta feedback
+description: You tried the Sanctum 1.0 beta. Tell us how it went, good, bad or confusing.
+title: "[beta] "
+labels: ["beta-feedback"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for trying the beta. Short is fine: one sentence about what confused you is worth more to us than a perfect report.
+
+        If something is clearly broken, the **Bug report** form asks for the details that help us fix it.
+
+  - type: input
+    id: sanctum-version
+    attributes:
+      label: sanctum-cli version
+      description: Run `sanctum --version`. Leave empty if you didn't get that far.
+      placeholder: "1.0.0"
+    validations:
+      required: false
+
+  - type: input
+    id: mac
+    attributes:
+      label: Mac
+      description: macOS version, chip and memory.
+      placeholder: "macOS 15.1 / M4 Pro / 64 GB"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: how-far
+    attributes:
+      label: How far did you get?
+      options:
+        - I read the docs only
+        - I installed it
+        - I ran sanctum onboard
+        - I use it every day
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install-method
+    attributes:
+      label: How did you install it?
+      options:
+        - Homebrew
+        - install.sh
+        - Other
+        - I didn't install it
+    validations:
+      required: false
+
+  - type: textarea
+    id: what-broke
+    attributes:
+      label: What broke, or what confused you?
+      description: The step, what you expected, and what happened instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-worked
+    attributes:
+      label: What worked well?
+    validations:
+      required: false
+
+  - type: textarea
+    id: every-day
+    attributes:
+      label: What would make you use it every day?
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: Before you submit
+      options:
+        - label: I have NOT pasted credentials (API keys, passphrases, tokens, private URLs). When in doubt, redact.
+          required: true
