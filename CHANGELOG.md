@@ -27,7 +27,7 @@ Sanctum 1.0, in beta: we're looking for beta users.
 ### Fixed
 
 - `sanctum node resolve` no longer answers for an offline tailnet peer with the roster's LAN `host` (a site address that can be a different machine at another site): it reports the peer offline, and a node with a tailnet name is never reached by a bare LAN address.
-- `sanctum node adopt` no longer names a node from the remote machine's own hostname: the name is `--name` or the machine's `~/.sanctum/.node_id` (a mismatch or neither is refused), and the roster row is merged and written atomically (temp file, fsync, rename) instead of replaced.
+- `sanctum node adopt` no longer names a node from the remote machine's own hostname: the name is `--name` or the machine's `~/.sanctum/.node_id` (a mismatch or neither is refused), adopt never overwrites an existing roster row unless it is the same satellite re-adopted explicitly with `--name` (a name that comes only from the machine's `.node_id`, a hub row, or a row for a different machine is refused), and a row it does write is merged and written atomically (temp file, fsync, rename) instead of replaced.
 
 ### Changed
 
