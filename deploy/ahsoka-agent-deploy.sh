@@ -134,6 +134,7 @@ else
 <string>--tls-key</string><string>${HOME}/.sanctum/certs/server.key</string>
 <string>--tls-client-ca</string><string>${HOME}/.sanctum/certs/ca.crt</string>
 <string>--temp</string><string>0.0</string>
+<string>--max-prompt-tokens</string><string>32768</string>
 <string>--metal-cache-limit-mb</string><string>512</string>
 <string>--metal-memory-limit-mb</string><string>10000</string>
 <string>--metal-wired-limit-mb</string><string>8000</string>
