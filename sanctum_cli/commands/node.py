@@ -1056,17 +1056,39 @@ def _probe_auth(host: str, user: str) -> LayerResult:
     )
 
 
-def _probe_identity(host: str, user: str) -> tuple[LayerResult, str]:
-    """L3: read who the machine is — (result, short hostname for the node name)."""
+def _probe_identity(host: str, user: str) -> LayerResult:
+    """L3: read what the machine SAYS it is (hostname / macOS / arch), for display only.
+
+    The hostname is the remote machine's own claim, so it is never used as the
+    node's name: see :func:`_probe_node_id`.
+    """
     rc, out = _run_ssh(host, user, 'printf "%s|%s|%s" "$(hostname -s)" "$(sw_vers -productVersion)" "$(uname -m)"')
     parts = out.strip().split("|")
     if rc == 0 and len(parts) == 3 and all(parts):
         hostname, macos, arch = parts
-        return (
-            LayerResult("L3", "identity", LayerStatus.PASS, f"{hostname} · macOS {macos} · {arch}"),
-            hostname,
+        return LayerResult(
+            "L3", "identity", LayerStatus.PASS, f"{hostname} (self-reported) · macOS {macos} · {arch}"
         )
-    return (LayerResult("L3", "identity", LayerStatus.FAIL, "could not read hostname/os/arch"), "")
+    return LayerResult("L3", "identity", LayerStatus.FAIL, "could not read hostname/os/arch")
+
+
+_NODE_ID_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,62}")
+
+
+def _probe_node_id(host: str, user: str) -> str:
+    """The hive name the remote machine recorded in ``~/.sanctum/.node_id`` ('' if none).
+
+    The one remote claim adopt accepts as a name, and only when it is a plain
+    hive-name token: the file's content is untrusted input and becomes a roster key.
+    """
+    rc, out = _run_ssh(host, user, "cat ~/.sanctum/.node_id 2>/dev/null")
+    if rc != 0:
+        return ""
+    for line in out.splitlines():
+        text = line.strip()
+        if text and not text.startswith("#"):
+            return text if _NODE_ID_RE.fullmatch(text) else ""
+    return ""
 
 
 def _probe_key_hygiene(host: str, user: str, pubkey: str) -> LayerResult:
@@ -1329,8 +1351,16 @@ def resolve_node_address(
                 "online": False,
             }
 
-    # Literal host: LAN IP or DNS name (not a simple TS stem)
-    if host and not looks_like_tailscale_name(host):
+    # Status JSON already said this tailnet peer is offline. Report it BEFORE any
+    # literal host: a roster ``host`` is a site LAN address (the same design map at
+    # every site), so answering with it for an offline named peer names a
+    # different machine. Nor fail-open via a second live `tailscale ip` lookup.
+    if offline_peer is not None:
+        return offline_peer
+
+    # Literal host: LAN IP or DNS name (not a simple TS stem). A node that has a
+    # tailnet name is addressed through the tailnet, never by its LAN address.
+    if host and not looks_like_tailscale_name(host) and not (ts_name and is_ip_literal(host)):
         return {
             **base,
             "ok": True,
@@ -1338,11 +1368,6 @@ def resolve_node_address(
             "source": "host",
             "online": None,
         }
-
-    # Status JSON already said this tailnet peer is offline — do not
-    # fail-open via a second live `tailscale ip` lookup.
-    if offline_peer is not None:
-        return offline_peer
 
     # Direct CLI lookup when status JSON did not yield an online peer
     for cand in (ts_name, host, key):
@@ -1377,7 +1402,9 @@ def resolve_node_address(
             "online": None,
         }
 
-    if host:
+    # A node with a tailnet name that the tailnet does not know is unresolved,
+    # not "reachable at its LAN address" (see the offline case above).
+    if host and not (ts_name and is_ip_literal(host)):
         return {
             **base,
             "ok": True,
@@ -1413,21 +1440,29 @@ def register_node(name: str, *, host: str, user: str, path: Path | None = None) 
     nodes = data.get("nodes")
     if not isinstance(nodes, dict):
         nodes = data["nodes"] = {}
-    entry: dict[str, Any] = {
-        "type": "satellite",
-        "tier": "edge",
-        "ssh_user": user,
-        "host": host,
-        "adopted": date.today().isoformat(),
-    }
+    # Merge into an existing row: adopt owns only the connection facts below, so a
+    # declared type/tier, aliases, capabilities or sync block survive a re-adopt.
+    existing = nodes.get(name)
+    entry: dict[str, Any] = dict(existing) if isinstance(existing, dict) else {}
+    entry.setdefault("type", "satellite")
+    entry.setdefault("tier", "edge")
+    entry.update({"ssh_user": user, "host": host, "adopted": date.today().isoformat()})
+    entry.pop("user", None)  # legacy spelling of ssh_user
     if looks_like_tailscale_name(host):
         entry["tailscale_name"] = host
     nodes[name] = entry
-    if target.exists():
+    payload = yaml.safe_dump(data, sort_keys=False, allow_unicode=True).encode("utf-8")
+    real = Path(os.path.realpath(target))  # a symlinked live file is replaced at its target
+    real.parent.mkdir(parents=True, exist_ok=True)
+    if real.exists():
+        info = real.stat()
+        mode, owner = info.st_mode & 0o7777, (info.st_uid, info.st_gid)
         backup = target.parent / (target.name + ".bak")
-        backup.write_text(target.read_text(encoding="utf-8"), encoding="utf-8")
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True), encoding="utf-8")
+        config._atomic_write(backup, real.read_bytes(), mode, owner)
+    else:
+        mode, owner = 0o644, (os.getuid(), os.getgid())
+    # temp file beside the target, fsync, os.replace: never a half-written roster
+    config._atomic_write(real, payload, mode, owner)
 
 
 def _tailscale_status_json() -> str:
@@ -2077,7 +2112,7 @@ def node_adopt(
     ],
     name: Annotated[
         str | None,
-        typer.Option("--name", help="Node name to register under (default: its hostname, slugified)."),
+        typer.Option("--name", help="Node name to register under (default: the name in its ~/.sanctum/.node_id)."),
     ] = None,
     user: Annotated[
         str | None,
@@ -2095,7 +2130,7 @@ def node_adopt(
 
     * L1 reach — TCP :22 answers
     * L2 ssh auth — the automation key logs in as the expected user
-    * L3 identity — hostname / macOS version / arch read back
+    * L3 identity — hostname / macOS version / arch read back (display only)
     * L4 key hygiene — 700/600 perms + OUR key in authorized_keys
     * L5 headless — pmset posture (WARN-only: adoptable but not closet-ready)
     * L6 register — ``nodes.<name>`` written to instance.yaml and READ BACK
@@ -2137,12 +2172,12 @@ def node_adopt(
     auth = _probe_auth(host, ssh_user)
     rows.append(auth)
     if auth.status is LayerStatus.PASS:
-        identity, remote_hostname = _probe_identity(host, ssh_user)
-        rows.append(identity)
+        rows.append(_probe_identity(host, ssh_user))
+        remote_node_id = _probe_node_id(host, ssh_user)
         rows.append(_probe_key_hygiene(host, ssh_user, pubkey))
         rows.append(_probe_headless(host, ssh_user))
     else:
-        remote_hostname = ""
+        remote_node_id = ""
         rows.append(LayerResult("L3", "identity", LayerStatus.SKIP, "blocked by L2"))
         rows.append(LayerResult("L4", "key hygiene", LayerStatus.SKIP, "blocked by L2"))
         rows.append(LayerResult("L5", "headless", LayerStatus.SKIP, "blocked by L2"))
@@ -2151,16 +2186,24 @@ def node_adopt(
 
     # L6: register only over a proven L1-L4, and trust only the read-back.
     if required_ok:
-        node_name = name or config.slugify_name(remote_hostname)
+        # The name is the operator's --name or the machine's recorded .node_id, never
+        # its self-reported hostname (S1: a remote host's own claim is not identity).
+        node_name = name or remote_node_id
         failure = "instance.yaml write did not read back"
-        try:
-            register_node(node_name, host=host, user=ssh_user)
-            written = config.instance_value(f"nodes.{node_name}.host") == host
-        except ConfigError as unreadable:  # unreadable instance.yaml: left as it was
-            written = False
-            failure = "; ".join(part for part in (unreadable.message, unreadable.fix) if part)
-        except OSError:
-            written = False
+        written = False
+        if not node_name:
+            failure = "no node name: it has no ~/.sanctum/.node_id — re-run with --name <hive-name>"
+        elif name and remote_node_id and name != remote_node_id:
+            node_name = ""
+            failure = f"--name {name!r} disagrees with its ~/.sanctum/.node_id {remote_node_id!r} — fix one"
+        else:
+            try:
+                register_node(node_name, host=host, user=ssh_user)
+                written = config.instance_value(f"nodes.{node_name}.host") == host
+            except ConfigError as unreadable:  # unreadable instance.yaml: left as it was
+                failure = "; ".join(part for part in (unreadable.message, unreadable.fix) if part)
+            except OSError:
+                pass
         if written:
             rows.append(
                 LayerResult(

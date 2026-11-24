@@ -218,6 +218,57 @@ def test_a_hostname_copying_the_hubs_cannot_stand_in_for_an_offline_hub(
     assert cli_lookups == []
 
 
+def test_an_offline_peer_is_not_answered_with_the_rosters_lan_host(
+    cli_lookups: list[str],
+) -> None:
+    """A roster ``host`` is a site LAN address; it must not answer for an offline peer.
+
+    RL-04: with the hub offline, ``node resolve`` returned its row's 10.0.0.x host,
+    which on another site's LAN is a different machine.
+    """
+    nodes = _nodes()
+    nodes["home"]["host"] = "192.0.2.10"  # documentation range; the design-map address
+    peers = node_cmd.parse_tailscale_peer_ips(_status(_mbp(), _home(online=False)))
+    r = node_cmd.resolve_node_address("home", nodes, peers)
+    assert r["ok"] is False
+    assert r["address"] is None
+    assert r["online"] is False
+    assert "offline" in r["error"]
+    assert cli_lookups == []
+
+
+def test_a_tailnet_named_node_the_tailnet_does_not_list_is_not_answered_with_its_lan_host() -> None:
+    nodes = _nodes()
+    nodes["home"]["host"] = "192.0.2.10"
+    peers = node_cmd.parse_tailscale_peer_ips(_status(_mbp()))  # no home at all
+    r = node_cmd.resolve_node_address("home", nodes, peers)
+    assert r["ok"] is False
+    assert r["address"] is None
+    assert "no resolvable address" in r["error"]
+
+
+def test_a_node_without_a_tailnet_name_still_resolves_to_its_literal_host() -> None:
+    peers = node_cmd.parse_tailscale_peer_ips(_status(_mbp()))
+    nodes = {"cabin": {"type": "satellite", "host": "192.0.2.40", "ssh_user": "operator"}}
+    r = node_cmd.resolve_node_address("cabin", nodes, peers)
+    assert (r["ok"], r["address"], r["source"]) == (True, "192.0.2.40", "host")
+
+
+def test_node_resolve_cli_reports_an_offline_peer_with_a_nonzero_exit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    instance = tmp_path / "instance.yaml"
+    nodes = _nodes()
+    nodes["home"]["host"] = "192.0.2.10"
+    instance.write_text(yaml.safe_dump({"nodes": nodes}), encoding="utf-8")
+    monkeypatch.setenv("SANCTUM_INSTANCE_FILE", str(instance))
+    monkeypatch.setattr(node_cmd, "_tailscale_status_json", lambda: _status(_mbp(), _home(online=False)))
+    result = runner.invoke(app, ["node", "resolve", "home"])
+    assert result.exit_code != 0
+    assert "192.0.2.10" not in result.output
+    assert "offline" in result.output
+
+
 def test_a_peer_with_this_machines_hostname_does_not_shadow_it() -> None:
     """On the hub itself, a peer whose HostName is the hub's name changes nothing."""
     peers = node_cmd.parse_tailscale_peer_ips(_status(_home(), _hostile_studio(), _mbp()))
