@@ -440,6 +440,83 @@ def test_node_adopt_refuses_a_name_that_disagrees_with_its_node_id(
     assert not instance.exists()
 
 
+ROSTER_WITH_HUB_AND_SAT = (
+    "nodes:\n"
+    "  home:\n    type: hub\n    tier: primary\n    host: 192.0.2.10\n    ssh_user: operator\n"
+    "  studio-mini:\n    type: satellite\n    tier: edge\n    host: sat.example\n"
+    "    ssh_user: operator\n    aliases: [old-studio]\n"
+)
+
+
+def _adopt_into_roster(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    node_id: str,
+    name: str | None = None,
+    host: str = "sat.example",
+) -> tuple[Any, Path, str]:
+    script = {**_healthy_script(), ".node_id": (0, f"{node_id}\n")}
+    instance = _wire_adopt(monkeypatch, tmp_path, ScriptedSsh(script))
+    instance.write_text(ROSTER_WITH_HUB_AND_SAT, encoding="utf-8")
+    argv = ["node", "adopt", host, "--user", "operator", "--wait", "0"]
+    if name:
+        argv += ["--name", name]
+    return runner.invoke(app, argv), instance, ROSTER_WITH_HUB_AND_SAT
+
+
+def test_node_adopt_refuses_a_node_id_that_claims_an_existing_hub_row(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    result, instance, before = _adopt_into_roster(monkeypatch, tmp_path, node_id="home")
+    assert result.exit_code == 1, result.stdout
+    assert "already in the roster" in result.stdout
+    assert instance.read_text(encoding="utf-8") == before  # the hub row is untouched
+
+
+def test_node_adopt_refuses_a_node_id_naming_an_existing_satellite_without_name(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    result, instance, before = _adopt_into_roster(monkeypatch, tmp_path, node_id="studio-mini")
+    assert result.exit_code == 1, result.stdout
+    assert "--name studio-mini" in result.stdout
+    assert instance.read_text(encoding="utf-8") == before
+
+
+def test_node_adopt_explicit_name_readopts_the_same_satellite(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    result, instance, _ = _adopt_into_roster(
+        monkeypatch, tmp_path, node_id="studio-mini", name="studio-mini"
+    )
+    assert result.exit_code == 0, result.stdout
+    row = yaml.safe_load(instance.read_text(encoding="utf-8"))["nodes"]["studio-mini"]
+    assert row["aliases"] == ["old-studio"]  # merged, not replaced
+    assert row["adopted"]
+
+
+def test_node_adopt_explicit_name_with_a_different_machine_is_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    result, instance, before = _adopt_into_roster(
+        monkeypatch, tmp_path, node_id="studio-mini", name="studio-mini", host="other.example"
+    )
+    assert result.exit_code == 1, result.stdout
+    assert "different machine" in result.stdout
+    assert instance.read_text(encoding="utf-8") == before
+
+
+def test_node_adopt_explicit_name_into_a_hub_row_is_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    result, instance, before = _adopt_into_roster(
+        monkeypatch, tmp_path, node_id="home", name="home", host="192.0.2.10"
+    )
+    assert result.exit_code == 1, result.stdout
+    assert "hub" in result.stdout
+    assert instance.read_text(encoding="utf-8") == before  # even with matching host
+
+
 def test_node_adopt_auth_failure_registers_nothing(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

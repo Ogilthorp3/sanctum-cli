@@ -2105,6 +2105,35 @@ def _render_scorecard(rows: list[LayerResult]) -> None:
     console.print(table)
 
 
+class _AdoptRefusedError(Exception):
+    """adopt will not touch an existing roster row; the message is the L6 detail."""
+
+
+def _adopt_refusal(name: str, *, explicit: bool, host: str) -> str | None:
+    """Why adopt may not write ``nodes.<name>`` (None when it may).
+
+    The remote machine controls its own ``.node_id``, so a name that came only
+    from it must never land on an existing row (a box claiming the hub's name would
+    rewrite the hub's host). An explicit ``--name`` may re-adopt a row only when
+    it is a satellite (never a hub) whose recorded host or tailnet name is the
+    machine being adopted.
+    """
+    row = load_nodes_map().get(name)
+    if row is None:
+        return None
+    if not explicit:
+        return f"node {name} is already in the roster; re-adopt it explicitly with --name {name}"
+    is_hub = str(row.get("type") or "").lower() == "hub" or str(row.get("tier") or "").lower() == "primary"
+    is_satellite = str(row.get("type") or "").lower() == "satellite" or str(row.get("tier") or "").lower() == "edge"
+    if is_hub or not is_satellite:
+        return f"node {name} is a hub or non-satellite row; adopt never overwrites it"
+    ours = host.strip().lower()
+    known = {str(row.get(k) or "").strip().lower() for k in ("host", "tailscale_name")} - {""}
+    if ours not in known:
+        return f"node {name} is in the roster for a different machine (host/tailscale_name differ from {host}); adopt will not overwrite it"
+    return None
+
+
 @node_app.command("adopt", help="Adopt a bootstrapped Mac: poll SSH, verify L1-L6, register it.")
 def node_adopt(
     host: Annotated[
@@ -2198,8 +2227,13 @@ def node_adopt(
             failure = f"--name {name!r} disagrees with its ~/.sanctum/.node_id {remote_node_id!r} — fix one"
         else:
             try:
+                refusal = _adopt_refusal(node_name, explicit=bool(name), host=host)
+                if refusal:
+                    raise _AdoptRefusedError(refusal)
                 register_node(node_name, host=host, user=ssh_user)
                 written = config.instance_value(f"nodes.{node_name}.host") == host
+            except _AdoptRefusedError as refused:
+                failure = str(refused)
             except ConfigError as unreadable:  # unreadable instance.yaml: left as it was
                 failure = "; ".join(part for part in (unreadable.message, unreadable.fix) if part)
             except OSError:
