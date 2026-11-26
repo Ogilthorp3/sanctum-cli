@@ -615,6 +615,47 @@ def onboard_command(
     if not yes:
         _run_first_hello(_preferred_name(who))
 
+    # Opt-in Sovereign Hive Pulse — strictly interactive TTY only (or silent refresh
+    # if already opted in); never blocks onboarding or consumes non-TTY test stdin.
+    _prompt_hive_pulse(yes=yes)
+
+
+def _prompt_hive_pulse(*, yes: bool) -> bool:
+    """Explicit opt-in prompt for the zero-PII Sanctum Hive counter."""
+    import sys
+
+    from sanctum_cli import hive_pulse
+
+    state = hive_pulse.load_state()
+    if state.get("enabled"):
+        res = hive_pulse.join_hive(event="onboard", onboard_completed=True)
+        return bool(res.get("ok"))
+
+    if yes or not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return False
+
+    console.print()
+    if not typer.confirm(
+        "Count your Mac in the anonymous Sanctum Hive? "
+        "(sends chip, RAM, country & CLI version to hive.sanctum.run — "
+        "zero IP, zero hostname; leave anytime with `sanctum hive leave`)",
+        default=False,
+    ):
+        console.print("  [dim]skipped — join anytime with `sanctum hive join`[/]")
+        return False
+
+    res = hive_pulse.join_hive(event="onboard", onboard_completed=True)
+    if res.get("ok"):
+        console.print(
+            f"  [green]✓[/] Joined the Sanctum Hive "
+            f"({res.get('hive_nodes', 1)} Macs · {res.get('active_7d', 1)} active this week)"
+        )
+        return True
+    console.print(
+        f"  [yellow]![/] Opt-in saved locally (offline: {res.get('error', 'unreachable')})"
+    )
+    return False
+
 
 def _preferred_name(fallback: str) -> str:
     """The name the user asked to be called by, for SANCTUM_USER_NAME.

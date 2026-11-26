@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-11-26
+
+### Added
+
+- Opt-in Sovereign Hive Pulse (`sanctum hive join | leave | status | stats`) backed by the publicly auditable zero-PII Cloudflare Worker at `https://hive.sanctum.run` (stores anonymous node ID, chip, RAM, macOS version, country code, CLI version, and active module slugs — zero IP, zero hostname, instant erasure via `sanctum hive leave`).
+- Interactive opt-in Hive Pulse prompt at the end of `sanctum onboard` (interactive TTY only; never prompts under `--yes` or non-TTY scripts), plus 24h-throttled opt-in heartbeats on `sanctum status` and `sanctum backup`.
+- Lightweight zero-ID daily update check (`GET https://hive.sanctum.run/latest.json?v=<version>&os=macos`, max 1×/24h on interactive `sanctum status`; opt out cleanly via `SANCTUM_NO_UPDATE_CHECK=1`).
+
 ## [1.0.0] - 2026-11-23
 
 Sanctum 1.0, in beta: we're looking for beta users.

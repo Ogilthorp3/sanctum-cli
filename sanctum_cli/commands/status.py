@@ -409,6 +409,10 @@ def _render_first_run(*, json_output: bool, oneline: bool) -> None:
 
 
 def status_command(*, json_output: bool, oneline: bool) -> None:
+    import sys
+
+    from sanctum_cli import hive_pulse
+
     if not config.instance_path().exists():
         _render_first_run(json_output=json_output, oneline=oneline)
         return
@@ -420,3 +424,11 @@ def status_command(*, json_output: bool, oneline: bool) -> None:
         print(render_oneline(snap))
     else:
         render_table(snap)
+        if sys.stdin.isatty() and sys.stdout.isatty():
+            newer = hive_pulse.maybe_check_update()
+            if newer:
+                console.print(
+                    f"[dim]update available: v{newer} "
+                    "(run `sanctum update` · opt out: SANCTUM_NO_UPDATE_CHECK=1)[/]"
+                )
+    hive_pulse.maybe_heartbeat("status")

@@ -29,6 +29,7 @@ from sanctum_cli.commands import (
     config_cmd,
     doctor,
     endocrine_cmd,
+    hive_cmd,
     init_cmd,
     service_user_cmd,
     status,
@@ -536,6 +537,7 @@ app.add_typer(node_app, name="node")
 app.add_typer(link_app, name="link")
 app.add_typer(mesh_app, name="mesh")
 app.add_typer(tailnet_app, name="tailnet")
+app.add_typer(hive_cmd.app, name="hive")
 
 # The seventh organ — hormone panel + creative-mode lever. Read-only/file-based;
 # adds no behavior to any seat until a seat opts into the receptor.

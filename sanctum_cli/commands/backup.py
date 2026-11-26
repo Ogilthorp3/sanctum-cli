@@ -214,6 +214,10 @@ def _backup_recipe(name: str, *, dry_run: bool) -> None:
             f"[green]✓[/] recipe {name!r} backup complete"
             + (" (dry run — nothing written)" if dry_run else "")
         )
+        if not dry_run:
+            from sanctum_cli import hive_pulse
+
+            hive_pulse.maybe_heartbeat("backup")
     finally:
         excludes_path.unlink(missing_ok=True)
 
