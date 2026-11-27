@@ -30,7 +30,7 @@ import typer
 from rich.console import Console
 from rich.panel import Panel
 
-from sanctum_cli import __version__
+from sanctum_cli import __version__, hive_pulse
 from sanctum_cli.commands import bug_report as bug_report_cmd
 from sanctum_cli.commands import dragon as dragon_cmd
 from sanctum_cli.commands import haus_cmd
@@ -54,6 +54,22 @@ def _fetch_castellan_status() -> dict[str, Any] | None:
     return None
 
 
+def _public_seal() -> dict[str, Any] | None:
+    """Return non-secret Sovereign Seal metadata (never exposes claim_code/signature)."""
+    seal = hive_pulse.load_seal()
+    if not isinstance(seal, dict) or not seal.get("tier"):
+        return None
+    return {
+        "seat_number": seal.get("seat_number"),
+        "tier": seal.get("tier"),
+        "title": seal.get("title"),
+        "short_badge": seal.get("short_badge"),
+        "motto": seal.get("motto"),
+        "minted_at": seal.get("minted_at"),
+        "public_hash": seal.get("public_hash"),
+    }
+
+
 def collect_ui_snapshot() -> dict[str, Any]:
     """Collect a bounded, loopback-only JSON snapshot for the local Sanctum UI."""
     services = haus_cmd.probe_core_services()
@@ -70,6 +86,7 @@ def collect_ui_snapshot() -> dict[str, Any]:
         "chip": detect_chip(),
         "ram_gb": detect_ram_gb(),
         "os": detect_os(),
+        "seal": _public_seal(),
         "services": [{"name": k, "up": v} for k, v in services.items()],
         "services_up": up_count,
         "services_total": len(services),
@@ -204,12 +221,34 @@ def render_dashboard_html(*, csrf_token: str) -> str:
     border: 1px solid rgba(255,255,255,0.07); font-size: 0.84rem; max-height: 280px; overflow: auto;
   }}
   .actions {{ display: flex; gap: 0.6rem; flex-wrap: wrap; margin-top: 0.8rem; }}
+  .btn-link {{
+    display: inline-block; text-decoration: none;
+    background: rgba(245,196,81,0.16); border: 1px solid rgba(245,196,81,0.45);
+    color: #f5c451; border-radius: 8px; padding: 0.55rem 0.75rem; font-size: 0.86rem; font-weight: 600;
+  }}
+  .btn-link:hover {{ background: rgba(245,196,81,0.28); }}
+  .seal-pill {{
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.72rem; font-weight: 700;
+    padding: 0.25rem 0.65rem; border-radius: 999px;
+    border: 1px solid rgba(245,196,81,0.65); background: rgba(245,196,81,0.16); color: #f5c451;
+    box-shadow: 0 0 14px rgba(245,196,81,0.18);
+  }}
+  body.sovereign-gold {{
+    border-top: 3px solid #f5c451;
+    background: radial-gradient(circle at top right, rgba(245,196,81,0.08), transparent 42%), var(--bg);
+  }}
+  body.sovereign-gold .card {{
+    border-color: rgba(245,196,81,0.24);
+  }}
 </style>
 </head>
 <body>
 <div class="wrap">
   <header>
-    <div class="brand"><span class="diamond">◆</span> <span>SANCTUM LOCAL CONTROL</span></div>
+    <div class="brand">
+      <span class="diamond">◆</span> <span>SANCTUM LOCAL CONTROL</span>
+      <span id="seal-pill" class="seal-pill" style="display:none"></span>
+    </div>
     <div id="hw-pill" class="pill">Loading…</div>
   </header>
 
@@ -228,6 +267,7 @@ def render_dashboard_html(*, csrf_token: str) -> str:
       <div id="seats-text" class="muted"></div>
       <div class="actions">
         <button id="btn-bug" type="button">Copy Redacted Bug Report</button>
+        <a id="btn-seal" class="btn-link" href="/api/seal.svg" download="sanctum-sovereign-seal.svg" style="display:none">Download Sovereign SVG Seal</a>
       </div>
     </section>
 
@@ -276,6 +316,16 @@ async function refresh() {{
     }}
     const seats = Object.entries(d.seats || {{}}).map(([k,v]) => `${{k}}:${{v.up ? 'UP' : 'off'}}`).join(' · ');
     document.getElementById('seats-text').textContent = `$0 Subscription Proxies: ${{seats}}`;
+    const sealEl = document.getElementById('seal-pill');
+    const sealBtn = document.getElementById('btn-seal');
+    if (d.seal && d.seal.title) {{
+      sealEl.textContent = `◆ ${{d.seal.title}}`;
+      sealEl.style.display = 'inline-block';
+      sealBtn.style.display = 'inline-block';
+      if (['seed-0', 'seed-1', 'founding-circle'].includes(d.seal.tier)) {{
+        document.body.classList.add('sovereign-gold');
+      }}
+    }}
   }} catch (e) {{}}
 }}
 async function sendChat() {{
@@ -344,6 +394,23 @@ def create_ui_server(*, port: int = DEFAULT_UI_PORT) -> tuple[ThreadingHTTPServe
                 return
             if self.path == "/api/snapshot":
                 self._send_json(HTTPStatus.OK, collect_ui_snapshot())
+                return
+            if self.path == "/api/seal.svg":
+                seal = hive_pulse.load_seal()
+                if not seal:
+                    self._send_json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "no_local_seal"})
+                    return
+                svg_path = hive_pulse.seal_svg_path()
+                if svg_path.is_file():
+                    svg_bytes = svg_path.read_bytes()
+                else:
+                    svg_bytes = hive_pulse.render_seal_svg(
+                        seal,
+                        chip=str(seal.get("chip") or detect_chip()),
+                        ram_gb=int(seal.get("ram_gb") or detect_ram_gb()),
+                        country=str(seal.get("country") or ""),
+                    ).encode("utf-8")
+                self._send_bytes(HTTPStatus.OK, "image/svg+xml; charset=utf-8", svg_bytes)
                 return
             if self.path == "/api/bug-report":
                 if self.headers.get("X-Sanctum-UI-Token") != csrf_token:

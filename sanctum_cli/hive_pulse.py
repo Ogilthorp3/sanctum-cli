@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import html
 import json
 import os
 import platform
@@ -46,6 +47,137 @@ def _state_path() -> Path:
     if override:
         return Path(override).expanduser()
     return Path.home() / ".sanctum" / "state" / "hive-pulse.json"
+
+
+def seal_dir() -> Path:
+    override = os.environ.get(ENV_HIVE_STATE, "").strip()
+    if override:
+        return Path(override).expanduser().parent / "seals"
+    return Path.home() / ".sanctum" / "seals"
+
+
+def seal_path() -> Path:
+    return seal_dir() / "sovereign-seal.json"
+
+
+def seal_svg_path() -> Path:
+    return seal_dir() / "sovereign-seal.svg"
+
+
+def load_seal() -> dict[str, Any] | None:
+    path = seal_path()
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) and data.get("tier") else None
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def render_seal_svg(
+    seal: dict[str, Any],
+    *,
+    chip: str = "",
+    ram_gb: int = 0,
+    country: str = "",
+) -> str:
+    """Render a zero-dependency Obsidian & Gold Sovereign Seal SVG locally."""
+    title = html.escape(str(seal.get("title") or "Sovereign Node"))
+    badge = html.escape(str(seal.get("short_badge") or "SANCTUM HIVE"))
+    motto = html.escape(str(seal.get("motto") or "Local silicon, zero cloud leash."))
+    minted = html.escape(str(seal.get("minted_at") or "")[:10] or "2026")
+    pub_hash = html.escape(str(seal.get("public_hash") or "0000000000000000")[:16].upper())
+    tier = str(seal.get("tier") or "sovereign")
+    accent = "#f5c451" if tier in ("seed-1", "founding-circle", "seed-0") else "#67e8f9"
+    hw_parts = [p for p in [chip, f"{ram_gb} GB" if ram_gb else "", country if country and country != "ZZ" else ""] if p]
+    hw_line = html.escape(" · ".join(hw_parts) or "Apple Silicon Sovereign Node")
+
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 360" width="640" height="360" role="img" '
+        f'aria-label="Sanctum Sovereign Seal — {title}">\n'
+        "  <defs>\n"
+        '    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">\n'
+        '      <stop offset="0%" stop-color="#0b0d14"/>\n'
+        '      <stop offset="100%" stop-color="#151926"/>\n'
+        "    </linearGradient>\n"
+        '    <linearGradient id="gold" x1="0" y1="0" x2="1" y2="1">\n'
+        f'      <stop offset="0%" stop-color="{accent}"/>\n'
+        '      <stop offset="100%" stop-color="#d4952e"/>\n'
+        "    </linearGradient>\n"
+        "  </defs>\n"
+        '  <rect width="640" height="360" rx="18" fill="url(#bg)"/>\n'
+        '  <rect x="14" y="14" width="612" height="332" rx="12" fill="none" stroke="url(#gold)" stroke-width="1.5" opacity="0.72"/>\n'
+        '  <rect x="22" y="22" width="596" height="316" rx="8" fill="none" stroke="#ffffff" stroke-width="0.6" opacity="0.14"/>\n'
+        '  <g transform="translate(320 90)">\n'
+        '    <polygon points="0,-38 30,0 0,38 -30,0" fill="none" stroke="url(#gold)" stroke-width="2.5"/>\n'
+        '    <polygon points="0,-20 16,0 0,20 -16,0" fill="url(#gold)" opacity="0.9"/>\n'
+        "  </g>\n"
+        f'  <text x="320" y="156" text-anchor="middle" fill="{accent}" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="13" font-weight="700" letter-spacing="3.5">{badge} · SANCTUM HIVE</text>\n'
+        f'  <text x="320" y="194" text-anchor="middle" fill="#f9fafb" font-family="-apple-system,BlinkMacSystemFont,sans-serif" font-size="24" font-weight="700">{title}</text>\n'
+        f'  <text x="320" y="224" text-anchor="middle" fill="#9ca3af" font-family="-apple-system,BlinkMacSystemFont,sans-serif" font-size="13">{motto}</text>\n'
+        '  <line x1="88" y1="252" x2="552" y2="252" stroke="#ffffff" stroke-opacity="0.12" stroke-width="1"/>\n'
+        f'  <text x="320" y="282" text-anchor="middle" fill="#e5e7eb" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="12">{hw_line}</text>\n'
+        f'  <text x="320" y="308" text-anchor="middle" fill="#9ca3af" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11">MINTED {minted}  ·  SEAL HASH {pub_hash}  ·  ZERO PII</text>\n'
+        '  <text x="320" y="330" text-anchor="middle" fill="#6b7280" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="10" letter-spacing="2">LOCAL SILICON · ZERO CLOUD LEASH · SANCTUM.RUN</text>\n'
+        "</svg>\n"
+    )
+
+
+def save_seal(
+    seal: dict[str, Any],
+    *,
+    chip: str = "",
+    ram_gb: int = 0,
+    country: str = "",
+) -> tuple[Path, Path]:
+    """Persist the Sovereign Seal JSON (0600) and local SVG crest atomically."""
+    sdir = seal_dir()
+    sdir.mkdir(parents=True, exist_ok=True)
+    enriched = dict(seal)
+    if chip:
+        enriched["chip"] = chip
+    if ram_gb:
+        enriched["ram_gb"] = ram_gb
+    if country:
+        enriched["country"] = country
+
+    jpath = seal_path()
+    tmp = jpath.with_suffix(".json.tmp")
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(enriched, fh, indent=2, sort_keys=True)
+            fh.write("\n")
+        tmp.replace(jpath)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink(missing_ok=True)
+        raise
+
+    svg = render_seal_svg(
+        enriched,
+        chip=str(enriched.get("chip") or ""),
+        ram_gb=int(enriched.get("ram_gb") or 0),
+        country=str(enriched.get("country") or ""),
+    )
+    spath = seal_svg_path()
+    spath.write_text(svg, encoding="utf-8")
+    return jpath, spath
+
+
+def verify_seal_remote(
+    claim_code: str,
+    *,
+    transport: httpx.BaseTransport | None = None,
+) -> dict[str, Any]:
+    """Verify any Sovereign Seal claim code via GET /verify-seal (zero PII)."""
+    endpoint = _endpoint()
+    with httpx.Client(timeout=ANALYTICS_TIMEOUT_S, transport=transport) as client:
+        r = client.get(f"{endpoint}/verify-seal", params={"code": claim_code.strip().upper()})
+        data = r.json()
+        return data if isinstance(data, dict) else {"ok": False, "valid": False}
 
 
 def _endpoint() -> str:
@@ -195,6 +327,17 @@ def join_hive(
             if r.status_code == 200:
                 resp_data = r.json()
                 state["last_pulse_iso"] = now_iso
+                seal = resp_data.get("seal")
+                if isinstance(seal, dict) and seal.get("tier"):
+                    with contextlib.suppress(OSError):
+                        jpath, spath = save_seal(
+                            seal,
+                            chip=str(payload.get("chip") or ""),
+                            ram_gb=int(payload.get("memory_gb") or 0),
+                            country=str(payload.get("country") or ""),
+                        )
+                        resp_data["seal_path"] = str(jpath)
+                        resp_data["seal_svg_path"] = str(spath)
             else:
                 resp_data = {"ok": False, "error": f"HTTP {r.status_code}"}
     except Exception as exc:
@@ -261,6 +404,15 @@ def maybe_heartbeat(
                 state["node_id"] = node_id
                 state["last_pulse_iso"] = now.isoformat()
                 save_state(state)
+                with contextlib.suppress(Exception):
+                    seal = r.json().get("seal")
+                    if isinstance(seal, dict) and seal.get("tier"):
+                        save_seal(
+                            seal,
+                            chip=str(payload.get("chip") or ""),
+                            ram_gb=int(payload.get("memory_gb") or 0),
+                            country=str(payload.get("country") or ""),
+                        )
                 return True
     except Exception:
         return False

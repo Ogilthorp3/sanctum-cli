@@ -21,7 +21,7 @@ import typer
 from rich.console import Console
 from rich.panel import Panel
 
-from sanctum_cli import __version__
+from sanctum_cli import __version__, hive_pulse
 from sanctum_cli.commands import haus_cmd
 from sanctum_cli.mesh.metrics import detect_chip, detect_os, detect_ram_gb
 
@@ -108,10 +108,14 @@ def collect_redacted_report(
                     }
                 )
 
+    seal = hive_pulse.load_seal()
+    seal_title = str(seal.get("title") or "") if isinstance(seal, dict) else ""
+
     report = {
         "cli_version": __version__,
         "rust_release": rust_state.get("release_tag")
         or ("operator-live" if haus_cmd.is_operator_haus() else "not-installed"),
+        "hive_seal": seal_title or None,
         "os": detect_os(),
         "arch": platform.machine(),
         "chip": detect_chip(),
@@ -133,11 +137,17 @@ def render_markdown_report(report: dict[str, Any]) -> str:
         "### Environment (auto-redacted)",
         f"- **sanctum-cli:** `v{report['cli_version']}`",
         f"- **Rust suite:** `{report['rust_release']}`",
-        f"- **Hardware:** `{report['chip']}` · `{report['ram_gb']} GB` · `{report['os']}` (`{report['arch']}`)",
-        f"- **Self-test:** `{report['self_test']}`",
-        "",
-        "### Rust Services",
     ]
+    if report.get("hive_seal"):
+        lines.append(f"- **Hive Seal:** `{report['hive_seal']}`")
+    lines.extend(
+        [
+            f"- **Hardware:** `{report['chip']}` · `{report['ram_gb']} GB` · `{report['os']}` (`{report['arch']}`)",
+            f"- **Self-test:** `{report['self_test']}`",
+            "",
+            "### Rust Services",
+        ]
+    )
     for svc, st in (report.get("services") or {}).items():
         mark = "UP" if st == "UP" else "offline"
         lines.append(f"- `{svc}`: **{mark}**")

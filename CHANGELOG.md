@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.5] - 2026-11-26
+
+### Added
+
+- **Sovereign Seals (`Seed #1 — First Beyond the Walls` & `Founding Circle #2–#10`)**:
+  - `sanctum hive join` now receives and locally persists (`~/.sanctum/seals/sovereign-seal.json`, mode `0600`) an HMAC-SHA256 verifiable, zero-PII Sovereign Seal minted by `https://hive.sanctum.run` — reserving **`Seed #1 — First Beyond the Walls`** for the very first Mac outside the Founder's Fleet (`Seed #0`) and **`Founding Circle #2–#10`** for the next nine.
+  - `sanctum hive seal` (`--open`, `--verify CODE`, `--json`): renders your Obsidian & Gold Sovereign Seal in the terminal, exports a zero-dependency local vector SVG crest (`~/.sanctum/seals/sovereign-seal.svg`), and verifies any claim code against `hive.sanctum.run/verify-seal` with zero PII.
+  - `sanctum ui`: automatically unlocks the **Sovereign Gold Theme**, header crest badge, and one-click **"Download Sovereign SVG Seal"** export when a local Seal is present (never exposes private `claim_code` or `signature` to `/api/snapshot`).
+  - `sanctum bug-report`: automatically includes your public Hive Seal title (zero PII) so Seed #1 and Founding Circle beta reports stand out immediately.
+
 ## [1.0.4] - 2026-11-26
 
 ### Added

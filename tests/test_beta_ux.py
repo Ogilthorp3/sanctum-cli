@@ -15,6 +15,7 @@ if TYPE_CHECKING:
 
     import pytest
 
+from sanctum_cli import hive_pulse
 from sanctum_cli.cli import app
 from sanctum_cli.commands import bug_report as bug_report_cmd
 from sanctum_cli.commands import haus_cmd, ui_cmd
@@ -172,6 +173,112 @@ def test_ui_loopback_server_snapshot_and_csrf_guards(monkeypatch: pytest.MonkeyP
             )
             assert r_chat.status_code == 200
             assert r_chat.json()["reply"] == "echo:council-mlx:hi"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_sovereign_seal_mint_svg_ui_and_bug_report_privacy(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    state_file = tmp_path / "hive-pulse.json"
+    monkeypatch.setenv(hive_pulse.ENV_HIVE_STATE, str(state_file))
+    monkeypatch.setenv(hive_pulse.ENV_HIVE_URL, "https://hive.example.test")
+
+    fake_seal = {
+        "seat_number": 1,
+        "tier": "seed-1",
+        "title": "Seed #1 — First Beyond the Walls",
+        "short_badge": "SEED #1",
+        "motto": "First sovereign Mac to answer from beyond the Founder's Fleet.",
+        "minted_at": "2026-11-27T04:00:00.000Z",
+        "claim_code": "SEED1-ABCD-1234",
+        "signature": "a" * 64,
+        "public_hash": "0123456789abcdef",
+        "verify_url": "https://hive.sanctum.run/verify-seal?code=SEED1-ABCD-1234",
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/pulse":
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "hive_nodes": 4,
+                    "active_7d": 4,
+                    "newly_minted": True,
+                    "seal": fake_seal,
+                    "zero_pii": True,
+                },
+            )
+        if request.method == "GET" and request.url.path == "/verify-seal":
+            code = request.url.params.get("code")
+            if code == "SEED1-ABCD-1234":
+                return httpx.Response(
+                    200,
+                    json={
+                        "ok": True,
+                        "valid": True,
+                        "seat_number": 1,
+                        "tier": "seed-1",
+                        "title": fake_seal["title"],
+                        "chip": "Apple M4 Max",
+                        "memory_gb": 128,
+                        "country": "CA",
+                        "minted_date": "2026-11-27",
+                        "public_hash": fake_seal["public_hash"],
+                    },
+                )
+            return httpx.Response(404, json={"ok": True, "valid": False})
+        return httpx.Response(404, json={"ok": False})
+
+    transport = httpx.MockTransport(handler)
+    res = hive_pulse.join_hive(event="join", transport=transport)
+    assert res["ok"] is True
+    assert hive_pulse.seal_path().is_file()
+    assert hive_pulse.seal_svg_path().is_file()
+
+    svg_text = hive_pulse.seal_svg_path().read_text(encoding="utf-8")
+    assert svg_text.startswith("<?xml")
+    assert "Seed #1" in svg_text
+    assert "SEED1-ABCD-1234" not in svg_text  # private claim_code never burned into public SVG
+
+    # Verify remote claim code check
+    verified = hive_pulse.verify_seal_remote("seed1-abcd-1234", transport=transport)
+    assert verified["valid"] is True
+    assert verified["seat_number"] == 1
+
+    # Verify CLI `sanctum hive seal --json`
+    cli_seal = runner.invoke(app, ["hive", "seal", "--json"])
+    assert cli_seal.exit_code == 0, cli_seal.output
+    parsed_seal = json.loads(cli_seal.output)
+    assert parsed_seal["tier"] == "seed-1"
+
+    # Verify `sanctum bug-report` surfaces public title but NEVER leaks claim_code
+    monkeypatch.setattr(haus_cmd, "probe_core_services", lambda: {"proxyd (:4040 TLS)": True})
+    rep = bug_report_cmd.collect_redacted_report(run_self_test=False)
+    md = bug_report_cmd.render_markdown_report(rep)
+    assert "Seed #1 — First Beyond the Walls" in md
+    assert "SEED1-ABCD-1234" not in md
+
+    # Verify `sanctum ui` returns public seal (without claim_code) + serves /api/seal.svg
+    monkeypatch.setattr(haus_cmd, "probe_subscription_seats", lambda: {})
+    monkeypatch.setattr(ui_cmd, "_fetch_castellan_status", lambda: None)
+    server, _csrf = ui_cmd.create_ui_server(port=0)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with httpx.Client(timeout=5.0) as client:
+            snap = client.get(f"http://127.0.0.1:{port}/api/snapshot").json()
+            assert snap["seal"]["tier"] == "seed-1"
+            assert "claim_code" not in snap["seal"]
+            assert "signature" not in snap["seal"]
+
+            r_svg = client.get(f"http://127.0.0.1:{port}/api/seal.svg")
+            assert r_svg.status_code == 200
+            assert "image/svg+xml" in r_svg.headers["content-type"]
+            assert "<svg" in r_svg.text
     finally:
         server.shutdown()
         server.server_close()
