@@ -14,6 +14,7 @@ import httpx
 import pytest
 import yaml
 from cryptography import x509
+from cryptography.hazmat.primitives.asymmetric import ec
 from typer.testing import CliRunner
 
 if TYPE_CHECKING:
@@ -58,8 +59,17 @@ def test_mint_local_pki_and_tokens_permissions(tmp_path: Path) -> None:
         mode = stat.S_IMODE(paths[k].stat().st_mode)
         assert mode == 0o600, f"{k} mode={oct(mode)}"
 
-    # Server cert must have SANs for localhost, 127.0.0.1, ::1
+    # Server cert must have SANs for localhost, 127.0.0.1, ::1 and be ECDSA P-384 (zero RSA)
+    for cert_name in ("ca_cert", "server_cert", "client_cert"):
+        cert_obj = x509.load_pem_x509_certificate(paths[cert_name].read_bytes())
+        pub = cert_obj.public_key()
+        assert isinstance(pub, ec.EllipticCurvePublicKey), f"{cert_name} must be ECDSA, not RSA"
+        assert pub.curve.name == "secp384r1", f"{cert_name} curve={pub.curve.name}"
+
     srv = x509.load_pem_x509_certificate(paths["server_cert"].read_bytes())
+    cli = x509.load_pem_x509_certificate(paths["client_cert"].read_bytes())
+    assert (srv.not_valid_after_utc - srv.not_valid_before_utc).days <= 366
+    assert (cli.not_valid_after_utc - cli.not_valid_before_utc).days <= 366
     san = srv.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
     dns_names = san.get_values_for_type(x509.DNSName)
     ip_addrs = [str(ip) for ip in san.get_values_for_type(x509.IPAddress)]

@@ -30,10 +30,13 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
+import tempfile
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -63,6 +66,7 @@ if TYPE_CHECKING:
 __all__ = [
     "AutoresearchEvalGate",
     "BoundManifestVerifier",
+    "CompositeSlhDsaEd25519Signer",
     "Ed25519Signer",
     "EvalRunner",
     "LocalArtifactStore",
@@ -71,6 +75,7 @@ __all__ = [
     "VmRunner",
     "make_promote",
     "mlx_eval_runner",
+    "slh_dsa_available",
     "vm_airgap_runner",
 ]
 
@@ -133,6 +138,230 @@ class Ed25519Signer:
         except (InvalidSignature, ValueError):
             return False
         return True
+
+
+_SLH_COMPOSITE_PREFIX = "ed25519+slh-dsa-sha2-128s"
+_SLH_DSA_ALG = "SLH-DSA-SHA2-128s"
+
+
+def _find_pq_openssl() -> str | None:
+    """Return an ``openssl`` executable path supporting NIST FIPS 205 ``SLH-DSA-SHA2-128s``."""
+    candidates = [
+        "/opt/homebrew/opt/openssl@4/bin/openssl",
+        "/opt/homebrew/opt/openssl@3/bin/openssl",
+        "/opt/homebrew/bin/openssl",
+        shutil.which("openssl") or "",
+    ]
+    seen: set[str] = set()
+    for cand in candidates:
+        if not cand or cand in seen or not Path(cand).is_file():
+            continue
+        seen.add(cand)
+        try:
+            proc = subprocess.run(
+                [cand, "list", "-signature-algorithms"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            if proc.returncode == 0 and _SLH_DSA_ALG in proc.stdout:
+                return cand
+        except (OSError, subprocess.SubprocessError):
+            continue
+    return None
+
+
+def slh_dsa_available() -> bool:
+    """Return True when the host OpenSSL supports NIST FIPS 205 ``SLH-DSA-SHA2-128s``."""
+    return _find_pq_openssl() is not None
+
+
+def _write_mode_0600(path: Path, data: bytes) -> None:
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(data)
+
+
+class CompositeSlhDsaEd25519Signer:
+    """Hash-based post-quantum composite :class:`~sanctum_cli.mesh.identity.Signer`.
+
+    Combines **Ed25519** (ECC) + **NIST FIPS 205 ``SLH-DSA-SHA2-128s``** (stateless
+    hash-based signatures backed solely by SHA-256). Both signatures are produced
+    on :meth:`sign` and BOTH must verify strictly on :meth:`verify` — surviving
+    S1 (RSA), S2 (ECC), S3 (Lattices), AND S4 (simultaneous collapse of RSA, ECC,
+    and Lattices).
+
+    Encoding (opaque strings across the ``Signer`` seam, zero key logging):
+    ``"ed25519+slh-dsa-sha2-128s:<ed25519_hex>:<slh_dsa_hex>"``.
+    """
+
+    def __init__(self, openssl_bin: str | None = None) -> None:
+        self._ed = Ed25519Signer()
+        self._openssl = openssl_bin
+
+    def _resolve_openssl(self) -> str:
+        if self._openssl:
+            return self._openssl
+        found = _find_pq_openssl()
+        if not found:
+            msg = f"OpenSSL with {_SLH_DSA_ALG} (FIPS 205) support is required"
+            raise LocalError(msg, fix="install OpenSSL 3.5+ / 4.x via Homebrew (`brew install openssl`)")
+        self._openssl = found
+        return found
+
+    def generate(self) -> tuple[str, str]:
+        """Generate a composite ``(public_key, private_key)`` pair (Ed25519 + SLH-DSA-SHA2-128s)."""
+        openssl = self._resolve_openssl()
+        ed_pub, ed_priv = self._ed.generate()
+        with tempfile.TemporaryDirectory(prefix="sanctum-slh-") as td:
+            td_path = Path(td)
+            priv_der = td_path / "slh.priv.der"
+            pub_der = td_path / "slh.pub.der"
+            try:
+                subprocess.run(
+                    [
+                        openssl,
+                        "genpkey",
+                        "-algorithm",
+                        _SLH_DSA_ALG,
+                        "-outform",
+                        "DER",
+                        "-out",
+                        str(priv_der),
+                    ],
+                    capture_output=True,
+                    check=True,
+                    timeout=30,
+                )
+                priv_der.chmod(0o600)
+                subprocess.run(
+                    [
+                        openssl,
+                        "pkey",
+                        "-inform",
+                        "DER",
+                        "-in",
+                        str(priv_der),
+                        "-pubout",
+                        "-outform",
+                        "DER",
+                        "-out",
+                        str(pub_der),
+                    ],
+                    capture_output=True,
+                    check=True,
+                    timeout=30,
+                )
+                slh_priv_hex = priv_der.read_bytes().hex()
+                slh_pub_hex = pub_der.read_bytes().hex()
+            except (OSError, subprocess.SubprocessError) as exc:
+                msg = f"FIPS 205 {_SLH_DSA_ALG} key generation failed"
+                raise LocalError(msg, fix="verify `openssl genpkey -algorithm SLH-DSA-SHA2-128s`") from exc
+        return (
+            f"{_SLH_COMPOSITE_PREFIX}:{ed_pub}:{slh_pub_hex}",
+            f"{_SLH_COMPOSITE_PREFIX}:{ed_priv}:{slh_priv_hex}",
+        )
+
+    def sign(self, private_key: str, message: bytes) -> str:
+        """Sign ``message`` with BOTH Ed25519 and FIPS 205 ``SLH-DSA-SHA2-128s``."""
+        parts = private_key.split(":")
+        if len(parts) != 3 or parts[0] != _SLH_COMPOSITE_PREFIX:
+            raise ValueError("invalid composite SLH-DSA private key encoding")
+        _, ed_priv, slh_priv_hex = parts
+        openssl = self._resolve_openssl()
+        ed_sig = self._ed.sign(ed_priv, message)
+        with tempfile.TemporaryDirectory(prefix="sanctum-slh-") as td:
+            td_path = Path(td)
+            priv_der = td_path / "slh.priv.der"
+            msg_file = td_path / "msg.bin"
+            sig_file = td_path / "msg.sig"
+            _write_mode_0600(priv_der, bytes.fromhex(slh_priv_hex))
+            msg_file.write_bytes(message)
+            try:
+                subprocess.run(
+                    [
+                        openssl,
+                        "pkeyutl",
+                        "-sign",
+                        "-keyform",
+                        "DER",
+                        "-inkey",
+                        str(priv_der),
+                        "-rawin",
+                        "-in",
+                        str(msg_file),
+                        "-out",
+                        str(sig_file),
+                    ],
+                    capture_output=True,
+                    check=True,
+                    timeout=30,
+                )
+                slh_sig_hex = sig_file.read_bytes().hex()
+            except (OSError, subprocess.SubprocessError) as exc:
+                msg = f"FIPS 205 {_SLH_DSA_ALG} signing failed"
+                raise LocalError(msg, fix="verify OpenSSL FIPS 205 provider health") from exc
+        return f"{_SLH_COMPOSITE_PREFIX}:{ed_sig}:{slh_sig_hex}"
+
+    def verify(self, public_key: str, message: bytes, signature: str) -> bool:
+        """Strictly verify BOTH Ed25519 and FIPS 205 ``SLH-DSA-SHA2-128s`` signatures."""
+        pub_parts = public_key.split(":")
+        sig_parts = signature.split(":")
+        if (
+            len(pub_parts) != 3
+            or len(sig_parts) != 3
+            or pub_parts[0] != _SLH_COMPOSITE_PREFIX
+            or sig_parts[0] != _SLH_COMPOSITE_PREFIX
+        ):
+            return False
+        _, ed_pub, slh_pub_hex = pub_parts
+        _, ed_sig, slh_sig_hex = sig_parts
+
+        # 1. Classical Ed25519 half must verify strictly.
+        if not self._ed.verify(ed_pub, message, ed_sig):
+            return False
+
+        # 2. Hash-based FIPS 205 SLH-DSA-SHA2-128s half must verify strictly.
+        try:
+            openssl = self._resolve_openssl()
+            slh_pub_bytes = bytes.fromhex(slh_pub_hex)
+            slh_sig_bytes = bytes.fromhex(slh_sig_hex)
+        except (LocalError, ValueError):
+            return False
+
+        with tempfile.TemporaryDirectory(prefix="sanctum-slh-") as td:
+            td_path = Path(td)
+            pub_der = td_path / "slh.pub.der"
+            msg_file = td_path / "msg.bin"
+            sig_file = td_path / "msg.sig"
+            pub_der.write_bytes(slh_pub_bytes)
+            msg_file.write_bytes(message)
+            sig_file.write_bytes(slh_sig_bytes)
+            try:
+                proc = subprocess.run(
+                    [
+                        openssl,
+                        "pkeyutl",
+                        "-verify",
+                        "-pubin",
+                        "-keyform",
+                        "DER",
+                        "-inkey",
+                        str(pub_der),
+                        "-rawin",
+                        "-in",
+                        str(msg_file),
+                        "-sigfile",
+                        str(sig_file),
+                    ],
+                    capture_output=True,
+                    timeout=30,
+                    check=False,
+                )
+            except (OSError, subprocess.SubprocessError):
+                return False
+            return proc.returncode == 0
 
 
 # ─── content store ───────────────────────────────────────────────────────
@@ -552,14 +781,16 @@ def make_promote(
     return _promote
 
 
-def _static_conformance() -> tuple[Signer, ManifestVerifier, EvalGate, Sandbox]:
+def _static_conformance() -> tuple[Signer, Signer, ManifestVerifier, EvalGate, Sandbox]:
     """Type-only guard (never called): fail ``mypy --strict`` if an adapter's
     signature drifts from the injected seam it must satisfy."""
     store = LocalArtifactStore(Path())
     signer = Ed25519Signer()
+    pq_signer = CompositeSlhDsaEd25519Signer()
     return (
         signer,
-        BoundManifestVerifier(store, signer.verify),
+        pq_signer,
+        BoundManifestVerifier(store, pq_signer.verify),
         AutoresearchEvalGate(store, mlx_eval_runner),
         VmAirgapSandbox(store, lambda adapter: vm_airgap_runner(adapter, host="vm")),
     )

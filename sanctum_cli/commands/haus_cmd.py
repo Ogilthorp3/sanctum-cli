@@ -35,7 +35,7 @@ import typer
 import yaml
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 from rich.console import Console
 from rich.panel import Panel
@@ -242,8 +242,14 @@ def _write_secret_file(path: Path, content: bytes, mode: int = 0o600) -> None:
         raise
 
 
-def mint_local_pki(certs_dir: Path, *, force: bool = False) -> dict[str, Path]:
-    """Mint a unique per-machine mTLS CA + loopback server/client certs (idempotent)."""
+def mint_local_pki(
+    certs_dir: Path,
+    *,
+    force: bool = False,
+    leaf_days: int = 365,
+    ca_days: int = 1825,
+) -> dict[str, Path]:
+    """Mint a unique per-machine ECDSA P-384 mTLS CA + loopback certs (idempotent, zero RSA)."""
     paths = {
         "ca_cert": certs_dir / "ca.crt",
         "ca_key": certs_dir / "ca.key",
@@ -260,10 +266,11 @@ def mint_local_pki(certs_dir: Path, *, force: bool = False) -> dict[str, Path]:
     certs_dir.mkdir(parents=True, exist_ok=True)
     now = dt.datetime.now(dt.UTC)
     valid_from = now - dt.timedelta(minutes=5)
-    valid_to = now + dt.timedelta(days=3650)
+    ca_valid_to = now + dt.timedelta(days=ca_days)
+    leaf_valid_to = now + dt.timedelta(days=leaf_days)
 
-    # 1. Local Root CA
-    ca_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    # 1. Local Root CA (ECDSA P-384 / SHA-384 — zero RSA)
+    ca_key = ec.generate_private_key(ec.SECP384R1())
     ca_subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Sanctum Local CA")])
     ca_cert = (
         x509.CertificateBuilder()
@@ -272,7 +279,7 @@ def mint_local_pki(certs_dir: Path, *, force: bool = False) -> dict[str, Path]:
         .public_key(ca_key.public_key())
         .serial_number(x509.random_serial_number())
         .not_valid_before(valid_from)
-        .not_valid_after(valid_to)
+        .not_valid_after(ca_valid_to)
         .add_extension(x509.BasicConstraints(ca=True, path_length=0), critical=True)
         .add_extension(
             x509.KeyUsage(
@@ -288,11 +295,11 @@ def mint_local_pki(certs_dir: Path, *, force: bool = False) -> dict[str, Path]:
             ),
             critical=True,
         )
-        .sign(ca_key, hashes.SHA256())
+        .sign(ca_key, hashes.SHA384())
     )
 
-    # 2. Loopback Server Cert (sanctum-mlx :1337 + proxyd :4040)
-    srv_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    # 2. Loopback Server Cert (sanctum-mlx :1337 + proxyd :4040 — 365-day leaf lifetime)
+    srv_key = ec.generate_private_key(ec.SECP384R1())
     srv_cert = (
         x509.CertificateBuilder()
         .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "localhost")]))
@@ -300,8 +307,22 @@ def mint_local_pki(certs_dir: Path, *, force: bool = False) -> dict[str, Path]:
         .public_key(srv_key.public_key())
         .serial_number(x509.random_serial_number())
         .not_valid_before(valid_from)
-        .not_valid_after(valid_to)
+        .not_valid_after(leaf_valid_to)
         .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=True,
+                key_cert_sign=False,
+                crl_sign=False,
+                content_commitment=False,
+                key_encipherment=False,
+                data_encipherment=False,
+                key_agreement=False,
+                encipher_only=False,
+                decipher_only=False,
+            ),
+            critical=True,
+        )
         .add_extension(
             x509.SubjectAlternativeName(
                 [
@@ -316,11 +337,11 @@ def mint_local_pki(certs_dir: Path, *, force: bool = False) -> dict[str, Path]:
             x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]),
             critical=False,
         )
-        .sign(ca_key, hashes.SHA256())
+        .sign(ca_key, hashes.SHA384())
     )
 
-    # 3. Client Cert (proxyd → sanctum-mlx mTLS, PKCS#8 key)
-    cli_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    # 3. Client Cert (proxyd → sanctum-mlx mTLS, PKCS#8 key — 365-day leaf lifetime)
+    cli_key = ec.generate_private_key(ec.SECP384R1())
     cli_cert = (
         x509.CertificateBuilder()
         .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "sanctum-client")]))
@@ -328,19 +349,33 @@ def mint_local_pki(certs_dir: Path, *, force: bool = False) -> dict[str, Path]:
         .public_key(cli_key.public_key())
         .serial_number(x509.random_serial_number())
         .not_valid_before(valid_from)
-        .not_valid_after(valid_to)
+        .not_valid_after(leaf_valid_to)
         .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=True,
+                key_cert_sign=False,
+                crl_sign=False,
+                content_commitment=False,
+                key_encipherment=False,
+                data_encipherment=False,
+                key_agreement=False,
+                encipher_only=False,
+                decipher_only=False,
+            ),
+            critical=True,
+        )
         .add_extension(
             x509.ExtendedKeyUsage([ExtendedKeyUsageOID.CLIENT_AUTH]),
             critical=False,
         )
-        .sign(ca_key, hashes.SHA256())
+        .sign(ca_key, hashes.SHA384())
     )
 
     def _pem_cert(c: x509.Certificate) -> bytes:
         return c.public_bytes(serialization.Encoding.PEM)
 
-    def _pem_key(k: rsa.RSAPrivateKey) -> bytes:
+    def _pem_key(k: ec.EllipticCurvePrivateKey) -> bytes:
         return k.private_bytes(
             serialization.Encoding.PEM,
             serialization.PrivateFormat.PKCS8,

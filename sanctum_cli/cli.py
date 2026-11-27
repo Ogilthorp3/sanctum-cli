@@ -64,6 +64,7 @@ from sanctum_cli.commands import wizard as wizard_cmd
 from sanctum_cli.commands import (
     yoda as yoda_cmd,
 )
+from sanctum_cli.commands.crypto_cmd import crypto_app
 from sanctum_cli.commands.link import link_app
 from sanctum_cli.commands.mesh import mesh_app
 from sanctum_cli.commands.module import module_app
@@ -84,6 +85,7 @@ app = typer.Typer(
 
 config_app = typer.Typer(help="Configuration commands.")
 app.add_typer(config_app, name="config")
+app.add_typer(crypto_app, name="crypto")
 
 
 @config_app.command(
