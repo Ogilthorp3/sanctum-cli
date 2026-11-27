@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.4] - 2026-11-26
+
+### Added
+
+- `sanctum ui`: local zero-cloud web dashboard (`127.0.0.1:1119`, CSRF-protected) surfacing live health of all 12 `sanctum-rs` Rust services, Castellan unified-memory headroom, `$0` subscription proxy status, disk snapshot, one-click redacted bug-report copy, and interactive local Dragon/Council chat over loopback TLS.
+- `sanctum bug-report`: one-command diagnostic collector (`--summary`, `--no-open`, `--json`) that scrubs API keys, tokens, emails, phone numbers, home usernames, and private/tailnet IPs, copies the Markdown report to the clipboard, and opens a pre-filled GitHub issue.
+- `sanctum haus seats`: inspect and enable `$0` flat-rate subscription proxies (`sanctum-grok-proxy :4200`, `sanctum-agy-proxy :6543`, Claude Max `:3456`) wired directly into `proxyd` with local `council-mlx` fallbacks for full multi-family Jedi Council neurodiversity at `$0` API spend.
+- Pre-compiled macOS Apple Silicon Homebrew bottles (`brew install` / `brew upgrade` in ~4 seconds instead of compiling Rust wheels from source).
+
+### Fixed
+
+- `sanctum haus status` and `mlx_health()` now resolve both fresh-hub (`certs/client.crt`) and per-service (`certs/clients/*.crt`) mTLS client certificate layouts.
+
 ## [1.0.3] - 2026-11-26
 
 ### Added

@@ -22,6 +22,9 @@ from sanctum_cli.commands import agent as agent_cmd
 from sanctum_cli.commands import backup as backup_cmd
 from sanctum_cli.commands import brainstorm as brainstorm_cmd
 from sanctum_cli.commands import bridge as bridge_cmd
+from sanctum_cli.commands import (
+    bug_report as bug_report_cmd,
+)
 from sanctum_cli.commands import chat as chat_cmd
 from sanctum_cli.commands import cloud as cloud_cmd
 from sanctum_cli.commands import code as code_cmd
@@ -34,6 +37,7 @@ from sanctum_cli.commands import (
     init_cmd,
     service_user_cmd,
     status,
+    ui_cmd,
     vault_armor_cmd,
 )
 from sanctum_cli.commands import council as council_cmd
@@ -385,6 +389,51 @@ def doctor_top(
     except SanctumError as exc:
         _report(exc)
         raise typer.Exit(code=int(exc.exit_code)) from exc
+
+
+@app.command(
+    "bug-report",
+    help="Generate a secret-redacted diagnostic report and open a pre-filled GitHub issue.",
+)
+def bug_report_top(
+    summary: Annotated[
+        str, typer.Option("--summary", "-m", help="Short description of what broke.")
+    ] = "",
+    no_open: Annotated[
+        bool, typer.Option("--no-open", help="Print report & URL without opening a browser.")
+    ] = False,
+    no_copy: Annotated[
+        bool, typer.Option("--no-copy", help="Do not copy the report to the clipboard.")
+    ] = False,
+    skip_self_test: Annotated[
+        bool, typer.Option("--skip-self-test", help="Skip running self-test (faster).")
+    ] = False,
+    json_output: Annotated[
+        bool, typer.Option("--json", help="Emit redacted report as JSON.")
+    ] = False,
+) -> None:
+    bug_report_cmd.bug_report_command(
+        summary=summary,
+        no_open=no_open,
+        no_copy=no_copy,
+        skip_self_test=skip_self_test,
+        json_output=json_output,
+    )
+
+
+@app.command(
+    "ui",
+    help="Launch the local zero-cloud Sanctum web dashboard (127.0.0.1 only).",
+)
+def ui_top(
+    port: Annotated[
+        int, typer.Option("--port", "-p", help="Loopback port for local dashboard.")
+    ] = ui_cmd.DEFAULT_UI_PORT,
+    no_open: Annotated[
+        bool, typer.Option("--no-open", help="Do not auto-open the browser.")
+    ] = False,
+) -> None:
+    ui_cmd.ui_command(port=port, no_open=no_open)
 
 
 @app.command(

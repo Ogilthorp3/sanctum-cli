@@ -974,18 +974,136 @@ def _probe_http(url: str, *, ca_cert: Path | None = None, client_cert: tuple[Pat
         return False
 
 
+def _resolve_client_cert(certs_dir: Path) -> tuple[Path, Path] | None:
+    """Locate an mTLS client cert+key pair (supports both fresh hub and per-service operator layouts)."""
+    direct_crt = certs_dir / "client.crt"
+    direct_key = certs_dir / "client.key"
+    if direct_crt.is_file() and direct_key.is_file():
+        return (direct_crt, direct_key)
+    clients_dir = certs_dir / "clients"
+    if clients_dir.is_dir():
+        for crt in sorted(clients_dir.glob("*.crt")):
+            key = crt.with_suffix(".key")
+            if key.is_file():
+                return (crt, key)
+    return None
+
+
 def proxyd_health(*, certs_dir: Path | None = None) -> bool:
     cdir = certs_dir or (sanctum_root() / "certs")
     return _probe_http("https://127.0.0.1:4040/health", ca_cert=cdir / "ca.crt")
 
 
-def mlx_health(*, certs_dir: Path | None = None) -> bool:
+def mlx_health(*, certs_dir: Path | None = None, port: int = 1337) -> bool:
     cdir = certs_dir or (sanctum_root() / "certs")
+    cli_cert = _resolve_client_cert(cdir)
     return _probe_http(
-        "https://127.0.0.1:1337/health",
+        f"https://127.0.0.1:{port}/health",
         ca_cert=cdir / "ca.crt",
-        client_cert=(cdir / "client.crt", cdir / "client.key"),
+        client_cert=cli_cert,
     )
+
+
+def probe_core_services(*, certs_dir: Path | None = None) -> dict[str, bool]:
+    """Probe all 12 core Sanctum Rust daemons on loopback."""
+    cdir = certs_dir or (sanctum_root() / "certs")
+    ca = cdir / "ca.crt"
+    cli_cert = _resolve_client_cert(cdir)
+    return {
+        "sanctum-mlx (:1337 mTLS)": _probe_http("https://127.0.0.1:1337/health", ca_cert=ca, client_cert=cli_cert),
+        "mlx-coder (:3301 mTLS)": _probe_http("https://127.0.0.1:3301/health", ca_cert=ca, client_cert=cli_cert),
+        "proxyd (:4040 TLS)": _probe_http("https://127.0.0.1:4040/health", ca_cert=ca),
+        "sanctum-presidio (:5002)": _probe_http("http://127.0.0.1:5002/health"),
+        "sanctum-memory (:18097)": _probe_http("http://127.0.0.1:18097/health"),
+        "sanctum-force-flow (:4077)": _probe_http("http://127.0.0.1:4077/health"),
+        "sanctum-msg-bus (:4076)": _probe_http("http://127.0.0.1:4076/health"),
+        "sanctum-chitti (:2188)": _probe_http("http://127.0.0.1:2188/health"),
+        "sanctum-thalamus (:1988)": _probe_http("http://127.0.0.1:1988/health"),
+        "sanctum-watchdog (:2187)": _probe_http("http://127.0.0.1:2187/health"),
+        "castellan (:2189)": _probe_http("http://127.0.0.1:2189/status"),
+        "sanctum-chi (:7777)": _probe_http("http://127.0.0.1:7777/health"),
+    }
+
+
+def probe_subscription_seats() -> dict[str, dict[str, Any]]:
+    """Probe the three $0 flat-rate subscription proxies (Claude Max, Grok OAuth, Gemini AGY)."""
+    return {
+        "claude-max": {
+            "port": 3456,
+            "seat": "council-max-thinking",
+            "up": _probe_http("http://127.0.0.1:3456/health") or _probe_http("http://127.0.0.1:3456/v1/models"),
+        },
+        "grok-oauth": {
+            "port": 4200,
+            "seat": "council-finance",
+            "up": _probe_http("http://127.0.0.1:4200/health"),
+        },
+        "gemini-agy": {
+            "port": 6543,
+            "seat": "gemini-31-pro",
+            "up": _probe_http("http://127.0.0.1:6543/health") or _probe_http("http://127.0.0.1:6543/v1/models"),
+        },
+    }
+
+
+def wire_subscription_seat_in_proxyd(
+    *,
+    config_path: Path,
+    seat: str,
+) -> bool:
+    """Wire a $0 local subscription proxy seat (grok|gemini|claude) into portable proxyd config.yaml."""
+    if not config_path.is_file():
+        return False
+    cfg = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    if not isinstance(cfg, dict):
+        return False
+    models = cfg.setdefault("models", [])
+    aliases = cfg.setdefault("model_aliases", {})
+    fallbacks = cfg.setdefault("fallbacks", {})
+    if not isinstance(models, list) or not isinstance(aliases, dict) or not isinstance(fallbacks, dict):
+        return False
+
+    seat_defs: dict[str, dict[str, Any]] = {
+        "grok": {
+            "name": "council-finance",
+            "provider": "local",
+            "api_model": "grok-best",
+            "api_base": "http://127.0.0.1:4200",
+            "max_tokens": 8192,
+            "context_window": 500000,
+            "ttfb_timeout_secs": 600,
+            "read_timeout_secs": 900,
+        },
+        "gemini": {
+            "name": "gemini-31-pro",
+            "provider": "local",
+            "api_model": "gemini-4-carbon",
+            "api_base": "http://127.0.0.1:6543",
+            "max_tokens": 16384,
+            "ttfb_timeout_secs": 300,
+            "read_timeout_secs": 600,
+        },
+        "claude": {
+            "name": "council-max-thinking",
+            "provider": "local",
+            "api_model": "opus",
+            "api_base": "http://127.0.0.1:3456",
+            "max_tokens": 16384,
+            "ttfb_timeout_secs": 600,
+            "read_timeout_secs": 900,
+        },
+    }
+    entry = seat_defs.get(seat)
+    if entry is None:
+        return False
+
+    name = str(entry["name"])
+    aliases.pop(name, None)
+    models[:] = [m for m in models if not (isinstance(m, dict) and m.get("name") == name)]
+    models.append(entry)
+    fallbacks[name] = ["council-mlx"]
+    config_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+    return True
 
 
 def post_r2d2_heartbeat(
@@ -1304,25 +1422,8 @@ def haus_status(
     json_output: Annotated[bool, typer.Option("--json", help="Emit JSON.")] = False,
 ) -> None:
     st = load_rust_state()
-    certs_dir = sanctum_root() / "certs"
     bin_dir = sanctum_root() / "bin"
-    ca = certs_dir / "ca.crt"
-    cli_cert = (certs_dir / "client.crt", certs_dir / "client.key")
-
-    probes = {
-        "sanctum-mlx (:1337 mTLS)": _probe_http("https://127.0.0.1:1337/health", ca_cert=ca, client_cert=cli_cert),
-        "mlx-coder (:3301 mTLS)": _probe_http("https://127.0.0.1:3301/health", ca_cert=ca, client_cert=cli_cert),
-        "proxyd (:4040 TLS)": _probe_http("https://127.0.0.1:4040/health", ca_cert=ca),
-        "sanctum-presidio (:5002)": _probe_http("http://127.0.0.1:5002/health"),
-        "sanctum-memory (:18097)": _probe_http("http://127.0.0.1:18097/health"),
-        "sanctum-force-flow (:4077)": _probe_http("http://127.0.0.1:4077/health"),
-        "sanctum-msg-bus (:4076)": _probe_http("http://127.0.0.1:4076/health"),
-        "sanctum-chitti (:2188)": _probe_http("http://127.0.0.1:2188/health"),
-        "sanctum-thalamus (:1988)": _probe_http("http://127.0.0.1:1988/health"),
-        "sanctum-watchdog (:2187)": _probe_http("http://127.0.0.1:2187/health"),
-        "castellan (:2189)": _probe_http("http://127.0.0.1:2189/status"),
-        "sanctum-chi (:7777)": _probe_http("http://127.0.0.1:7777/health"),
-    }
+    probes = probe_core_services()
     latest = fetch_latest_rust_release()
     installed_bins = sorted(
         p.name for p in bin_dir.iterdir() if p.is_file() and not p.name.startswith(".")
@@ -1379,6 +1480,104 @@ def haus_start() -> None:
             subprocess.run(["launchctl", "kickstart", "-k", f"gui/{uid}/{label}"], capture_output=True, check=False)
             started += 1
     console.print(f"[green]✓[/] Started/reloaded {started} Sanctum Rust services.")
+
+
+@app.command(
+    "seats",
+    help="Inspect or enable $0 flat-rate subscription proxies (Grok :4200, Gemini :6543, Claude Max :3456).",
+)
+def haus_seats(
+    enable: Annotated[
+        str | None,
+        typer.Option("--enable", help="Enable a $0 subscription seat: grok | gemini | claude | all."),
+    ] = None,
+    force: Annotated[
+        bool,
+        typer.Option("--force", help="Allow modifying proxyd config even on an operator haus."),
+    ] = False,
+    json_output: Annotated[bool, typer.Option("--json", help="Emit JSON.")] = False,
+) -> None:
+    if enable:
+        if is_operator_haus() and not force:
+            console.print(
+                "[yellow]Operator haus guard:[/] skipping proxyd config mutation (pass `--force` to override)."
+            )
+            raise typer.Exit(code=0)
+
+        targets = ["grok", "gemini", "claude"] if enable.strip().lower() == "all" else [enable.strip().lower()]
+        home = Path.home()
+        bin_dir = sanctum_root() / "bin"
+        log_dir = sanctum_root() / "logs"
+        agents_dir = home / "Library" / "LaunchAgents"
+        cfg_path = sanctum_root() / "sanctum-proxy" / "config.yaml"
+        base_env = {
+            "HOME": str(home),
+            "PATH": f"{bin_dir}:{home / '.local' / 'bin'}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+        }
+        specs: list[dict[str, Any]] = []
+        for t in targets:
+            if t == "grok" and (bin_dir / "sanctum-grok-proxy").is_file():
+                specs.append(
+                    {
+                        "Label": "haus.sanctum.grok-oauth-proxy",
+                        "ProgramArguments": [str(bin_dir / "sanctum-grok-proxy")],
+                        "EnvironmentVariables": {**base_env, "GROK_OAUTH_PROXY_PORT": "4200"},
+                        "RunAtLoad": True,
+                        "KeepAlive": True,
+                        "ProcessType": "Standard",
+                        "StandardOutPath": str(log_dir / "grok-oauth-proxy.log"),
+                        "StandardErrorPath": str(log_dir / "grok-oauth-proxy.log"),
+                    }
+                )
+            elif t == "gemini" and (bin_dir / "sanctum-agy-proxy").is_file():
+                specs.append(
+                    {
+                        "Label": "haus.sanctum.agy-proxy",
+                        "ProgramArguments": [str(bin_dir / "sanctum-agy-proxy")],
+                        "EnvironmentVariables": {
+                            **base_env,
+                            "AGY_PROXY_HOST": "127.0.0.1",
+                            "AGY_PROXY_PORT": "6543",
+                            "AGY_PROXY_CONCURRENCY": "1",
+                        },
+                        "RunAtLoad": True,
+                        "KeepAlive": True,
+                        "ProcessType": "Standard",
+                        "StandardOutPath": str(log_dir / "agy-proxy.log"),
+                        "StandardErrorPath": str(log_dir / "agy-proxy.log"),
+                    }
+                )
+            wired = wire_subscription_seat_in_proxyd(config_path=cfg_path, seat=t)
+            console.print(
+                f"  [green]✓[/] Seat [bold]{t}[/]: "
+                + ("wired into proxyd config.yaml ($0 sub, council-mlx fallback)" if wired else "proxyd config.yaml not found (run `sanctum haus install` first)")
+            )
+        if specs:
+            written = write_and_bootstrap_launchagents(specs, agents_dir=agents_dir, boot=True)
+            console.print(f"  [green]✓[/] Bootstrapped {len(written)} Rust subscription proxy LaunchAgent(s)")
+
+    seats = probe_subscription_seats()
+    if json_output:
+        print(json.dumps(seats, indent=2))
+        return
+
+    tbl = Table(title="Sanctum $0 Subscription Seats", show_header=True, header_style="bold")
+    tbl.add_column("Proxy")
+    tbl.add_column("Port", justify="right")
+    tbl.add_column("Council Seat")
+    tbl.add_column("State", justify="right")
+    for name, info in seats.items():
+        tbl.add_row(
+            name,
+            f":{info['port']}",
+            str(info["seat"]),
+            "[green]LIVE[/]" if info["up"] else "[dim]offline[/]",
+        )
+    console.print(tbl)
+    console.print(
+        "[dim]Enable any seat with `sanctum haus seats --enable grok|gemini|claude|all` "
+        "(zero per-token API fees; falls back to local sanctum-mlx).[/]"
+    )
 
 
 @app.command("heartbeat", help="Post an R2D2 supervisor cycle heartbeat to chitti (:2188).")
