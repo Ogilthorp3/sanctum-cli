@@ -426,9 +426,22 @@ def status_command(*, json_output: bool, oneline: bool) -> None:
         render_table(snap)
         if sys.stdin.isatty() and sys.stdout.isatty():
             newer = hive_pulse.maybe_check_update()
+            notes: list[str] = []
             if newer:
+                notes.append(f"CLI v{newer}")
+            state = hive_pulse.load_state()
+            cached_dragon = str(state.get("cached_dragon_tag") or "").strip()
+            dragon_mf_path = Path.home() / ".sanctum" / "dragon" / "manifest.json"
+            if cached_dragon and dragon_mf_path.is_file():
+                try:
+                    cur_d = str(json.loads(dragon_mf_path.read_text(encoding="utf-8")).get("release_tag") or "")
+                    if cur_d and cur_d != cached_dragon:
+                        notes.append(f"Dragon {cached_dragon}")
+                except (OSError, json.JSONDecodeError):
+                    pass
+            if notes:
                 console.print(
-                    f"[dim]update available: v{newer} "
+                    f"[dim]update available: {' · '.join(notes)} "
                     "(run `sanctum update` · opt out: SANCTUM_NO_UPDATE_CHECK=1)[/]"
                 )
     hive_pulse.maybe_heartbeat("status")

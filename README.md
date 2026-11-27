@@ -6,7 +6,7 @@ One terminal binary, `sanctum`, that is the unified front door to a Sanctum host
 
 ## Status
 
-**v1.0.1, beta. We're looking for beta users.** Installable from the public
+**v1.0.2, beta. We're looking for beta users.** Installable from the public
 Homebrew tap. A person who isn't the author can go from a fresh Mac to encrypted,
 verified cloud backups in minutes with a single command. Try it and tell us what
 broke or what you missed: [open an issue](https://github.com/Ogilthorp3/sanctum-cli/issues).
@@ -25,7 +25,9 @@ The beta-safe command set runs on any Mac:
 | `sanctum net check / optimize / speedtest` | NAT/DMZ topology wizard + bandwidth probe | ✅ |
 | `sanctum config validate` | Schema-check `instance.yaml` with a precise pointer | ✅ |
 | `sanctum keychain` / `keys backup` | Inspect/rotate + export Keychain-only credentials | ✅ |
-| `sanctum module` / `logs` / `update` | Module manifests, log tail, brew-gated self-update | ✅ |
+| `sanctum module` / `logs` / `update` | Module manifests, log tail, unified one-command update (CLI + Dragon + Yoda/Signal) | ✅ |
+| `sanctum dragon install / chat / start / update` | Install, run, and update the local Apple Silicon Dragon (`dragon-2` champion on 32 GB+, 9B tier on 16 GB) | ✅ |
+| `sanctum yoda setup / status / chat / update` | Guided Yoda on Signal (`signal-cli` + OpenClaw + `@openclaw/signal` + Dragon) | ✅ |
 | `sanctum hive join / leave / stats` | Opt-in zero-PII Hive counter (`hive.sanctum.run`; disable daily version check via `SANCTUM_NO_UPDATE_CHECK=1`) | ✅ |
 | Sigstore release signing | Keyless OIDC cosign bundles + SLSA build provenance (`release.yml`) | ✅ |
 

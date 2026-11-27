@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-11-26
+
+### Added
+
+- `sanctum dragon install | chat | serve | start | stop | status | update`: one-command installer and updater for the Jedi-Trials-verified local Sanctum Dragon (`dragon-2` champion `qwen-haus-dragon-193d2d7407ec` + `mlx-lm 0.32.2` on 32 GB+ Macs, automatic `Qwen3.5-9B-4bit` tier on 16 GB Macs, strict SHA-256 verification and ZipSlip protection).
+- `sanctum yoda setup | status | chat | update`: guided Yoda-on-Signal installer (`signal-cli` + `openclaw@latest` + `@openclaw/signal` + isolated `sanctum-yoda` profile + LaunchAgent), with clear dedicated-bot-number guidance and an operator-haus guard so production hubs are never touched.
+- Unified `sanctum update`: upgrades `sanctum-cli` via Homebrew plus any installed Dragon champion (`dragon-*` + `mlx-lm`) and Yoda/Signal stack (`signal-cli` + `openclaw@latest`), gated by `sanctum self-test` (use `--cli-only` to skip optional components).
+- `sanctum status` now flags both newer `sanctum-cli` and newer Dragon champion releases from `https://hive.sanctum.run/latest.json`, and Hive Pulse anonymously reports `dragon` / `yoda-signal` module slugs when opted in.
+
 ## [1.0.1] - 2026-11-26
 
 ### Added

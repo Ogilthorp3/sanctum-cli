@@ -115,6 +115,13 @@ def detect_active_modules() -> list[str]:
         modules.append("proxyd")
     if (sanctum_dir / "bin" / "sanctum-mlx").is_file():
         modules.append("mlx")
+    if (sanctum_dir / "dragon" / "manifest.json").is_file():
+        modules.append("dragon")
+    if (
+        (sanctum_dir / "state" / "yoda-signal.json").is_file()
+        or (sanctum_dir / "launchagents" / "live" / "haus.sanctum.signal-cli.plist").is_file()
+    ):
+        modules.append("yoda-signal")
     if (sanctum_dir / "services" / "home-assistant.yaml").is_file():
         modules.append("home-assistant")
     if (sanctum_dir / "memory").is_dir():
@@ -308,9 +315,12 @@ def maybe_check_update(
             if r.status_code == 200:
                 data = r.json()
                 latest = str(data.get("latest_version") or "").strip()
+                dragon_tag = str(data.get("dragon_tag") or "").strip()
                 if latest:
                     state["last_update_check_iso"] = now.isoformat()
                     state["cached_latest_version"] = latest
+                    if dragon_tag:
+                        state["cached_dragon_tag"] = dragon_tag
                     with contextlib.suppress(OSError):
                         save_state(state)
                     if is_newer_version(latest, cur):

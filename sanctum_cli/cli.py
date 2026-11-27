@@ -38,6 +38,9 @@ from sanctum_cli.commands import (
 from sanctum_cli.commands import council as council_cmd
 from sanctum_cli.commands import deadman as deadman_cmd
 from sanctum_cli.commands import devices as devices_cmd
+from sanctum_cli.commands import (
+    dragon as dragon_cmd,
+)
 from sanctum_cli.commands import keychain_cmd as keychain_command
 from sanctum_cli.commands import keys_backup as keys_backup_cmd
 from sanctum_cli.commands import logs as logs_cmd
@@ -53,6 +56,9 @@ from sanctum_cli.commands import update as update_cmd
 from sanctum_cli.commands import upgrade as upgrade_cmd
 from sanctum_cli.commands import vision as vision_cmd
 from sanctum_cli.commands import wizard as wizard_cmd
+from sanctum_cli.commands import (
+    yoda as yoda_cmd,
+)
 from sanctum_cli.commands.link import link_app
 from sanctum_cli.commands.mesh import mesh_app
 from sanctum_cli.commands.module import module_app
@@ -396,12 +402,20 @@ def self_test_top(
     self_test_cmd.self_test_command(json_output=json_output, only=only)
 
 
-@app.command("update", help="brew upgrade sanctum-cli + run self-test as the gate.")
+@app.command(
+    "update",
+    help="Update sanctum-cli (+ installed Dragon & Yoda/Signal) + run self-test gate.",
+)
 def update_top(
     dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
     skip_self_test: Annotated[bool, typer.Option("--skip-self-test")] = False,
+    cli_only: Annotated[
+        bool, typer.Option("--cli-only", help="Only update sanctum-cli (skip Dragon/Yoda).")
+    ] = False,
 ) -> None:
-    update_cmd.update_command(dry_run=dry_run, skip_self_test=skip_self_test)
+    update_cmd.update_command(
+        dry_run=dry_run, skip_self_test=skip_self_test, cli_only=cli_only
+    )
 
 
 @app.command(
@@ -538,6 +552,8 @@ app.add_typer(link_app, name="link")
 app.add_typer(mesh_app, name="mesh")
 app.add_typer(tailnet_app, name="tailnet")
 app.add_typer(hive_cmd.app, name="hive")
+app.add_typer(dragon_cmd.app, name="dragon")
+app.add_typer(yoda_cmd.app, name="yoda")
 
 # The seventh organ — hormone panel + creative-mode lever. Read-only/file-based;
 # adds no behavior to any seat until a seat opts into the receptor.

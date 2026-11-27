@@ -48,8 +48,14 @@ def update_command(
     skip_self_test: Annotated[
         bool, typer.Option("--skip-self-test", help="Don't run self-test after upgrade."),
     ] = False,
+    cli_only: Annotated[
+        bool, typer.Option("--cli-only", help="Only update sanctum-cli (skip Dragon and Yoda/Signal).")
+    ] = False,
 ) -> None:
-    """Pull the latest sanctum-cli + run self-test as the gate."""
+    """Pull the latest sanctum-cli (+ installed Dragon & Yoda/Signal) + self-test gate."""
+    from sanctum_cli.commands import dragon as dragon_cmd
+    from sanctum_cli.commands import yoda as yoda_cmd
+
     console.print()
     console.print(Panel.fit("[bold]sanctum update[/]", border_style="cyan"))
     console.print()
@@ -87,10 +93,29 @@ def update_command(
         else:
             console.print("  upgraded")
 
+    extra_failed = False
+    if not cli_only and dragon_cmd.is_dragon_installed():
+        console.print("[bold]Step 2b.[/] Sanctum Dragon champion + mlx-lm")
+        d_ok, d_msg = dragon_cmd.update_dragon_if_needed(dry_run=dry_run)
+        if d_ok:
+            console.print(f"  {d_msg}")
+        else:
+            console.print(f"  [red]{d_msg}[/]")
+            extra_failed = True
+
+    if not cli_only and yoda_cmd.is_yoda_signal_installed():
+        console.print("[bold]Step 2c.[/] Yoda on Signal (signal-cli + OpenClaw)")
+        y_ok, y_msg = yoda_cmd.update_yoda_if_needed(dry_run=dry_run)
+        if y_ok:
+            console.print(f"  {y_msg}")
+        else:
+            console.print(f"  [red]{y_msg}[/]")
+            extra_failed = True
+
     if skip_self_test:
         console.print()
         console.print("[dim]--skip-self-test: not running the gate. Run `sanctum self-test` manually.[/]")
-        raise typer.Exit(code=0)
+        raise typer.Exit(code=1 if extra_failed else 0)
 
     console.print()
     console.print("[bold]Step 3.[/] sanctum self-test (gate)")
@@ -105,7 +130,8 @@ def update_command(
         console.print(f"  [red]failed to launch self-test ({cmd[0]}):[/] {exc}")
         raise typer.Exit(code=1) from exc
 
-    if proc.returncode == 0:
+    final_rc = 1 if extra_failed else proc.returncode
+    if final_rc == 0:
         console.print(Panel(
             "[bold green]Update complete.[/] Self-test passed.",
             border_style="green",
@@ -115,4 +141,4 @@ def update_command(
             "[bold red]Update applied, but self-test failed.[/] Investigate before relying on the new version.",
             border_style="red",
         ))
-    raise typer.Exit(code=proc.returncode)
+    raise typer.Exit(code=final_rc)
