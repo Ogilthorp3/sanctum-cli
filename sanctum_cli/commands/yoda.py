@@ -17,6 +17,7 @@ import os
 import plistlib
 import re
 import shutil
+import ssl
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
@@ -30,6 +31,7 @@ from rich.prompt import Confirm, Prompt
 from rich.table import Table
 
 from sanctum_cli.commands import dragon as dragon_cmd
+from sanctum_cli.commands import haus_cmd
 
 console = Console()
 app = typer.Typer(
@@ -116,10 +118,17 @@ def _write_launchagent(*, openclaw_bin: str) -> Path:
     log_dir = Path.home() / ".sanctum" / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     plist_path = plist_dir / f"{YODA_PLIST_LABEL}.plist"
+    ca_cert = Path.home() / ".sanctum" / "certs" / "ca.crt"
+    env_vars = {
+        "HOME": str(Path.home()),
+        "PATH": f"{Path.home() / '.sanctum' / 'bin'}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+        "NODE_EXTRA_CA_CERTS": str(ca_cert),
+    }
     payload = {
         "Label": YODA_PLIST_LABEL,
         "RunAtLoad": True,
         "KeepAlive": {"SuccessfulExit": False},
+        "ProcessType": "Standard",
         "ThrottleInterval": 10,
         "ProgramArguments": [
             openclaw_bin,
@@ -129,10 +138,7 @@ def _write_launchagent(*, openclaw_bin: str) -> Path:
         ],
         "StandardOutPath": str(log_dir / "yoda-signal.log"),
         "StandardErrorPath": str(log_dir / "yoda-signal.log"),
-        "EnvironmentVariables": {
-            "HOME": str(Path.home()),
-            "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
-        },
+        "EnvironmentVariables": env_vars,
     }
     with plist_path.open("wb") as fh:
         plistlib.dump(payload, fh)
@@ -201,7 +207,7 @@ def update_yoda_if_needed(*, dry_run: bool = False) -> tuple[bool, str]:
     )
 
 
-@app.command("setup", help="Guided setup for Yoda on Signal (signal-cli + OpenClaw + Dragon/Claude).")
+@app.command("setup", help="Guided setup for Yoda on Signal (signal-cli + OpenClaw + Rust proxyd/sanctum-mlx).")
 def yoda_setup(
     bot_number: Annotated[
         str | None,
@@ -213,8 +219,8 @@ def yoda_setup(
     ] = "qr",
     backend: Annotated[
         str,
-        typer.Option("--backend", help="Model backend for Yoda: dragon | claude | gemini."),
-    ] = "dragon",
+        typer.Option("--backend", help="Model backend for Yoda: rust (proxyd :4040 → sanctum-mlx) | dragon | claude | gemini."),
+    ] = "rust",
     http_port: Annotated[
         int, typer.Option("--http-port", help="Loopback port for signal-cli HTTP daemon.")
     ] = DEFAULT_SIGNAL_HTTP_PORT,
@@ -278,9 +284,17 @@ def yoda_setup(
     )
     console.print("  [green]✓[/] Runtime dependencies ready")
 
-    # Step 2: Ensure Dragon if chosen
+    # Step 2: Ensure Rust Sanctum engine (or legacy Python Dragon) if chosen
     chosen_backend = backend.strip().lower()
-    if chosen_backend == "dragon" and not dragon_cmd.is_dragon_installed():
+    if chosen_backend == "rust" and not haus_cmd.is_rust_suite_installed() and not haus_cmd.is_operator_haus():
+        if Confirm.ask(
+            "\n  Sanctum Rust engine (proxyd + sanctum-mlx + Presidio) not installed yet. Install now?",
+            default=True,
+        ):
+            haus_cmd.haus_install(tier="auto", dry_run=False)
+        else:
+            console.print("  [dim]Install the Rust engine anytime with `sanctum haus install`.[/]")
+    elif chosen_backend == "dragon" and not dragon_cmd.is_dragon_installed():
         if Confirm.ask("\n  Local Dragon not installed yet. Install Dragon now?", default=True):
             dragon_cmd.dragon_install(tier="auto", dry_run=False)
         else:
@@ -320,7 +334,23 @@ def yoda_setup(
         "--workspace",
         str(ws),
     ]
-    if chosen_backend == "dragon":
+    if chosen_backend == "rust":
+        setup_cmd.extend(
+            [
+                "--custom-provider-id",
+                "sanctum",
+                "--custom-base-url",
+                "https://127.0.0.1:4040/v1",
+                "--custom-model-id",
+                "council-mlx",
+                "--custom-compatibility",
+                "openai",
+                "--custom-api-key",
+                "sanctum-local",
+                "--custom-text-input",
+            ]
+        )
+    elif chosen_backend == "dragon":
         setup_cmd.extend(
             [
                 "--custom-provider-id",
@@ -336,7 +366,11 @@ def yoda_setup(
                 "--custom-text-input",
             ]
         )
-    subprocess.run(setup_cmd, check=False)
+    setup_env = dict(os.environ)
+    ca_cert = Path.home() / ".sanctum" / "certs" / "ca.crt"
+    if ca_cert.is_file():
+        setup_env["NODE_EXTRA_CA_CERTS"] = str(ca_cert)
+    subprocess.run(setup_cmd, env=setup_env, check=False)
     console.print(f"  [green]✓[/] Yoda workspace ready at {ws}")
 
     # Step 4: Signal bot number & pairing
@@ -375,6 +409,7 @@ def yoda_setup(
 
     # Step 5: Wire Signal channel + LaunchAgent
     console.print("\n[bold]Step 4.[/] Wiring OpenClaw Signal channel & macOS LaunchAgent…")
+    signal_cli_bin = shutil.which("signal-cli") or "/opt/homebrew/bin/signal-cli"
     subprocess.run(
         [
             openclaw_bin,
@@ -386,11 +421,14 @@ def yoda_setup(
             "signal",
             "--signal-number",
             e164,
+            "--cli-path",
+            signal_cli_bin,
             "--http-host",
             "127.0.0.1",
             "--http-port",
             str(http_port),
         ],
+        env=setup_env,
         check=False,
     )
 
@@ -421,10 +459,15 @@ def yoda_setup(
         }
     )
 
+    start_hint = (
+        "  1. Verify Rust engine is live: [cyan]sanctum haus status[/]\n"
+        if chosen_backend == "rust"
+        else "  1. Start your local Dragon (if using Dragon): [cyan]sanctum dragon start[/]\n"
+    )
     console.print(
         Panel(
             "[bold green]Yoda on Signal is configured![/]\n\n"
-            "  1. Start your local Dragon (if using Dragon): [cyan]sanctum dragon start[/]\n"
+            f"{start_hint}"
             f"  2. Send a Signal message from your personal phone to [bold]{e164}[/]\n"
             f"  3. Approve the pairing code shown in Signal:\n"
             f"     [cyan]openclaw --profile {YODA_PROFILE} pairing approve signal <CODE>[/]\n"
@@ -435,22 +478,31 @@ def yoda_setup(
     )
 
 
-@app.command("status", help="Show Yoda on Signal runtime status (signal-cli, OpenClaw, Dragon).")
+@app.command("status", help="Show Yoda on Signal runtime status (signal-cli, OpenClaw, Rust proxyd/sanctum-mlx).")
 def yoda_status(
     json_output: Annotated[bool, typer.Option("--json", help="Emit JSON.")] = False,
 ) -> None:
     state = load_yoda_state()
     sig_ver = _cmd_version(["signal-cli", "--version"])
     oc_ver = _cmd_version(["openclaw", "--version"])
+    proxyd_up = haus_cmd.proxyd_health()
+    mlx_up = haus_cmd.mlx_health()
     dragon_up = dragon_cmd._dragon_health() is not None
+    default_backend = (
+        "rust"
+        if (haus_cmd.is_rust_suite_installed() or proxyd_up)
+        else ("dragon" if dragon_cmd.is_dragon_installed() else "unconfigured")
+    )
     info = {
         "installed": bool(state.get("installed")),
         "operator_haus": is_operator_haus(),
         "profile": state.get("profile") or YODA_PROFILE,
-        "backend": state.get("backend") or ("dragon" if dragon_cmd.is_dragon_installed() else "unconfigured"),
+        "backend": state.get("backend") or default_backend,
         "signal_cli": sig_ver,
         "openclaw": oc_ver,
-        "dragon_running": dragon_up,
+        "proxyd_running": proxyd_up,
+        "sanctum_mlx_running": mlx_up,
+        "dragon_running": dragon_up or mlx_up,
         "plist_path": state.get("plist_path"),
     }
     if json_output:
@@ -469,11 +521,14 @@ def yoda_status(
         )
     t.add_row("signal-cli", sig_ver or "[dim]not installed[/]")
     t.add_row("openclaw", oc_ver or "[dim]not installed[/]")
-    t.add_row("dragon (:8787)", "[green]running[/]" if dragon_up else "[dim]stopped[/]")
+    t.add_row("proxyd (:4040 TLS)", "[green]running[/]" if proxyd_up else "[dim]stopped[/]")
+    t.add_row("sanctum-mlx (:1337 mTLS)", "[green]running[/]" if mlx_up else "[dim]stopped[/]")
+    if dragon_up:
+        t.add_row("dragon (:8787 python)", "[green]running[/]")
     console.print(t)
 
 
-@app.command("chat", help="Talk directly to Yoda via your local Sanctum Dragon.")
+@app.command("chat", help="Talk directly to Yoda via Rust proxyd (:4040) or local Dragon (:8787).")
 def yoda_chat(
     message: Annotated[list[str], typer.Argument(help="Message to send to Yoda.")],
     voice: Annotated[bool, typer.Option("--voice", help="Speak the reply aloud with macOS say.")] = False,
@@ -482,19 +537,33 @@ def yoda_chat(
     if not text_in:
         console.print("[red]Message cannot be empty.[/]")
         raise typer.Exit(code=1)
-    if dragon_cmd._dragon_health() is None:
-        console.print("[yellow]Local Dragon server is not running.[/] Start it with `sanctum dragon start`.")
-        raise typer.Exit(code=1)
 
     ws_soul = Path.home() / f".openclaw-{YODA_PROFILE}" / "workspace-yoda" / "SOUL.md"
     soul = ws_soul.read_text(encoding="utf-8") if ws_soul.is_file() else YODA_SOUL_MD
-    url = f"http://127.0.0.1:{dragon_cmd.DEFAULT_DRAGON_PORT}/v1/chat/completions"
+
+    ca_cert = Path.home() / ".sanctum" / "certs" / "ca.crt"
+    if haus_cmd.proxyd_health() and ca_cert.is_file():
+        url = "https://127.0.0.1:4040/v1/chat/completions"
+        model_id = "council-mlx"
+        verify: ssl.SSLContext | bool = ssl.create_default_context(cafile=str(ca_cert))
+    elif dragon_cmd._dragon_health() is not None:
+        url = f"http://127.0.0.1:{dragon_cmd.DEFAULT_DRAGON_PORT}/v1/chat/completions"
+        model_id = "sanctum-dragon"
+        verify = True
+    else:
+        console.print(
+            "[yellow]No local Sanctum engine running.[/] "
+            "Start with `sanctum haus start` (or `sanctum dragon start`)."
+        )
+        raise typer.Exit(code=1)
+
     try:
-        with httpx.Client(timeout=300.0) as client:
+        with httpx.Client(timeout=300.0, verify=verify) as client:
             r = client.post(
                 url,
+                headers={"Authorization": "Bearer sanctum-local"},
                 json={
-                    "model": "sanctum-dragon",
+                    "model": model_id,
                     "messages": [
                         {"role": "system", "content": soul},
                         {"role": "user", "content": text_in},
@@ -504,7 +573,7 @@ def yoda_chat(
             r.raise_for_status()
             reply = str(r.json()["choices"][0]["message"]["content"]).strip()
     except Exception as exc:
-        console.print(f"[red]Dragon request failed:[/] {exc}")
+        console.print(f"[red]Yoda request failed:[/] {exc}")
         raise typer.Exit(code=1) from exc
 
     console.print(reply)

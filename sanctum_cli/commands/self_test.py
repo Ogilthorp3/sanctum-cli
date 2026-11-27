@@ -257,11 +257,25 @@ def probe_yoda_cathedral() -> ProbeResult:
     return ProbeResult(ok, "TLS port reachable" if ok else "no response on :1337")
 
 
+def _is_user_rust_hub() -> bool:
+    """True when provisioned via ``sanctum haus install`` (user-domain LaunchAgents)."""
+    return (Path.home() / ".sanctum/state/rust-suite.json").is_file()
+
+
 def probe_coder_cathedral() -> ProbeResult:
-    """Codestral coder cathedral listens on :3301 — it replaced the retired
-    coder-14b on :1338 (booted out 2026-06-07, :1338 freed)."""
+    """Coder cathedral listens on :3301 (n/a on <60 GB single-cathedral Rust hubs)."""
     ok = _tcp_reachable("127.0.0.1", 3301, 1.5)
-    return ProbeResult(ok, "port reachable" if ok else "no response on :3301")
+    if ok:
+        return ProbeResult(True, "port reachable")
+    if _is_user_rust_hub() and not (
+        Path.home() / "Library/LaunchAgents/haus.sanctum.mlx-coder.plist"
+    ).is_file():
+        return ProbeResult(
+            True,
+            not_applicable=True,
+            reason="single-cathedral tier (<60 GB RAM): coder runs on primary :1337",
+        )
+    return ProbeResult(False, "no response on :3301")
 
 
 def probe_proxyd() -> ProbeResult:
@@ -335,6 +349,12 @@ def probe_tcc_grants() -> ProbeResult:
     """13 TCC grants for /usr/local/bin/node landed via sanctum-grant-tcc.sh."""
     tcc_db = Path.home() / "Library/Application Support/com.apple.TCC/TCC.db"
     if not tcc_db.is_file():
+        if _is_user_rust_hub():
+            return ProbeResult(
+                True,
+                not_applicable=True,
+                reason="optional TCC grants not configured (only needed for Messages/Calendar bridges)",
+            )
         return ProbeResult(False, "TCC.db not found")
     try:
         conn = sqlite3.connect(f"file:{tcc_db}?mode=ro", uri=True, timeout=2.0)
@@ -347,6 +367,12 @@ def probe_tcc_grants() -> ProbeResult:
         conn.close()
         if count >= 13:
             return ProbeResult(True, f"{count}/13+ grants")
+        if _is_user_rust_hub() and count == 0:
+            return ProbeResult(
+                True,
+                not_applicable=True,
+                reason="optional TCC grants not configured (only needed for Messages/Calendar bridges)",
+            )
         if count > 0:
             return ProbeResult(
                 False,
@@ -357,6 +383,12 @@ def probe_tcc_grants() -> ProbeResult:
             "no grants for /usr/local/bin/node — run ~/.sanctum/scripts/sanctum-grant-tcc.sh",
         )
     except sqlite3.Error as e:
+        if _is_user_rust_hub():
+            return ProbeResult(
+                True,
+                not_applicable=True,
+                reason="TCC.db requires Full Disk Access (optional for user Rust hub)",
+            )
         return ProbeResult(False, f"TCC.db read failed: {e} (needs FDA on Terminal)")
 
 
@@ -710,6 +742,13 @@ def probe_service_user_wave1() -> ProbeResult:
     Haus-tier only. Family Pass / CLI-only installs return n/a via ``_haus_only``.
     """
     from sanctum_cli import service_user as su
+
+    if _is_user_rust_hub() and not Path("/Library/LaunchDaemons/haus.sanctum.proxyd.plist").is_file():
+        return ProbeResult(
+            True,
+            not_applicable=True,
+            reason="user LaunchAgents active (optional root hardening: sanctum service-user install)",
+        )
 
     report = su.check_wave1()
     if not report.applicable:

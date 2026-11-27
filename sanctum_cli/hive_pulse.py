@@ -115,6 +115,8 @@ def detect_active_modules() -> list[str]:
         modules.append("proxyd")
     if (sanctum_dir / "bin" / "sanctum-mlx").is_file():
         modules.append("mlx")
+    if (sanctum_dir / "state" / "rust-suite.json").is_file():
+        modules.append("rust-suite")
     if (sanctum_dir / "dragon" / "manifest.json").is_file():
         modules.append("dragon")
     if (
@@ -316,11 +318,14 @@ def maybe_check_update(
                 data = r.json()
                 latest = str(data.get("latest_version") or "").strip()
                 dragon_tag = str(data.get("dragon_tag") or "").strip()
+                rust_tag = str(data.get("rust_tag") or "").strip()
                 if latest:
                     state["last_update_check_iso"] = now.isoformat()
                     state["cached_latest_version"] = latest
                     if dragon_tag:
                         state["cached_dragon_tag"] = dragon_tag
+                    if rust_tag:
+                        state["cached_rust_tag"] = rust_tag
                     with contextlib.suppress(OSError):
                         save_state(state)
                     if is_newer_version(latest, cur):

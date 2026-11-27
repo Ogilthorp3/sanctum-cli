@@ -430,6 +430,15 @@ def status_command(*, json_output: bool, oneline: bool) -> None:
             if newer:
                 notes.append(f"CLI v{newer}")
             state = hive_pulse.load_state()
+            cached_rust = str(state.get("cached_rust_tag") or "").strip()
+            rust_state_file = Path.home() / ".sanctum" / "state" / "rust-suite.json"
+            if cached_rust and rust_state_file.is_file():
+                try:
+                    cur_r = str(json.loads(rust_state_file.read_text(encoding="utf-8")).get("release_tag") or "")
+                    if cur_r and cur_r != cached_rust:
+                        notes.append(f"Rust suite {cached_rust}")
+                except (OSError, json.JSONDecodeError):
+                    pass
             cached_dragon = str(state.get("cached_dragon_tag") or "").strip()
             dragon_mf_path = Path.home() / ".sanctum" / "dragon" / "manifest.json"
             if cached_dragon and dragon_mf_path.is_file():

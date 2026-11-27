@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.3] - 2026-11-26
+
+### Added
+
+- `sanctum haus install | status | start | stop | update | heartbeat`: full hub-parity installer for a virgin Apple Silicon Mac — deploys all 32 Apple Developer-ID signed `sanctum-rs` Rust binaries + `mlx.metallib` + `refusal_dirs_38_v2.safetensors` (`rust-v1.0.3`, zero Homebrew dylibs), mints unique per-machine mTLS PKI (`~/.sanctum/certs/`) + local IPC tokens + Keychain `sanctum-proxy-client`, initializes Memory Vault (`~/.sanctum/memory/`, `:18097`) + cathedral KV prewarm + ablation vectors (`:6669`), downloads Qwen3.8-27B + `dragon-2` champion LoRA (`qwen-haus-dragon-193d2d7407ec`) + secondary Coder 9B cathedral (`:3301` on 64 GB+ Macs, or 9B single cathedral on 16 GB), writes portable `proxyd`, Castellan `capacity.yaml`, `msg-bus`, and `instance.yaml` (`role: hub`) configs, and installs up to 16 auto-starting macOS LaunchAgents (`sanctum-presidio`, `sanctum-memory`, `sanctum-mlx`, `sanctum-mlx-coder`, `proxyd`, `sanctum-force-flow`, `sanctum-msg-bus`, `sanctum-chitti`, `sanctum-thalamus`, `sanctum-triage`, `sanctum-pressure-valve`, `sanctumd`, `castellan`, `sanctum-chi`, `endocrine-gland`, `r2d2`).
+- `sanctum yoda setup` and `sanctum yoda chat` now default to the native Rust engine (`https://127.0.0.1:4040/v1` via `proxyd` → `sanctum-presidio` → `sanctum-mlx` mTLS `:1337`), injecting `NODE_EXTRA_CA_CERTS=~/.sanctum/certs/ca.crt` and `--cli-path` for `signal-cli`, with automatic fallback to standalone Python Dragon (`--backend dragon`).
+- `sanctum dragon install` now defaults to the Rust `sanctum-mlx` runtime (`sanctum haus install`), keeping `--runtime python` available for standalone `mlx-lm` installs.
+- Unified `sanctum update` now upgrades `sanctum-cli`, the `sanctum-rs` Rust engine suite (`rust-*`), Dragon champion adapters (`dragon-*`), and Yoda/Signal in one self-tested command.
+
 ## [1.0.2] - 2026-11-26
 
 ### Added

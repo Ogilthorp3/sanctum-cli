@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 
 from sanctum_cli.cli import app
 from sanctum_cli.commands import dragon as dragon_cmd
+from sanctum_cli.commands import haus_cmd
 from sanctum_cli.commands import update as update_cmd
 from sanctum_cli.commands import yoda as yoda_cmd
 
@@ -157,6 +158,8 @@ def test_yoda_status_json(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> No
     monkeypatch.setattr(yoda_cmd, "is_operator_haus", lambda: False)
     monkeypatch.setattr(yoda_cmd, "_cmd_version", lambda cmd: "0.14.10" if cmd[0] == "signal-cli" else "2026.11.10")
     monkeypatch.setattr(dragon_cmd, "_dragon_health", lambda port=8787: None)
+    monkeypatch.setattr(haus_cmd, "proxyd_health", lambda: False)
+    monkeypatch.setattr(haus_cmd, "mlx_health", lambda: False)
 
     res = runner.invoke(app, ["yoda", "status", "--json"])
     assert res.exit_code == 0, res.output
@@ -164,6 +167,8 @@ def test_yoda_status_json(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> No
     assert data["installed"] is False
     assert data["signal_cli"] == "0.14.10"
     assert data["openclaw"] == "2026.11.10"
+    assert data["proxyd_running"] is False
+    assert data["sanctum_mlx_running"] is False
 
 
 def test_unified_update_runs_dragon_and_yoda_when_installed(

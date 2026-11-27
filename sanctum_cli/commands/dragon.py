@@ -296,6 +296,7 @@ def update_dragon_if_needed(
         )
 
     was_running = _dragon_health() is not None
+    is_rust_runtime = mf.get("runtime") == "sanctum-mlx-rust"
     try:
         target = dragon_dir()
         actual_sha = cur_sha
@@ -306,7 +307,15 @@ def update_dragon_if_needed(
                 target,
                 transport=transport,
             )
-        if needs_mlx:
+            if is_rust_runtime and mf.get("adapter_dir"):
+                src_ad = target / "adapter"
+                dst_ad = Path(str(mf["adapter_dir"]))
+                if src_ad.is_dir():
+                    dst_ad.parent.mkdir(parents=True, exist_ok=True)
+                    if dst_ad.exists():
+                        shutil.rmtree(dst_ad)
+                    shutil.copytree(src_ad, dst_ad)
+        if needs_mlx and not is_rust_runtime:
             _ensure_venv(target, latest["mlx_lm_version"])
 
         mf.update(
@@ -319,6 +328,14 @@ def update_dragon_if_needed(
             }
         )
         save_manifest(mf)
+        if is_rust_runtime:
+            uid = os.getuid()
+            subprocess.run(
+                ["launchctl", "kickstart", "-k", f"gui/{uid}/haus.sanctum.mlx"],
+                capture_output=True,
+                check=False,
+            )
+            return True, f"upgraded {cur_tag} -> {latest['dragon_tag']} (Rust sanctum-mlx restarted)"
         if was_running:
             _stop_server_process()
             return (
@@ -331,15 +348,24 @@ def update_dragon_if_needed(
         return False, f"failed: {exc}"
 
 
-@app.command("install", help="Install the latest local Sanctum Dragon (27B champion on 32GB+, 9B on 16GB).")
+@app.command("install", help="Install the latest local Sanctum Dragon (Rust sanctum-mlx default, or --runtime python).")
 def dragon_install(
     tier: Annotated[
         str, typer.Option("--tier", help="Model tier: auto | 27b | 9b.")
     ] = "auto",
+    runtime: Annotated[
+        str, typer.Option("--runtime", help="Inference runtime: rust (full sanctum-rs suite) | python (mlx-lm venv).")
+    ] = "rust",
     dry_run: Annotated[
         bool, typer.Option("--dry-run", help="Show plan without downloading or installing.")
     ] = False,
 ) -> None:
+    if runtime.strip().lower() == "rust":
+        from sanctum_cli.commands import haus_cmd
+
+        haus_cmd.haus_install(tier=tier, dry_run=dry_run)
+        return
+
     if platform.system() != "Darwin" or platform.machine() != "arm64":
         console.print("[red]The Sanctum Dragon requires an Apple Silicon Mac (M1/M2/M3/M4).[/]")
         raise typer.Exit(code=1)
@@ -524,23 +550,28 @@ def dragon_status(
     json_output: Annotated[bool, typer.Option("--json", help="Emit JSON.")] = False,
     port: Annotated[int, typer.Option("--port", help="Loopback port.")] = DEFAULT_DRAGON_PORT,
 ) -> None:
+    from sanctum_cli.commands import haus_cmd
+
     mf = load_manifest()
     health = _dragon_health(port)
+    rust_mlx_up = haus_cmd.mlx_health()
     latest = fetch_latest_dragon_release()
     update_available = bool(mf) and (
         mf.get("release_tag") != latest["dragon_tag"]
-        or mf.get("mlx_lm_version") != latest["mlx_lm_version"]
+        or (mf.get("runtime") != "sanctum-mlx-rust" and mf.get("mlx_lm_version") != latest["mlx_lm_version"])
     )
     info = {
-        "installed": bool(mf),
+        "installed": bool(mf) or haus_cmd.is_rust_suite_installed(),
+        "runtime": mf.get("runtime") or ("sanctum-mlx-rust" if rust_mlx_up else "python-mlx-lm"),
         "dir": str(dragon_dir()),
         "release_tag": mf.get("release_tag"),
         "champion_id": mf.get("champion_id"),
         "tier": mf.get("tier"),
         "model_id": mf.get("model_id"),
         "mlx_lm_version": mf.get("mlx_lm_version"),
-        "server_running": health is not None,
-        "server_url": f"http://127.0.0.1:{port}/v1",
+        "rust_mlx_running": rust_mlx_up,
+        "server_running": (health is not None) or rust_mlx_up,
+        "server_url": "https://127.0.0.1:4040/v1" if rust_mlx_up else f"http://127.0.0.1:{port}/v1",
         "latest_tag": latest["dragon_tag"],
         "latest_mlx_lm": latest["mlx_lm_version"],
         "update_available": update_available,
@@ -552,18 +583,20 @@ def dragon_status(
     t = Table(title="Sanctum Dragon", show_header=False, box=None, pad_edge=False)
     t.add_column(style="bold cyan")
     t.add_column()
-    t.add_row("installed", "[green]yes[/]" if info["installed"] else "[dim]no (run `sanctum dragon install`)[/]")
-    if info["installed"]:
+    t.add_row("installed", "[green]yes[/]" if info["installed"] else "[dim]no (run `sanctum haus install`)[/]")
+    t.add_row("runtime", str(info["runtime"]))
+    if mf:
         t.add_row("release", f"{info['release_tag']} ({info['champion_id']})")
         t.add_row("tier / model", f"{info['tier']} · {info['model_id']}")
-        t.add_row("mlx-lm", str(info["mlx_lm_version"]))
     t.add_row(
-        "server",
-        f"[green]running[/] ({info['server_url']})" if info["server_running"] else "[dim]stopped[/]",
+        "sanctum-mlx (:1337)",
+        "[green]running (mTLS Rust)[/]" if rust_mlx_up else "[dim]stopped[/]",
     )
+    if health is not None:
+        t.add_row("python (:8787)", f"[green]running[/] (http://127.0.0.1:{port}/v1)")
     t.add_row(
         "latest",
-        f"{info['latest_tag']} · mlx-lm {info['latest_mlx_lm']}"
+        f"{info['latest_tag']}"
         + (" [yellow](update available — run `sanctum update`)[/]" if update_available else " [green](current)[/]"),
     )
     console.print(t)

@@ -52,8 +52,9 @@ def update_command(
         bool, typer.Option("--cli-only", help="Only update sanctum-cli (skip Dragon and Yoda/Signal).")
     ] = False,
 ) -> None:
-    """Pull the latest sanctum-cli (+ installed Dragon & Yoda/Signal) + self-test gate."""
+    """Pull the latest sanctum-cli (+ installed Rust suite, Dragon & Yoda/Signal) + self-test gate."""
     from sanctum_cli.commands import dragon as dragon_cmd
+    from sanctum_cli.commands import haus_cmd
     from sanctum_cli.commands import yoda as yoda_cmd
 
     console.print()
@@ -94,6 +95,15 @@ def update_command(
             console.print("  upgraded")
 
     extra_failed = False
+    if not cli_only and haus_cmd.is_rust_suite_installed():
+        console.print("[bold]Step 2a.[/] Sanctum Rust Engine suite (sanctum-rs)")
+        r_ok, r_msg = haus_cmd.update_rust_suite_if_needed(dry_run=dry_run)
+        if r_ok:
+            console.print(f"  {r_msg}")
+        else:
+            console.print(f"  [red]{r_msg}[/]")
+            extra_failed = True
+
     if not cli_only and dragon_cmd.is_dragon_installed():
         console.print("[bold]Step 2b.[/] Sanctum Dragon champion + mlx-lm")
         d_ok, d_msg = dragon_cmd.update_dragon_if_needed(dry_run=dry_run)

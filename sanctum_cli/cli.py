@@ -29,6 +29,7 @@ from sanctum_cli.commands import (
     config_cmd,
     doctor,
     endocrine_cmd,
+    haus_cmd,
     hive_cmd,
     init_cmd,
     service_user_cmd,
@@ -404,13 +405,13 @@ def self_test_top(
 
 @app.command(
     "update",
-    help="Update sanctum-cli (+ installed Dragon & Yoda/Signal) + run self-test gate.",
+    help="Update sanctum-cli (+ installed Rust suite, Dragon & Yoda/Signal) + run self-test gate.",
 )
 def update_top(
     dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
     skip_self_test: Annotated[bool, typer.Option("--skip-self-test")] = False,
     cli_only: Annotated[
-        bool, typer.Option("--cli-only", help="Only update sanctum-cli (skip Dragon/Yoda).")
+        bool, typer.Option("--cli-only", help="Only update sanctum-cli (skip Rust suite/Dragon/Yoda).")
     ] = False,
 ) -> None:
     update_cmd.update_command(
@@ -552,6 +553,7 @@ app.add_typer(link_app, name="link")
 app.add_typer(mesh_app, name="mesh")
 app.add_typer(tailnet_app, name="tailnet")
 app.add_typer(hive_cmd.app, name="hive")
+app.add_typer(haus_cmd.app, name="haus")
 app.add_typer(dragon_cmd.app, name="dragon")
 app.add_typer(yoda_cmd.app, name="yoda")
 
