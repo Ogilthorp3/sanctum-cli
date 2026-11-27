@@ -53,12 +53,12 @@ app = typer.Typer(
 )
 
 ENV_RUST_STATE = "SANCTUM_RUST_STATE"
-DEFAULT_RUST_TAG = "rust-v1.0.3"
+DEFAULT_RUST_TAG = "rust-v1.0.4"
 DEFAULT_RUST_URL = (
     "https://github.com/Ogilthorp3/homebrew-sanctum/releases/download/"
-    "rust-v1.0.3/sanctum-rust-suite-arm64.tar.gz"
+    "rust-v1.0.4/sanctum-rust-suite-arm64.tar.gz"
 )
-DEFAULT_RUST_SHA256 = "8c1bd11514762f401444d78d9c4723023607ca7f7ac1f132eb0b0c258bc2639e"
+DEFAULT_RUST_SHA256 = "be281c45a02810b3ffa07052fe8e90f3e542941e9a811b8693b6b3acea1740a8"
 
 CATHEDRAL_PREWARM_TXT = (
     "<|im_start|>system\n"
