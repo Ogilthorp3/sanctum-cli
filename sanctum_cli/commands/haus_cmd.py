@@ -390,6 +390,47 @@ def ensure_local_tokens(secrets_dir: Path, *, sync_keychain: bool = False) -> No
                 )
 
 
+SANCTUM_FONT_CASKS: tuple[str, ...] = (
+    "font-bricolage-grotesque",
+    "font-instrument-sans",
+    "font-ibm-plex-mono",
+)
+
+
+def ensure_sanctum_fonts(*, fonts_dir: Path | None = None) -> tuple[bool, str]:
+    """Best-effort install of the 3 SIL OFL 1.1 Sanctum fonts locally via Homebrew."""
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return False, "skipped in pytest"
+    fdir = fonts_dir or (Path.home() / "Library" / "Fonts")
+    if fdir.is_dir():
+        existing = {p.name.lower() for p in fdir.iterdir()}
+        has_all = (
+            any("bricolage" in n for n in existing)
+            and any("instrumentsans" in n or "instrument-sans" in n for n in existing)
+            and any("ibmplexmono" in n or "ibm-plex-mono" in n for n in existing)
+        )
+        if has_all:
+            return True, "already installed"
+    brew = shutil.which("brew")
+    if not brew:
+        return False, "brew not found"
+    env = {**os.environ, "HOMEBREW_NO_ASK": "1", "HOMEBREW_NO_AUTO_UPDATE": "1"}
+    try:
+        r = subprocess.run(
+            [brew, "install", "--cask", *SANCTUM_FONT_CASKS],
+            capture_output=True,
+            text=True,
+            timeout=180,
+            env=env,
+            check=False,
+        )
+        if r.returncode == 0:
+            return True, "installed via Homebrew"
+        return False, (r.stderr or r.stdout or f"exit {r.returncode}").strip()[:120]
+    except Exception as exc:
+        return False, str(exc)[:120]
+
+
 def ensure_hub_support_files(root: Path) -> tuple[Path, Path | None]:
     """Initialize Memory Vault, cathedral prewarm, ablation vectors, .node_id, and boot-ready."""
     # 1. Memory Vault directory tree
@@ -1369,6 +1410,17 @@ def haus_install(
         specs, agents_dir=home / "Library" / "LaunchAgents", boot=not skip_boot
     )
     console.print(f"  [green]✓[/] Installed {len(written)} LaunchAgents")
+
+    fonts_ok, fonts_msg = ensure_sanctum_fonts()
+    if fonts_ok:
+        console.print(
+            f"  [green]✓[/] Sanctum typography ready (Bricolage Grotesque, Instrument Sans, IBM Plex Mono — {fonts_msg})"
+        )
+    else:
+        console.print(
+            f"  [dim]Fonts skipped ({fonts_msg}) — install anytime: "
+            f"brew install --cask {' '.join(SANCTUM_FONT_CASKS)}[/]"
+        )
 
     save_rust_state(
         {

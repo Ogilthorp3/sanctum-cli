@@ -165,21 +165,28 @@ def render_dashboard_html(*, csrf_token: str) -> str:
   :root {{
     --bg: #0b0d13; --card: #131722; --border: rgba(212,149,46,0.26);
     --amber: #f3c26b; --green: #34d399; --red: #f87171; --text: #f3f4f6; --muted: #9ca3af;
+    --f-display: "Bricolage Grotesque", "Arial Narrow", system-ui, sans-serif;
+    --f-body: "Instrument Sans", -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+    --f-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
   }}
   * {{ box-sizing: border-box; }}
   body {{
-    margin: 0; font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+    margin: 0; font-family: var(--f-body);
     background: var(--bg); color: var(--text); line-height: 1.45;
+    -webkit-font-smoothing: antialiased;
   }}
   .wrap {{ max-width: 1100px; margin: 0 auto; padding: 1.5rem; }}
   header {{
     display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
     gap: 1rem; padding-bottom: 1rem; border-bottom: 1px solid rgba(255,255,255,0.08);
   }}
-  .brand {{ display: flex; align-items: center; gap: 0.7rem; font-weight: 700; font-size: 1.15rem; }}
+  .brand {{
+    display: flex; align-items: center; gap: 0.7rem; font-family: var(--f-display);
+    font-weight: 700; font-size: 1.25rem; letter-spacing: -0.02em;
+  }}
   .diamond {{ color: var(--amber); font-size: 1.4rem; }}
   .pill {{
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.75rem;
+    font-family: var(--f-mono); font-size: 0.75rem;
     padding: 0.25rem 0.65rem; border-radius: 999px; border: 1px solid var(--border);
     background: rgba(212,149,46,0.12); color: var(--amber);
   }}
@@ -189,14 +196,14 @@ def render_dashboard_html(*, csrf_token: str) -> str:
     padding: 1.1rem 1.2rem;
   }}
   .card h2 {{
-    margin: 0 0 0.75rem; font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.08em;
-    color: var(--amber); font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    margin: 0 0 0.75rem; font-size: 0.92rem; text-transform: uppercase; letter-spacing: 0.06em;
+    color: var(--amber); font-family: var(--f-display); font-weight: 700;
   }}
   .svc-list {{ display: grid; grid-template-columns: 1fr 1fr; gap: 0.45rem; }}
   .svc {{
     display: flex; align-items: center; justify-content: space-between;
     background: rgba(255,255,255,0.03); padding: 0.4rem 0.6rem; border-radius: 8px;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.74rem;
+    font-family: var(--f-mono); font-size: 0.74rem;
   }}
   .dot {{ width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 0.4rem; }}
   .up {{ background: var(--green); box-shadow: 0 0 6px var(--green); }}
@@ -218,7 +225,7 @@ def render_dashboard_html(*, csrf_token: str) -> str:
   button:hover {{ background: rgba(212,149,46,0.32); }}
   pre {{
     white-space: pre-wrap; background: #090b10; padding: 0.85rem; border-radius: 10px;
-    border: 1px solid rgba(255,255,255,0.07); font-size: 0.84rem; max-height: 280px; overflow: auto;
+    border: 1px solid rgba(255,255,255,0.07); font-family: var(--f-mono); font-size: 0.82rem; max-height: 280px; overflow: auto;
   }}
   .actions {{ display: flex; gap: 0.6rem; flex-wrap: wrap; margin-top: 0.8rem; }}
   .btn-link {{
@@ -228,7 +235,7 @@ def render_dashboard_html(*, csrf_token: str) -> str:
   }}
   .btn-link:hover {{ background: rgba(245,196,81,0.28); }}
   .seal-pill {{
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.72rem; font-weight: 700;
+    font-family: var(--f-mono); font-size: 0.72rem; font-weight: 700;
     padding: 0.25rem 0.65rem; border-radius: 999px;
     border: 1px solid rgba(245,196,81,0.65); background: rgba(245,196,81,0.16); color: #f5c451;
     box-shadow: 0 0 14px rgba(245,196,81,0.18);

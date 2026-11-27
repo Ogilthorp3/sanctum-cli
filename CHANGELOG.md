@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.6] - 2026-11-26
+
+### Added
+
+- **Unified Sovereign Typography (`Bricolage Grotesque` + `Instrument Sans` + `IBM Plex Mono`, SIL OFL 1.1, 100% local / zero CDN)**:
+  - `sanctum ui` (`127.0.0.1:1119`) and local Sovereign Seal SVG crests (`~/.sanctum/seals/sovereign-seal.svg`) now render in the unified Sanctum type stack (`Bricolage Grotesque` display, `Instrument Sans` body, `IBM Plex Mono` telemetry/code).
+  - `sanctum haus install` automatically installs the three open-source font casks locally via Homebrew (`font-bricolage-grotesque`, `font-instrument-sans`, `font-ibm-plex-mono`) so every Sanctum node gets matching local typography with zero cloud requests.
+- **Apple Notarized Rust Engine Suite (`rust-v1.0.3`, Apple Notary `Accepted`)**: all 32 Developer-ID signed `sanctum-rs` binaries are notarized with Apple's cloud notary service so macOS Gatekeeper accepts them cleanly with zero quarantine warning on fresh Macs.
+
 ## [1.0.5] - 2026-11-26
 
 ### Added

@@ -114,13 +114,13 @@ def render_seal_svg(
         '    <polygon points="0,-38 30,0 0,38 -30,0" fill="none" stroke="url(#gold)" stroke-width="2.5"/>\n'
         '    <polygon points="0,-20 16,0 0,20 -16,0" fill="url(#gold)" opacity="0.9"/>\n'
         "  </g>\n"
-        f'  <text x="320" y="156" text-anchor="middle" fill="{accent}" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="13" font-weight="700" letter-spacing="3.5">{badge} · SANCTUM HIVE</text>\n'
-        f'  <text x="320" y="194" text-anchor="middle" fill="#f9fafb" font-family="-apple-system,BlinkMacSystemFont,sans-serif" font-size="24" font-weight="700">{title}</text>\n'
-        f'  <text x="320" y="224" text-anchor="middle" fill="#9ca3af" font-family="-apple-system,BlinkMacSystemFont,sans-serif" font-size="13">{motto}</text>\n'
+        f'  <text x="320" y="156" text-anchor="middle" fill="{accent}" font-family="IBM Plex Mono,ui-monospace,SFMono-Regular,Menlo,monospace" font-size="13" font-weight="600" letter-spacing="3.5">{badge} · SANCTUM HIVE</text>\n'
+        f'  <text x="320" y="194" text-anchor="middle" fill="#f9fafb" font-family="Bricolage Grotesque,-apple-system,BlinkMacSystemFont,sans-serif" font-size="25" font-weight="700">{title}</text>\n'
+        f'  <text x="320" y="224" text-anchor="middle" fill="#9ca3af" font-family="Instrument Sans,-apple-system,BlinkMacSystemFont,sans-serif" font-size="13">{motto}</text>\n'
         '  <line x1="88" y1="252" x2="552" y2="252" stroke="#ffffff" stroke-opacity="0.12" stroke-width="1"/>\n'
-        f'  <text x="320" y="282" text-anchor="middle" fill="#e5e7eb" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="12">{hw_line}</text>\n'
-        f'  <text x="320" y="308" text-anchor="middle" fill="#9ca3af" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11">MINTED {minted}  ·  SEAL HASH {pub_hash}  ·  ZERO PII</text>\n'
-        '  <text x="320" y="330" text-anchor="middle" fill="#6b7280" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="10" letter-spacing="2">LOCAL SILICON · ZERO CLOUD LEASH · SANCTUM.RUN</text>\n'
+        f'  <text x="320" y="282" text-anchor="middle" fill="#e5e7eb" font-family="IBM Plex Mono,ui-monospace,SFMono-Regular,Menlo,monospace" font-size="12">{hw_line}</text>\n'
+        f'  <text x="320" y="308" text-anchor="middle" fill="#9ca3af" font-family="IBM Plex Mono,ui-monospace,SFMono-Regular,Menlo,monospace" font-size="11">MINTED {minted}  ·  SEAL HASH {pub_hash}  ·  ZERO PII</text>\n'
+        '  <text x="320" y="330" text-anchor="middle" fill="#6b7280" font-family="IBM Plex Mono,ui-monospace,SFMono-Regular,Menlo,monospace" font-size="10" letter-spacing="2">LOCAL SILICON · ZERO CLOUD LEASH · SANCTUM.RUN</text>\n'
         "</svg>\n"
     )
 
