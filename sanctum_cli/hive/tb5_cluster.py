@@ -820,13 +820,22 @@ def stop_tb5_cluster(*, unpark_local: bool = True) -> dict[str, Any]:
     killed = False
     if pid > 0:
         try:
-            os.kill(pid, signal.SIGTERM)
+            os.killpg(os.getpgid(pid), signal.SIGTERM)
             killed = True
         except OSError:
-            pass
+            try:
+                os.kill(pid, signal.SIGTERM)
+                killed = True
+            except OSError:
+                pass
 
     peer_host = str(state.get("peer_host") or DEFAULT_TB5_PEER_HOST)
     port = int(state.get("port") or DEFAULT_CLUSTER_PORT)
+    subprocess.run(
+        ["pkill", "-f", f"mlx_lm\\.server.*--port {port}"],
+        capture_output=True,
+        check=False,
+    )
     subprocess.run(
         [
             "ssh",
