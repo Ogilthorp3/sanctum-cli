@@ -221,6 +221,7 @@ def tb5_up(
         plan.backend.value,
         "--hostfile",
         str(hf_path),
+        "--",
         str(server_bin),
         "--model",
         model,
@@ -281,6 +282,9 @@ def tb5_up(
             except httpx.HTTPError:
                 pass
             time.sleep(2.0)
+        if proc.poll() is not None and parked:
+            unpark_local_mlx_services(parked)
+            parked = []
     except Exception:
         if parked:
             unpark_local_mlx_services(parked)
