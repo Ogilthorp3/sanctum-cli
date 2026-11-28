@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import signal
 import socket
 import subprocess
@@ -561,7 +562,15 @@ def probe_tb5_tcp(
             f"s.sendall(b'TB5_REV'); print(s.recv(16).decode()); s.close()"
         )
         cli = subprocess.run(
-            ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", peer_host, "python3", "-c", client_code],
+            [
+                "ssh",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=5",
+                peer_host,
+                f"python3 -c {shlex.quote(client_code)}",
+            ],
             capture_output=True,
             text=True,
             timeout=8,
