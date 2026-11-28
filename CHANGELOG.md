@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.9] - 2026-11-27
+
+### Added
+
+- **Thunderbolt 5 Apple Silicon Cluster Mode (`sanctum hive tb5`)**: pool heterogeneous Thunderbolt 5 Macs (e.g. 64 GB M4 Pro + 128 GB M4 Max = 192 GB unified RAM · ~819 GB/s combined bandwidth) on demand:
+  - `sanctum hive tb5 status [--probe-tcp]`: auto-discovers live `bridge0` link speed (80/120 Gb/s), Apple `/usr/bin/rdma_ctl` (`jaccl` `<10 µs` RDMA vs `ring`), pooled VRAM budget, verified giant-model recommendations (`Qwen3-235B-A22B-4bit`, `Mistral-Large-123B`, `Qwen3-Next-80B`), and bidirectional macOS Application Firewall TCP diagnostics with exact `socketfilterfw` remediation commands.
+  - `sanctum hive tb5 bench`: runs a live 2-Mac GPU `all_sum` 16 KB hop latency and 64 MB bulk bandwidth benchmark across Thunderbolt 5.
+  - `sanctum hive tb5 up` / `down`: plans asymmetric pipeline sharding (`32% / 68%`, ~145 GB usable VRAM) or symmetric 50/50 tensor sharding (`~819 GB/s`), persists atomic cluster state in `~/.sanctum/state/tb5-cluster.json`, safely parks local MLX LaunchAgents (`--park-local-mlx`), and unconditionally restores them on failure or `down`.
+
+### Fixed
+
+- Sanitized operator-specific node names and client certificate filename lookup in `sanctum hive swarm` (`clients/*-cli.crt` glob) so `test_repo_has_no_personal_leaks` stays 100% green for every public beta user.
+
 ## [1.0.8] - 2026-11-27
 
 ### Added

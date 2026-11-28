@@ -14,14 +14,16 @@ from rich.table import Table
 
 from sanctum_cli import hive_pulse
 from sanctum_cli.commands.hive_swarm_cmd import swarm_app
+from sanctum_cli.commands.hive_tb5_cmd import tb5_app
 
 console = Console()
 app = typer.Typer(
     name="hive",
-    help="Opt-in Sovereign Hive counter, Seals, and collective Apple Silicon Compute Grid.",
+    help="Opt-in Sovereign Hive counter, Seals, Compute Grid, and TB5 Cluster Mode.",
     no_args_is_help=True,
 )
 app.add_typer(swarm_app, name="swarm")
+app.add_typer(tb5_app, name="tb5")
 
 
 def _print_seal_panel(seal: dict[str, Any], *, svg_path: str = "") -> None:

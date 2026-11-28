@@ -193,8 +193,8 @@ def test_byzantine_quorum_slashes_liar_and_quarantines_repeat_attacker(tmp_path:
     attacker = _mint(tmp_path, "attacker")
 
     coord = SwarmCoordinator(clock=lambda: now[0])
-    coord.register_worker(node_id="manoir", pubkey=honest_a.pubkey, chip="M4 Pro", memory_gb=64)
-    coord.register_worker(node_id="chalet", pubkey=honest_b.pubkey, chip="M1", memory_gb=16)
+    coord.register_worker(node_id="node-alpha", pubkey=honest_a.pubkey, chip="M4 Pro", memory_gb=64)
+    coord.register_worker(node_id="node-beta", pubkey=honest_b.pubkey, chip="M1", memory_gb=16)
     coord.register_worker(node_id="rogue", pubkey=attacker.pubkey, chip="M2", memory_gb=32)
 
     proj = build_signed_project(
@@ -401,7 +401,7 @@ def test_http_coordinator_end_to_end_and_auth_gate(tmp_path: Path) -> None:
             reg = await client.post(
                 "/workers/register",
                 json={
-                    "node_id": "manoir",
+                    "node_id": "node-alpha",
                     "pubkey": worker_id.pubkey,
                     "chip": "Apple M4 Pro",
                     "memory_gb": 64,

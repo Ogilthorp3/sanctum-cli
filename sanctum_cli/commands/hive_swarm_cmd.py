@@ -412,14 +412,14 @@ def run_swarm_drill(*, live_mlx: bool = False, mlx_url: str = "https://127.0.0.1
 
     with tempfile.TemporaryDirectory(prefix="sanctum-swarm-drill-") as td:
         root = Path(td)
-        creator = ensure_swarm_identity("manoir", identity_dir=root / "creator", signer=signer)
-        node_a = ensure_swarm_identity("manoir-gpu", identity_dir=root / "a", signer=fast_signer)
-        node_b = ensure_swarm_identity("chalet-gpu", identity_dir=root / "b", signer=fast_signer)
+        creator = ensure_swarm_identity("hub-node", identity_dir=root / "creator", signer=signer)
+        node_a = ensure_swarm_identity("hub-gpu", identity_dir=root / "a", signer=fast_signer)
+        node_b = ensure_swarm_identity("satellite-gpu", identity_dir=root / "b", signer=fast_signer)
         attacker = ensure_swarm_identity("rogue-node", identity_dir=root / "evil", signer=fast_signer)
 
         coord = SwarmCoordinator(verifier=signer, trusted_pubkeys=[creator.pubkey, node_a.pubkey])
-        coord.register_worker(node_id="manoir", pubkey=node_a.pubkey, chip="Apple M4 Pro", memory_gb=64)
-        coord.register_worker(node_id="chalet", pubkey=node_b.pubkey, chip="Apple M1", memory_gb=16)
+        coord.register_worker(node_id="hub-gpu", pubkey=node_a.pubkey, chip="Apple M4 Pro", memory_gb=64)
+        coord.register_worker(node_id="satellite-gpu", pubkey=node_b.pubkey, chip="Apple M1", memory_gb=16)
         coord.register_worker(node_id="rogue", pubkey=attacker.pubkey, chip="Unknown", memory_gb=32)
 
         # Gate 1: Zero-RCE guard must block shell injection before a packet is ever signed

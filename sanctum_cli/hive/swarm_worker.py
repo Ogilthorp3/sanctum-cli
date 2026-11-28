@@ -100,13 +100,15 @@ class LocalMlxInferenceBackend:
         if not ca.is_file():
             return True
         ctx = ssl.create_default_context(cafile=str(ca))
-        for cert_name, key_name in (
-            ("clients/bert-cli.crt", "clients/bert-cli.key"),
-            ("client.crt", "client.key"),
-            ("clients/canary.crt", "clients/canary.key"),
-        ):
-            c_path = certs_dir / cert_name
-            k_path = certs_dir / key_name
+        candidates: list[tuple[Path, Path]] = [
+            (certs_dir / "client.crt", certs_dir / "client.key"),
+            (certs_dir / "clients" / "canary.crt", certs_dir / "clients" / "canary.key"),
+        ]
+        clients_dir = certs_dir / "clients"
+        if clients_dir.is_dir():
+            for crt in sorted(clients_dir.glob("*-cli.crt")):
+                candidates.insert(0, (crt, crt.with_suffix(".key")))
+        for c_path, k_path in candidates:
             if c_path.is_file() and k_path.is_file():
                 ctx.load_cert_chain(certfile=str(c_path), keyfile=str(k_path))
                 break
