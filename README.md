@@ -6,7 +6,7 @@ One terminal binary, `sanctum`, that is the unified front door to a Sanctum host
 
 ## Status
 
-**v1.0.7, beta. We're looking for beta users.** Installable from the public
+**v1.0.8, beta. We're looking for beta users.** Installable from the public
 Homebrew tap. A person who isn't the author can go from a fresh Mac to encrypted,
 verified cloud backups in minutes with a single command. Try it and tell us what
 broke or what you missed: [open an issue](https://github.com/Ogilthorp3/sanctum-cli/issues).
@@ -32,6 +32,7 @@ The beta-safe command set runs on any Mac:
 | `sanctum ui` | Local zero-cloud web dashboard (`127.0.0.1:1119`): 12 Rust services, Castellan RAM gauge, `$0` seats, local Dragon/Council chat, Gold Sovereign Seal theme | ✅ |
 | `sanctum bug-report` | Secret- & PII-redacted diagnostic report copied to clipboard + pre-filled GitHub issue | ✅ |
 | `sanctum hive join / seal / leave / stats` | Opt-in zero-PII Hive counter + cryptographic Sovereign Seal (`Seed #1` & `Founding Circle #2–#10`) + local SVG crest | ✅ |
+| `sanctum hive swarm init / serve / submit / work / status / ledger / drill` | Collective Apple Silicon GPU/RAM Compute Grid: PQ `SLH-DSA+Ed25519` signed zero-RCE work packets, Byzantine 3-node quorum, DiLoCo federated LoRA aggregation, and BitTorrent-style reciprocal GPU-second credits | ✅ |
 | `sanctum crypto audit` | Live 4-scenario post-quantum & crypto-apocalypse audit (zero-RSA PKI, `X25519MLKEM768` TLS 1.3, PQ SSH, FIPS 204/205 `ML-DSA` + `SLH-DSA`, S4 PSK & at-rest checks) | ✅ |
 | Sigstore release signing | Keyless OIDC cosign bundles + SLSA build provenance (`release.yml`) | ✅ |
 

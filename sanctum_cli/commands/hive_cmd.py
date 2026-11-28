@@ -13,13 +13,15 @@ from rich.panel import Panel
 from rich.table import Table
 
 from sanctum_cli import hive_pulse
+from sanctum_cli.commands.hive_swarm_cmd import swarm_app
 
 console = Console()
 app = typer.Typer(
     name="hive",
-    help="Opt-in anonymous Sanctum Hive counter (zero IP, zero PII).",
+    help="Opt-in Sovereign Hive counter, Seals, and collective Apple Silicon Compute Grid.",
     no_args_is_help=True,
 )
+app.add_typer(swarm_app, name="swarm")
 
 
 def _print_seal_panel(seal: dict[str, Any], *, svg_path: str = "") -> None:

@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.8] - 2026-11-27
+
+### Added
+
+- **Sanctum Hive Compute Grid (`sanctum hive swarm`)**: collective Apple Silicon GPU & unified RAM collaboration across sovereign Sanctum Hauses with zero remote code execution and zero tokens/coins:
+  - **Zero-RCE payload guard + Trust Zones (`open_hive` vs `trusted_circle`)**: strict per-task allowlists (`inference_map`, `eval_benchmark`, `diloco_step`, `pipeline_stage`), 64 KiB payload caps, recursive execution-key/traversal blocking, and mathematical exclusion of `pipeline_stage` from `open_hive`.
+  - **Post-Quantum composite signatures**: domain-separated `Ed25519 + NIST FIPS 205 SLH-DSA-SHA2-128s` manifests & results with loopback-locked HTTP coordinator (`127.0.0.1:8788`, fail-closed non-loopback bearer auth, designed behind `sanctum-pq-terminator --psk-file`).
+  - **Byzantine quorum & DiLoCo federated LoRA**: multi-node redundant verification (`--redundancy 1..5`) that slashes lying outliers into `probation`, plus low-communication DiLoCo outer-delta aggregation with local improvement gating and `3.0x` trimmed-median L2-norm outlier filtering.
+  - **BitTorrent-style reciprocal compute ledger**: tracks contributed vs. consumed `gpu_seconds`, priority tiers (`vanguard`, `contributor`, `seed`, `probation`), and self-proving `sanctum hive swarm drill --live-mlx` verified live against local `sanctum-mlx :1337`.
+- **Notarized Rust Engine Suite fallback bumped to `rust-v1.0.4`**: includes `sanctum-pq-terminator --psk-file` and `sanctum-vault-armor` v2 GF(256) Shamir symmetric armor.
+
+## [1.0.7] - 2026-11-27
+
+### Added
+
+- **Post-Quantum & Crypto-Apocalypse S1–S4 Hardening**: ECDSA P-384 365-day local PKI minting, `CompositeSlhDsaEd25519Signer` (NIST FIPS 205 `SLH-DSA-SHA2-128s`), and `sanctum crypto audit` 4-scenario survival scorecard.
+
 ## [1.0.6] - 2026-11-26
 
 ### Added
